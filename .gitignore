@@ -1,0 +1,15 @@
+# Original game binaries (copyrighted; never commit)
+/chromatron_mac/
+/chromatron_mac.zip
+
+# Local-only docs (specs, plans)
+/docs/
+
+# Decompiled output of the originals
+/re/out/
+
+# Build output
+/target/
+/dist/
+
+.DS_Store
