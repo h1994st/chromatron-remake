@@ -1,5 +1,6 @@
 //! The clipboard solution text, "Copy Level" / "Paste Level" (platform.md P8, `encode_solution`
-//! @ 0x5914, `decode_solution` @ 0x5ad4). Text only: the pasteboard is the shell's job.
+//! C1 @ 0x5914, C2 @ 0x5c2c; `decode_solution` C1 @ 0x5ad4, C2 @ 0x5dec). Text only: the
+//! pasteboard is the shell's job. Only the game digit differs between games.
 
 use std::cmp::Ordering;
 
@@ -7,8 +8,6 @@ use crate::board::{BOARD_CELLS, Board, CELLS, Cell, VISIBLE_TOOLBOX_SLOTS};
 use crate::bsd_qsort::bsd_qsort;
 use crate::piece::Piece;
 
-/// The game number that starts every solution.
-const GAME_DIGIT: u8 = b'1';
 /// Copy gives up at this many pieces (`2·n + 6 >= 55`).
 const MAX_COPIED_PIECES: usize = 25;
 
@@ -55,8 +54,9 @@ fn base52_value(c: u8) -> Option<usize> {
     }
 }
 
-/// "1-NN-" plus two letters per movable piece (board and toolbox), or `None` with 25 or more
-/// pieces, when the original leaves the clipboard alone. `slot` is 0-based.
+/// "G-NN-" (G = the board's game digit) plus two letters per movable piece (board and toolbox),
+/// or `None` with 25 or more pieces, when the original leaves the clipboard alone. `slot` is
+/// 0-based.
 ///
 /// Boards restored from original saves may hold dir 8 or 9, for which the copied text is not
 /// pasteable (faithful to the original).
@@ -65,7 +65,8 @@ pub fn encode_solution(board: &Board, slot: usize) -> Option<String> {
     if pieces.len() >= MAX_COPIED_PIECES {
         return None;
     }
-    let mut text = format!("{}-{:02}-", char::from(GAME_DIGIT), slot + 1);
+    let digit = board.rules().clipboard_digit;
+    let mut text = format!("{}-{:02}-", char::from(digit), slot + 1);
     for p in &pieces {
         let v = p.cell + CELLS * usize::from(p.dir);
         text.push(base52_char(v / 52));
@@ -74,7 +75,8 @@ pub fn encode_solution(board: &Board, slot: usize) -> Option<String> {
     Some(text)
 }
 
-/// Pastes `text` onto `board` for strip slot `slot` (0-based). Returns false, leaving the board
+/// Pastes `text` onto `board` for strip slot `slot` (0-based); it must start with the board's
+/// game digit. Returns false, leaving the board
 /// untouched, for anything the original rejects, and also for what it lets through but a port
 /// should reject: non-letters, a dir above 7, two pieces on one cell, or a toolbox slot past 23.
 pub fn apply_solution(board: &mut Board, slot: usize, text: &str) -> bool {
@@ -93,7 +95,9 @@ pub fn apply_solution(board: &mut Board, slot: usize, text: &str) -> bool {
     else {
         return false;
     };
-    if *game != GAME_DIGIT || usize::from((tens - b'0') * 10 + (ones - b'0')) != slot + 1 {
+    if *game != board.rules().clipboard_digit
+        || usize::from((tens - b'0') * 10 + (ones - b'0')) != slot + 1
+    {
         return false;
     }
     if rest.first() == Some(&b' ') {
@@ -140,6 +144,7 @@ mod tests {
     use super::*;
     use crate::board::{board_index, toolbox_index};
     use crate::piece::{BLUE, RED};
+    use spectrograph::Game;
 
     fn level_1_solved() -> Board {
         let mut board = Board::default();
@@ -320,5 +325,19 @@ mod tests {
             dir: 0,
         };
         assert_eq!(encode_solution(&board, 0), None);
+    }
+
+    #[test]
+    fn a_chromatron_2_board_copies_and_pastes_with_its_own_digit() {
+        let mut solved = level_1_solved();
+        solved.game = Game::C2;
+        assert_eq!(encode_solution(&solved, 0).as_deref(), Some("2-01-hI"));
+        let mut start = level_1_start();
+        start.game = Game::C2;
+        let before = start.clone();
+        assert!(!apply_solution(&mut start, 0, "1-01-hI"), "C1's text");
+        assert_eq!(start, before);
+        assert!(apply_solution(&mut start, 0, "2-01-hI"));
+        assert_eq!(start.at(8, 7).piece, Piece::Mirror);
     }
 }

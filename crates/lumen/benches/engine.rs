@@ -1,5 +1,5 @@
-//! `just bench`: trace and render on real Chromatron 1 levels, checked against the spec's §6
-//! budgets (Apple Silicon, release build). Exits non-zero if a budget is exceeded.
+//! `just bench`: trace and render on real Chromatron 1 and 2 levels, checked against the spec's
+//! §6 budgets (Apple Silicon, release build). Exits non-zero if a budget is exceeded.
 
 use std::{
     hint::black_box,
@@ -50,8 +50,9 @@ fn check(name: &str, took: Duration, budget: Duration) -> bool {
     ok
 }
 
-fn main() -> ExitCode {
-    let data = spectrograph::decode(Game::C1, &Game::C1.read_original().unwrap()).unwrap();
+/// Benchmarks one game's slowest level and checks it against the budgets.
+fn bench_game(criterion: &mut Criterion, game: Game) -> bool {
+    let data = spectrograph::decode(game, &game.read_original().unwrap()).unwrap();
     let (slot, board) = slowest_level(&data);
     let mut state = GameState::new(&data, SaveData::default());
     state.goto_slot(slot);
@@ -59,15 +60,14 @@ fn main() -> ExitCode {
     let mut field = BeamField::default();
     let mut frame = vec![0u32; FRAME_WIDTH * FRAME_HEIGHT];
 
-    let mut criterion = Criterion::default().configure_from_args();
-    let trace_name = format!("trace level {} solved", slot + 1);
+    let trace_name = format!("{game}: trace level {} solved", slot + 1);
+    let render_name = format!("{game}: render");
     criterion.bench_function(&trace_name, |b| {
         b.iter(|| trace(black_box(&board), &mut field))
     });
-    criterion.bench_function("render", |b| {
+    criterion.bench_function(&render_name, |b| {
         b.iter(|| render(black_box(&state), &mut frame))
     });
-    criterion.final_summary();
 
     let trace_ok = check(
         &trace_name,
@@ -75,11 +75,21 @@ fn main() -> ExitCode {
         TRACE_BUDGET,
     );
     let render_ok = check(
-        "render",
+        &render_name,
         per_call(|| _ = render(black_box(&state), &mut frame)),
         RENDER_BUDGET,
     );
-    if trace_ok && render_ok {
+    trace_ok && render_ok
+}
+
+fn main() -> ExitCode {
+    let mut criterion = Criterion::default().configure_from_args();
+    let mut ok = true;
+    for game in [Game::C1, Game::C2] {
+        ok &= bench_game(&mut criterion, game);
+    }
+    criterion.final_summary();
+    if ok {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

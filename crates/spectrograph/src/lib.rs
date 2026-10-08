@@ -10,6 +10,10 @@ mod game_data;
 #[cfg(feature = "decode")]
 mod c1;
 #[cfg(feature = "decode")]
+mod c2;
+#[cfg(feature = "decode")]
+mod data_map;
+#[cfg(feature = "decode")]
 mod error;
 #[cfg(feature = "decode")]
 mod image;
@@ -24,7 +28,7 @@ pub use game_data::{
 };
 
 #[cfg(feature = "decode")]
-pub use c1::decode_rle;
+pub use data_map::decode_rle;
 #[cfg(feature = "decode")]
 pub use error::DecodeError;
 #[cfg(feature = "decode")]
@@ -39,7 +43,8 @@ pub use strings::{CString, cstring_at, cstrings, decode_mac_roman};
 pub fn decode(game: Game, binary: &[u8]) -> Result<GameData, DecodeError> {
     let image = Image::load(game, binary)?;
     match game {
-        Game::C1 => c1::decode(&image),
+        Game::C1 => data_map::decode(&image, &c1::MAP),
+        Game::C2 => data_map::decode(&image, &c2::MAP),
         _ => Err(DecodeError::Unsupported { game }),
     }
 }

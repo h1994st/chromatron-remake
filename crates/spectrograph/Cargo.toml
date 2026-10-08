@@ -29,3 +29,7 @@ required-features = ["decode"]
 [[test]]
 name = "c1_data"
 required-features = ["decode"]
+
+[[test]]
+name = "c2_data"
+required-features = ["decode"]

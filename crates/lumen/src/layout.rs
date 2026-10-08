@@ -48,6 +48,9 @@ pub const HINT_RECT: Rect = Rect::new(450, 125, 620, 475);
 pub const FREEWARE_RECT: Rect = Rect::new(0, 450, 100, 480);
 pub const MORE_LEVELS_RECT: Rect = Rect::new(350, 450, 465, 480);
 pub const SITE_URL_RECT: Rect = Rect::new(470, 450, 640, 480);
+/// Chromatron 2 on (re/notes/chromatron2/platform.md P3), in play (`game_mode == 2`).
+pub const LEVEL_NAME_RECT: Rect = Rect::new(50, 385, 300, 420);
+pub const THANK_YOU_RECT: Rect = Rect::new(0, 450, 400, 480);
 
 /// Top-left pixel of the 24 × 24 sprite of cell `index` (a board cell or a visible toolbox slot).
 pub fn cell_origin(index: usize) -> (i32, i32) {

@@ -22,23 +22,32 @@ pub struct Record {
     pub y: u8,
 }
 
-/// One level: its id (index into the level table), its records and its hint ("" for none).
+/// One level of `game`: its id (index into the level table), its records, its name ("" in
+/// Chromatron 1, which names no levels) and its hint ("" for none).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Level {
+    /// The game whose code gives the records their meaning (type 13 exists from Chromatron 2 on).
+    pub game: Game,
     pub id: u8,
     pub records: Cow<'static, [Record]>,
+    pub name: Cow<'static, str>,
     pub hint: Cow<'static, str>,
 }
 
-/// The fixed UI strings the game draws with `DrawThemeTextBox` (platform.md P3).
+/// The fixed UI strings the game draws with `DrawThemeTextBox` (platform.md P3). A string the
+/// game's binary does not have is "".
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UiText {
     pub window_title: Cow<'static, str>,
     pub you_win: Cow<'static, str>,
     pub won: Cow<'static, str>,
     pub click_next: Cow<'static, str>,
+    /// Chromatron 1 only.
     pub freeware: Cow<'static, str>,
+    /// Chromatron 1 only.
     pub more_levels: Cow<'static, str>,
+    /// "Thank you for purchasing this game.": Chromatron 2 on.
+    pub thank_you: Cow<'static, str>,
     pub site_url: Cow<'static, str>,
 }
 
@@ -85,6 +94,9 @@ pub fn kind_symbol(kind: u8) -> char {
         10 => 'o',
         11 => '=',
         12 => 'T',
+        13 => 'U',
+        14 => 'W',
+        15 => 'C',
         _ => '?',
     }
 }
@@ -107,6 +119,7 @@ mod tests {
     static TINY: GameData = GameData {
         game: Game::C1,
         levels: Cow::Borrowed(&[Level {
+            game: Game::C1,
             id: 1,
             records: Cow::Borrowed(&[Record {
                 kind: 2,
@@ -115,6 +128,7 @@ mod tests {
                 x: 2,
                 y: 7,
             }]),
+            name: EMPTY,
             hint: Cow::Borrowed("hint"),
         }]),
         level_order: Cow::Borrowed(&[1]),
@@ -128,6 +142,7 @@ mod tests {
             click_next: EMPTY,
             freeware: EMPTY,
             more_levels: EMPTY,
+            thank_you: EMPTY,
             site_url: EMPTY,
         },
     };
@@ -143,8 +158,8 @@ mod tests {
 
     #[test]
     fn symbols_cover_every_kind_and_colour() {
-        let kinds: String = (0..=13).map(kind_symbol).collect();
-        assert_eq!(kinds, ".#*MBFPDSQo=T?");
+        let kinds: String = (0..=16).map(kind_symbol).collect();
+        assert_eq!(kinds, ".#*MBFPDSQo=TUWC?");
         let colours: String = (0..=8).map(colour_symbol).collect();
         assert_eq!(colours, "kbgcrmyw?");
     }

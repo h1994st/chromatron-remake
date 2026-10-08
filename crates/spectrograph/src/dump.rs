@@ -10,14 +10,15 @@ const SHEET_BACKGROUND: u32 = 0xa4a4a4;
 
 /// A 15 × 15 grid, three characters per cell: kind, colour, direction (blank where unused).
 /// Kinds: `.` empty `#` wall `*` laser `M` mirror `B` bender `F` filter `P` prism `D` doppler
-/// `S` splitter `Q` tangler `o` pinwheel `=` conduit `T` teleporter. Colours: k b g c r m y w.
+/// `S` splitter `Q` tangler `o` pinwheel `=` conduit `T` teleporter `U` multi-filter `W` twister
+/// `C` complementor. Colours: k b g c r m y w.
 pub fn level_grid(level: &Level) -> String {
     let mut cells = [[*b".  "; SIDE]; SIDE];
     for r in level.records.iter() {
         let (colour, dir) = match r.kind {
             2 | 5 => (true, true),
             10 => (true, false),
-            3 | 4 | 6..=9 | 11 => (false, true),
+            3 | 4 | 6..=9 | 11 | 13 | 15 => (false, true),
             _ => (false, false),
         };
         cells[usize::from(r.y)][usize::from(r.x)] = [
@@ -75,8 +76,10 @@ mod tests {
 
     fn level(records: &[Record]) -> Level {
         Level {
+            game: Game::C1,
             id: 1,
             records: Cow::Owned(records.to_vec()),
+            name: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
         }
     }
@@ -148,6 +151,7 @@ mod tests {
                 click_next: empty.clone(),
                 freeware: empty.clone(),
                 more_levels: empty.clone(),
+                thank_you: empty.clone(),
                 site_url: empty,
             },
         };

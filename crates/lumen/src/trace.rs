@@ -1,7 +1,9 @@
-//! The beam tracer (logic.md L3–L4: `retrace_beams` @ 0x3ea4, `trace_laser` @ 0x3a58).
+//! The beam tracer (logic.md L3–L4: `retrace_beams` C1 @ 0x3ea4, C2 @ 0x415c; `trace_laser`
+//! C1 @ 0x3a58, C2 @ 0x39e0), with Chromatron 2's complementor pass.
 
 use crate::board::{BOARD_CELLS, Board, SIDE, board_index};
-use crate::piece::{Colour, DX, DY, Dir, Piece};
+use crate::piece::{Colour, DX, DY, Dir, Piece, WHITE};
+use crate::rule_set::RuleSet;
 use crate::transfer::transfer;
 
 /// Beams one generation can hold; further pushes are dropped (`push_beam` @ 0x34ec).
@@ -81,22 +83,111 @@ impl BeamList {
     }
 }
 
-/// Recomputes `field` from scratch for every laser on `board`. Allocation-free.
+/// Recomputes `field` from scratch for every laser on `board`, then lets the complementors
+/// emit until nothing changes (`retrace_beams`). Allocation-free: the complementor pass works in
+/// two fixed-size arrays on the stack.
 pub fn trace(board: &Board, field: &mut BeamField) {
-    field.clear();
+    let complementors = (0..BOARD_CELLS).any(|i| board.cells[i].piece == Piece::Complementor);
+    // `clear_complementor_flags`: cell +3, "shut down", for this retrace only.
+    let mut shut = [false; BOARD_CELLS];
+    // `snapshot_cell_inputs`: cell +20..+27, the inputs before the latest emission.
+    let mut snapshot = [[0; 8]; BOARD_CELLS];
+    loop {
+        field.clear();
+        trace_all_lasers(board, field);
+        if !complementors {
+            return;
+        }
+        loop {
+            snapshot.copy_from_slice(&field.inbound);
+            emit_complementors(board, field, &shut);
+            if !complementor_new_input(board, field, &snapshot, &shut) {
+                break;
+            }
+        }
+        if !shut_down_complementors(board, field, &snapshot, &mut shut) {
+            return;
+        }
+    }
+}
+
+/// `trace_all_lasers`: every laser, row by row.
+fn trace_all_lasers(board: &Board, field: &mut BeamField) {
     for index in 0..BOARD_CELLS {
         let cell = board.cells[index];
         if cell.piece == Piece::Laser {
-            trace_laser(
-                board,
-                field,
-                (index % SIDE) as u8,
-                (index / SIDE) as u8,
-                cell.dir,
-                cell.colour,
-            );
+            let (x, y) = xy(index);
+            trace_laser(board, field, x, y, cell.dir, cell.colour);
         }
     }
+}
+
+fn xy(index: usize) -> (u8, u8) {
+    ((index % SIDE) as u8, (index / SIDE) as u8)
+}
+
+/// The board cells that hold a complementor not shut down, row by row.
+fn live_complementors<'a>(
+    board: &'a Board,
+    shut: &'a [bool; BOARD_CELLS],
+) -> impl Iterator<Item = usize> + 'a {
+    (0..BOARD_CELLS).filter(|&i| board.cells[i].piece == Piece::Complementor && !shut[i])
+}
+
+/// `emit_complementors` (logic.md L3): each live complementor sends the complement of every input
+/// whose direction has its `dir`'s parity on in that direction, as a new laser trace from its own
+/// cell. Inputs are read live, so an emission can feed a later complementor in the same pass.
+/// White has no complement.
+fn emit_complementors(board: &Board, field: &mut BeamField, shut: &[bool; BOARD_CELLS]) {
+    for index in live_complementors(board, shut) {
+        let parity = board.cells[index].dir & 1;
+        for d in 0..8u8 {
+            let k = field.inbound[index][usize::from(d)];
+            if k != 0 && k != WHITE && d & 1 == parity {
+                let (x, y) = xy(index);
+                trace_laser(board, field, x, y, d, k ^ WHITE);
+            }
+        }
+    }
+}
+
+/// `complementor_new_input`: some live complementor got an input, in any of the 8 directions,
+/// that it didn't have at the snapshot.
+fn complementor_new_input(
+    board: &Board,
+    field: &BeamField,
+    snapshot: &[[Colour; 8]; BOARD_CELLS],
+    shut: &[bool; BOARD_CELLS],
+) -> bool {
+    live_complementors(board, shut)
+        .any(|i| (0..8).any(|d| field.inbound[i][d] != 0 && snapshot[i][d] == 0))
+}
+
+/// `shut_down_complementors`: shuts every live complementor whose input changed after it had
+/// already emitted for it (typically its own complement fed back), and says whether any was.
+/// The original's exception for a snapshot of white and an input of black can't happen, because
+/// inputs only grow, but is kept.
+fn shut_down_complementors(
+    board: &Board,
+    field: &BeamField,
+    snapshot: &[[Colour; 8]; BOARD_CELLS],
+    shut: &mut [bool; BOARD_CELLS],
+) -> bool {
+    let mut any = false;
+    for i in 0..BOARD_CELLS {
+        if board.cells[i].piece != Piece::Complementor || shut[i] {
+            continue;
+        }
+        let contradicted = (0..8).any(|d| {
+            let (was, now) = (snapshot[i][d], field.inbound[i][d]);
+            was != now && was != 0 && !(was == WHITE && now == 0)
+        });
+        if contradicted {
+            shut[i] = true;
+            any = true;
+        }
+    }
+    any
 }
 
 fn on_board(x: u8, y: u8) -> bool {
@@ -119,6 +210,7 @@ fn trace_laser(
 ) -> u32 {
     let mut cur = BeamList::new();
     let mut next = BeamList::new();
+    let rules = board.rules();
     let mut next_tag = 1;
     next.push(Beam {
         x,
@@ -138,6 +230,7 @@ fn trace_laser(
             let (x, y) = step(beam.x, beam.y, beam.dir);
             if on_board(x, y) {
                 enter_cell(
+                    rules,
                     board,
                     field,
                     &mut next,
@@ -154,6 +247,7 @@ fn trace_laser(
 }
 
 fn enter_cell(
+    rules: &RuleSet,
     board: &Board,
     field: &mut BeamField,
     next: &mut BeamList,
@@ -169,7 +263,7 @@ fn enter_cell(
         }
         return;
     }
-    for e in transfer(cell, beam.dir, beam.colour, beam.tag, next_tag).as_slice() {
+    for e in transfer(rules, cell, beam.dir, beam.colour, beam.tag, next_tag).as_slice() {
         next.push(Beam {
             dir: e.dir,
             colour: e.colour,
@@ -224,6 +318,7 @@ mod tests {
     use super::*;
     use crate::board::Cell;
     use crate::piece::{BLUE, GREEN, RED, WHITE};
+    use spectrograph::Game;
 
     fn board(pieces: &[(usize, usize, Piece, Colour, Dir)]) -> Board {
         let mut board = Board::default();
@@ -425,5 +520,146 @@ mod tests {
         trace(&board(&[(0, 0, Piece::Laser, BLUE, 4)]), &mut field);
         assert_eq!(field.received(board_index(5, 0)), 0);
         assert_eq!(field.received(board_index(0, 5)), BLUE);
+    }
+
+    const CYAN: Colour = GREEN | BLUE;
+
+    /// A Chromatron 2 board.
+    fn c2_board(pieces: &[(usize, usize, Piece, Colour, Dir)]) -> Board {
+        Board {
+            game: Game::C2,
+            ..board(pieces)
+        }
+    }
+
+    #[test]
+    fn a_complementor_sends_the_complement_on_in_the_same_direction() {
+        let field = traced(&c2_board(&[
+            (0, 5, Piece::Laser, RED, 2),
+            (5, 5, Piece::Complementor, 4, 0),
+        ]));
+        let at = board_index(5, 5);
+        assert_eq!(field.inbound[at][2], RED);
+        assert_eq!(field.outbound[at][2], CYAN, "drawn from its own cell");
+        assert_eq!(field.inbound[board_index(6, 5)][2], CYAN);
+        assert_eq!(field.received(board_index(14, 5)), CYAN);
+    }
+
+    #[test]
+    fn complements_of_every_colour_and_none_for_white() {
+        for (colour, complement) in [(RED, CYAN), (GREEN, RED | BLUE), (BLUE, RED | GREEN)] {
+            for (input, output) in [(colour, complement), (complement, colour)] {
+                let field = traced(&c2_board(&[
+                    (0, 5, Piece::Laser, input, 2),
+                    (5, 5, Piece::Complementor, 4, 0),
+                ]));
+                assert_eq!(field.received(board_index(6, 5)), output, "{input}");
+            }
+        }
+        let field = traced(&c2_board(&[
+            (0, 5, Piece::Laser, WHITE, 2),
+            (5, 5, Piece::Complementor, 4, 0),
+        ]));
+        assert_eq!(field.outbound[board_index(5, 5)], [0; 8]);
+    }
+
+    #[test]
+    fn even_dirs_take_orthogonal_beams_and_odd_dirs_diagonal_ones() {
+        let orthogonal = |dir| {
+            traced(&c2_board(&[
+                (0, 5, Piece::Laser, RED, 2),
+                (5, 5, Piece::Complementor, 4, dir),
+            ]))
+            .received(board_index(6, 5))
+        };
+        assert_eq!(orthogonal(2), CYAN);
+        assert_eq!(orthogonal(9), 0, "dir 9 is odd: absorbed");
+        let diagonal = |dir| {
+            traced(&c2_board(&[
+                (0, 0, Piece::Laser, RED, 3),
+                (4, 4, Piece::Complementor, 4, dir),
+            ]))
+            .received(board_index(5, 5))
+        };
+        assert_eq!(diagonal(1), CYAN);
+        assert_eq!(diagonal(0), 0, "dir 0 is even: absorbed");
+    }
+
+    #[test]
+    fn a_complement_starts_untagged_like_any_laser_beam() {
+        // A tangler's north beam is complemented (red → cyan), then a forward doppler shifts it
+        // as an ordinary beam (cyan → magenta); its south twin is not touched.
+        let field = traced(&c2_board(&[
+            (0, 7, Piece::Laser, RED, 2),
+            (5, 7, Piece::Tangler, 0, 0),
+            (5, 5, Piece::Complementor, 4, 0),
+            (5, 3, Piece::Doppler, 0, 6),
+            (5, 12, Piece::Pinwheel, RED, 0),
+        ]));
+        assert_eq!(field.outbound[board_index(5, 3)][0], RED | BLUE);
+        assert_eq!(field.received(board_index(5, 12)), RED);
+    }
+
+    #[test]
+    fn a_complement_can_feed_the_next_complementor_in_the_same_pass() {
+        for (first, second) in [(3, 6), (6, 3)] {
+            // Beam E: the first complementor in row order emits before the second reads. Beam W
+            // (mirrored board): the second is reached only on the next inner round.
+            let field = if first < second {
+                traced(&c2_board(&[
+                    (0, 0, Piece::Laser, RED, 2),
+                    (first, 0, Piece::Complementor, 4, 0),
+                    (second, 0, Piece::Complementor, 4, 0),
+                ]))
+            } else {
+                traced(&c2_board(&[
+                    (14, 0, Piece::Laser, RED, 6),
+                    (first + 5, 0, Piece::Complementor, 4, 0),
+                    (second + 5, 0, Piece::Complementor, 4, 0),
+                ]))
+            };
+            let beyond = if first < second { 9 } else { 0 };
+            assert_eq!(
+                field.received(board_index(beyond, 0)),
+                RED,
+                "{first}, {second}"
+            );
+        }
+    }
+
+    /// Red enters a complementor heading E; its cyan goes round four pieces and comes back into the
+    /// same input through a splitter, which turns that input white.
+    fn feedback_loop() -> Board {
+        c2_board(&[
+            (0, 5, Piece::Laser, RED, 2),
+            (2, 5, Piece::Splitter, 0, 3),
+            (5, 5, Piece::Complementor, 4, 0),
+            (8, 5, Piece::Mirror, 0, 1),
+            (8, 2, Piece::Mirror, 0, 7),
+            (2, 2, Piece::Mirror, 0, 5),
+        ])
+    }
+
+    #[test]
+    fn a_complementor_fed_its_own_complement_shuts_down() {
+        let board = feedback_loop();
+        let mut field = BeamField::default();
+        for _ in 0..2 {
+            trace(&board, &mut field);
+            let at = board_index(5, 5);
+            assert_eq!(field.inbound[at][2], RED, "it still absorbs");
+            assert_eq!(field.outbound[at], [0; 8], "and emits nothing");
+            assert_eq!(field.received(board_index(6, 5)), 0);
+            assert_eq!(field.received(board_index(8, 3)), 0, "the loop is dark");
+        }
+    }
+
+    #[test]
+    fn without_its_feedback_the_same_complementor_works() {
+        let mut board = feedback_loop();
+        board.cells[board_index(8, 2)] = Cell::default();
+        let field = traced(&board);
+        assert_eq!(field.outbound[board_index(5, 5)][2], CYAN);
+        assert_eq!(field.received(board_index(8, 0)), CYAN);
     }
 }

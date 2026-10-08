@@ -31,7 +31,7 @@ fn run(args: &[String]) -> Result<(), String> {
     }
     let game = Game::parse_arg(game)?;
     let slot = parse_level(level)?;
-    if game != Game::C1 {
+    if !matches!(game, Game::C1 | Game::C2) {
         return Err(format!("{game} is not supported yet"));
     }
     let data = decode(game, &game.read_original()?).map_err(|e| e.to_string())?;
@@ -108,8 +108,8 @@ mod tests {
             Err(USAGE.into())
         );
         assert_eq!(
-            run(&args(&["shot", "2", "5", "x.png"])),
-            Err("Chromatron 2 v1.4 is not supported yet".into())
+            run(&args(&["shot", "3", "5", "x.png"])),
+            Err("Chromatron 3 v1.1 is not supported yet".into())
         );
     }
 }

@@ -38,10 +38,16 @@ pub enum Piece {
     Pinwheel = 10,
     Conduit = 11,
     Teleporter = 12,
+    /// Chromatron 2 on.
+    MultiFilter = 13,
+    /// Chromatron 2 on; fixed.
+    Twister = 14,
+    /// Chromatron 2 on.
+    Complementor = 15,
 }
 
 impl Piece {
-    pub const ALL: [Piece; 13] = [
+    pub const ALL: [Piece; 16] = [
         Piece::Empty,
         Piece::Wall,
         Piece::Laser,
@@ -55,15 +61,20 @@ impl Piece {
         Piece::Pinwheel,
         Piece::Conduit,
         Piece::Teleporter,
+        Piece::MultiFilter,
+        Piece::Twister,
+        Piece::Complementor,
     ];
 
     pub fn from_byte(byte: u8) -> Option<Piece> {
         Piece::ALL.get(usize::from(byte)).copied()
     }
 
-    /// `is_movable` @ 0x34d8: types 3–9 can be dragged and rotated; everything else is fixed.
+    /// `is_movable` (C1 @ 0x34d8, C2 @ 0x33a8): types 3–9, 13 and 15 can be dragged and rotated;
+    /// everything else is fixed. Types 13 and 15 exist only from Chromatron 2 on, so this one test
+    /// serves every game.
     pub fn is_movable(self) -> bool {
-        (self as u8).wrapping_sub(3) < 7
+        (self as u8).wrapping_sub(3) < 7 || matches!(self, Piece::MultiFilter | Piece::Complementor)
     }
 }
 
@@ -76,11 +87,11 @@ mod tests {
         for piece in Piece::ALL {
             assert_eq!(Piece::from_byte(piece as u8), Some(piece));
         }
-        assert_eq!(Piece::from_byte(13), None);
+        assert_eq!(Piece::from_byte(16), None);
     }
 
     #[test]
-    fn exactly_mirror_to_tangler_are_movable() {
+    fn exactly_mirror_to_tangler_multi_filter_and_complementor_are_movable() {
         let movable: Vec<Piece> = Piece::ALL.into_iter().filter(|p| p.is_movable()).collect();
         assert_eq!(
             movable,
@@ -91,7 +102,9 @@ mod tests {
                 Piece::Prism,
                 Piece::Doppler,
                 Piece::Splitter,
-                Piece::Tangler
+                Piece::Tangler,
+                Piece::MultiFilter,
+                Piece::Complementor
             ]
         );
     }

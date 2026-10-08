@@ -22,9 +22,17 @@ fn record(kind: u8, dir: u8, colour: u8, x: u8, y: u8) -> Record {
 /// - id 2: a blue laser at (0,5) facing E and a blue pinwheel at (5,9); solved by the mirror at
 ///   (5,5) dir 7. Its hint is "two".
 ///
+/// The levels are named "first" and "second".
+///
 /// Sprite `i` is filled with pixel value `i`, and palette entry `i` is `0x10000 + i`, so a test
 /// can tell which sprite was drawn where.
 pub(crate) fn tiny_game() -> GameData {
+    tiny_game_of(Game::C1)
+}
+
+/// `tiny_game` as a level set of `game`, so it plays by that game's rules. Every UI string is
+/// set, whichever game draws it.
+pub(crate) fn tiny_game_of(game: Game) -> GameData {
     let text = |s: &'static str| Cow::Borrowed(s);
     let mut sprites = vec![[0u8; SPRITE_LEN]; 128];
     for (i, sprite) in sprites.iter_mut().enumerate() {
@@ -35,24 +43,28 @@ pub(crate) fn tiny_game() -> GameData {
         *colour = 0x10000 + i as u32;
     }
     GameData {
-        game: Game::C1,
+        game,
         levels: Cow::Owned(vec![
             Level {
+                game,
                 id: 1,
                 records: Cow::Owned(vec![
                     record(10, 6, 4, 8, 2),
                     record(2, 2, 4, 2, 7),
                     record(3, 1, 4, 8, 7),
                 ]),
+                name: text("first"),
                 hint: text("one"),
             },
             Level {
+                game,
                 id: 2,
                 records: Cow::Owned(vec![
                     record(2, 2, 1, 0, 5),
                     record(10, 0, 1, 5, 9),
                     record(3, 7, 4, 5, 5),
                 ]),
+                name: text("second"),
                 hint: text("two"),
             },
         ]),
@@ -71,6 +83,7 @@ pub(crate) fn tiny_game() -> GameData {
             click_next: text("next please"),
             freeware: text("freeware"),
             more_levels: text("more levels @"),
+            thank_you: text("thanks"),
             site_url: text("example.com"),
         },
     }

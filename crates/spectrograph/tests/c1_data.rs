@@ -225,7 +225,7 @@ fn ui_text_is_decoded() {
 #[test]
 fn other_games_are_not_decoded_yet() {
     assert_eq!(
-        decode(Game::C2, &original(Game::C2)),
-        Err(DecodeError::Unsupported { game: Game::C2 })
+        decode(Game::C3, &original(Game::C3)),
+        Err(DecodeError::Unsupported { game: Game::C3 })
     );
 }

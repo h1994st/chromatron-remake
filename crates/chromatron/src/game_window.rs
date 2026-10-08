@@ -71,7 +71,7 @@ pub fn run(spec: &'static AppSpec) -> ExitCode {
         }
     }));
 
-    let progress = ProgressFile::for_app(spec.support_dir);
+    let progress = ProgressFile::for_app(spec.support_dir, lumen::RuleSet::of(spec.data.game));
     if progress.is_none() {
         log::warn!("no home folder: progress will not be saved");
     }
@@ -79,7 +79,7 @@ pub fn run(spec: &'static AppSpec) -> ExitCode {
     // Snapshot mode never reads or writes the player's progress.
     let save = match (&progress, &snapshot) {
         (Some(file), None) => file.load(),
-        _ => lumen::SaveData::default(),
+        _ => lumen::SaveData::fresh(lumen::RuleSet::of(spec.data.game)),
     };
     let mut app = App::new(
         spec,

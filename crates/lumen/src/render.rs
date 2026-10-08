@@ -6,10 +6,12 @@ use spectrograph::{GameData, SPRITE_SIZE};
 use crate::board::{BOARD_CELLS, Board, Cell, VISIBLE_TOOLBOX_SLOTS, toolbox_index};
 use crate::game_state::{GameState, SlotState};
 use crate::layout::{
-    FRAME_HEIGHT, FRAME_WIDTH, FREEWARE_RECT, HINT_RECT, LAST_SLOT, MORE_LEVELS_RECT, Rect,
-    SITE_URL_RECT, STRIP_SLOTS, WON_RECT, YOU_WIN_RECT, cell_origin, strip_origin,
+    FRAME_HEIGHT, FRAME_WIDTH, FREEWARE_RECT, HINT_RECT, LAST_SLOT, LEVEL_NAME_RECT,
+    MORE_LEVELS_RECT, Rect, SITE_URL_RECT, STRIP_SLOTS, THANK_YOU_RECT, WON_RECT, YOU_WIN_RECT,
+    cell_origin, strip_origin,
 };
 use crate::piece::{Colour, DX, DY, Piece};
+use crate::rule_set::TextBoxSet;
 use crate::trace::BeamField;
 
 /// The cleared frame, RGB a4a4a4 (`memset(fb, 0xa4, …)`).
@@ -63,6 +65,9 @@ pub fn cell_sprite(cell: Cell, received: Colour) -> Option<usize> {
         }
         Piece::Conduit => 44 + axis,
         Piece::Teleporter => 14,
+        Piece::MultiFilter => 100 + axis,
+        Piece::Twister => 15,
+        Piece::Complementor => 116 + (d & 1),
     })
 }
 
@@ -95,15 +100,21 @@ impl<'a> TextBoxes<'a> {
     }
 }
 
-/// `paint_window`'s `draw_text_box` calls (platform.md P3), minus the unreachable `mode_text`.
+/// `paint_window`'s `draw_text_box` calls (platform.md P3 of each game), in its order. The port is
+/// always in play (`game_mode == 2`), so C1's empty `mode_text` box and C2's level name at its
+/// `game_mode != 2` rect never show.
 pub fn text_boxes<'a>(state: &GameState<'a>) -> TextBoxes<'a> {
     let ui = &state.data().ui;
     let slot = state.slot();
+    let set = state.rules().text_boxes;
     let mut boxes = TextBoxes::default();
     if state.is_won() {
         boxes.push(ui.you_win.as_ref(), YOU_WIN_RECT);
     } else if state.is_completed(slot) {
         boxes.push(ui.won.as_ref(), WON_RECT);
+    }
+    if set == TextBoxSet::Purchased {
+        boxes.push(state.level_name(), LEVEL_NAME_RECT);
     }
     boxes.push(
         if state.is_won() {
@@ -113,9 +124,18 @@ pub fn text_boxes<'a>(state: &GameState<'a>) -> TextBoxes<'a> {
         },
         HINT_RECT,
     );
-    boxes.push(ui.freeware.as_ref(), FREEWARE_RECT);
-    if slot > 39 && (slot.is_multiple_of(2) || slot == LAST_SLOT) {
-        boxes.push(ui.more_levels.as_ref(), MORE_LEVELS_RECT);
+    match set {
+        TextBoxSet::Freeware => {
+            boxes.push(ui.freeware.as_ref(), FREEWARE_RECT);
+            if slot > 39 && (slot.is_multiple_of(2) || slot == LAST_SLOT) {
+                boxes.push(ui.more_levels.as_ref(), MORE_LEVELS_RECT);
+            }
+        }
+        TextBoxSet::Purchased => {
+            if slot % 6 == 4 {
+                boxes.push(ui.thank_you.as_ref(), THANK_YOU_RECT);
+            }
+        }
     }
     boxes.push(ui.site_url.as_ref(), SITE_URL_RECT);
     boxes
@@ -324,11 +344,12 @@ fn draw_strip_number(frame: &mut [u32], data: &GameData, slot: usize, state: Slo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixture::tiny_game;
+    use crate::fixture::{tiny_game, tiny_game_of};
     use crate::game_state::InputEvent;
     use crate::layout::{HINT_RECT, strip_origin};
     use crate::piece::{BLUE, GREEN, RED};
     use crate::save::SaveData;
+    use spectrograph::Game;
 
     fn pixel(frame: &[u32], x: i32, y: i32) -> u32 {
         frame[y as usize * FRAME_WIDTH + x as usize]
@@ -366,6 +387,25 @@ mod tests {
         assert_eq!(cell_sprite(cell(Piece::Tangler, 0, 4), 0), Some(84));
         assert_eq!(cell_sprite(cell(Piece::Conduit, 0, 6), 0), Some(46));
         assert_eq!(cell_sprite(cell(Piece::Teleporter, 0, 0), 0), Some(14));
+    }
+
+    #[test]
+    fn chromatron_2_pieces_use_the_sprites_chromatron_1_left_unused() {
+        // data.md D5: multi-filter 100 + (dir & 3), twister 15, complementor 116 + (dir & 1).
+        let cell = |piece, dir| Cell {
+            piece,
+            colour: 4,
+            dir,
+        };
+        let multi: Vec<_> = (0..8)
+            .map(|d| cell_sprite(cell(Piece::MultiFilter, d), 0).unwrap())
+            .collect();
+        assert_eq!(multi, [100, 101, 102, 103, 100, 101, 102, 103]);
+        assert_eq!(cell_sprite(cell(Piece::Twister, 0), 0), Some(15));
+        let complementor: Vec<_> = (0..8)
+            .map(|d| cell_sprite(cell(Piece::Complementor, d), 0).unwrap())
+            .collect();
+        assert_eq!(complementor, [116, 117, 116, 117, 116, 117, 116, 117]);
     }
 
     #[test]
@@ -502,6 +542,79 @@ mod tests {
             }
         }
         assert_eq!(shown, [41, 43, 45, 47, 49, 50]);
+    }
+
+    fn texts<'a>(state: &GameState<'a>) -> Vec<(&'a str, Rect)> {
+        text_boxes(state)
+            .as_slice()
+            .iter()
+            .map(|t| (t.text, t.rect))
+            .collect()
+    }
+
+    #[test]
+    fn chromatron_2_names_the_level_and_draws_no_freeware_line() {
+        let data = tiny_game_of(Game::C2);
+        let mut state = GameState::new(&data, SaveData::default());
+        assert_eq!(
+            texts(&state),
+            [
+                ("first", LEVEL_NAME_RECT),
+                ("one", HINT_RECT),
+                ("example.com", SITE_URL_RECT)
+            ]
+        );
+        state.handle(InputEvent::Paste("2-01-hI".into()));
+        assert_eq!(
+            texts(&state),
+            [
+                ("You win!", YOU_WIN_RECT),
+                ("first", LEVEL_NAME_RECT),
+                ("next please", HINT_RECT),
+                ("example.com", SITE_URL_RECT)
+            ]
+        );
+        state.handle(InputEvent::Key(b'r'));
+        assert_eq!(
+            texts(&state)[..2],
+            [("(won)", WON_RECT), ("first", LEVEL_NAME_RECT)]
+        );
+    }
+
+    #[test]
+    fn chromatron_2_thanks_the_buyer_on_every_sixth_level_from_5() {
+        let data = tiny_game_of(Game::C2);
+        let save = SaveData {
+            completed: [true; 64],
+            ..SaveData::default()
+        };
+        let mut state = GameState::new(&data, save);
+        let mut shown = vec![];
+        for slot in 0..STRIP_SLOTS {
+            state.goto_slot(slot);
+            state.handle(InputEvent::Key(b'r'));
+            let boxes = texts(&state);
+            assert!(
+                boxes
+                    .iter()
+                    .all(|(t, _)| *t != "freeware" && *t != "more levels @")
+            );
+            if boxes.contains(&("thanks", THANK_YOU_RECT)) {
+                shown.push(slot + 1);
+            }
+        }
+        assert_eq!(shown, [5, 11, 17, 23, 29, 35, 41, 47]);
+    }
+
+    #[test]
+    fn chromatron_1_names_no_level() {
+        let data = tiny_game();
+        let state = GameState::new(&data, SaveData::default());
+        assert!(
+            texts(&state)
+                .iter()
+                .all(|(t, _)| *t != "first" && *t != "thanks")
+        );
     }
 
     #[test]

@@ -9,7 +9,10 @@ use std::{env, fs};
 use spectrograph::{Game, GameData, decode, originals_dir};
 
 /// The games this crate embeds, and the file each one's data goes to.
-const EMBEDDED: [(Game, &str); 1] = [(Game::C1, "chromatron1_data.rs")];
+const EMBEDDED: [(Game, &str); 2] = [
+    (Game::C1, "chromatron1_data.rs"),
+    (Game::C2, "chromatron2_data.rs"),
+];
 
 fn main() -> ExitCode {
     println!("cargo::rerun-if-env-changed=CHROMATRON_ORIGINALS");
@@ -48,8 +51,8 @@ fn game_data_source(data: &GameData) -> String {
     for level in data.levels.iter() {
         let _ = write!(
             s,
-            "        ::spectrograph::Level {{ id: {}, records: ::std::borrow::Cow::Borrowed(&[",
-            level.id
+            "        ::spectrograph::Level {{ game: ::spectrograph::Game::{:?}, id: {}, records: ::std::borrow::Cow::Borrowed(&[",
+            level.game, level.id
         );
         for r in level.records.iter() {
             let _ = write!(
@@ -60,7 +63,8 @@ fn game_data_source(data: &GameData) -> String {
         }
         let _ = writeln!(
             s,
-            "]), hint: ::std::borrow::Cow::Borrowed({:?}) }},",
+            "]), name: ::std::borrow::Cow::Borrowed({:?}), hint: ::std::borrow::Cow::Borrowed({:?}) }},",
+            level.name.as_ref(),
             level.hint.as_ref()
         );
     }
@@ -86,6 +90,7 @@ fn game_data_source(data: &GameData) -> String {
         ("click_next", &ui.click_next),
         ("freeware", &ui.freeware),
         ("more_levels", &ui.more_levels),
+        ("thank_you", &ui.thank_you),
         ("site_url", &ui.site_url),
     ] {
         let _ = writeln!(

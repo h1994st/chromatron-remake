@@ -2,6 +2,7 @@
 
 use crate::board::Cell;
 use crate::piece::{BLUE, Colour, Dir, GREEN, Piece, RED, turn};
+use crate::rule_set::{RuleSet, Splitter};
 
 /// One beam leaving a cell: direction, colour mask and entanglement tag (0 = not entangled).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,17 +60,25 @@ pub fn doppler_backward(c: Colour) -> Colour {
     (c & RED) >> 2 | (c & GREEN) << 1 | (c & BLUE) << 1
 }
 
-/// The beams that leave `cell` when a beam travelling `d` with colour `c` and tag `t` enters it.
-/// `next_tag` is the trace's `entangle_counter`. Teleporters are handled by the tracer (they need
-/// the board) and produce nothing here.
-pub fn transfer(cell: Cell, d: Dir, c: Colour, t: i32, next_tag: &mut i32) -> Emissions {
+/// The beams that leave `cell` when a beam travelling `d` with colour `c` and tag `t` enters it,
+/// under `rules`. `next_tag` is the trace's `entangle_counter`. Teleporters are handled by the
+/// tracer (they need the board) and complementors by its complementor pass, so both produce
+/// nothing here.
+pub fn transfer(
+    rules: &RuleSet,
+    cell: Cell,
+    d: Dir,
+    c: Colour,
+    t: i32,
+    next_tag: &mut i32,
+) -> Emissions {
     let mut out = Emissions::default();
     let p = cell.dir;
     let r = d.wrapping_sub(p) & 7;
     let mirrored = p.wrapping_mul(2).wrapping_sub(d) & 7;
     match cell.piece {
         Piece::Empty | Piece::Pinwheel => out.push(d, c, t),
-        Piece::Wall | Piece::Laser | Piece::Teleporter => {}
+        Piece::Wall | Piece::Laser | Piece::Teleporter | Piece::Complementor => {}
         Piece::Mirror => {
             if (1..=3).contains(&r) {
                 out.push(mirrored, c, t);
@@ -100,9 +109,9 @@ pub fn transfer(cell: Cell, d: Dir, c: Colour, t: i32, next_tag: &mut i32) -> Em
             6 => out.push(d, if t != 0 { c } else { doppler_backward(c) }, t),
             _ => {}
         },
-        Piece::Splitter => match r {
-            0 | 4 => {}
-            2 | 6 => out.push(d, c, t),
+        Piece::Splitter => match (r, rules.splitter) {
+            (0 | 4, _) => {}
+            (2 | 6, Splitter::PassHeadOn) => out.push(d, c, t),
             _ => {
                 out.push(d, c, 0);
                 out.push(mirrored, c, 0);
@@ -124,6 +133,16 @@ pub fn transfer(cell: Cell, d: Dir, c: Colour, t: i32, next_tag: &mut i32) -> Em
                 out.push(d, c, t);
             }
         }
+        Piece::MultiFilter => match r & 3 {
+            3 => out.push(d, c, t),
+            angle => {
+                let bit = [BLUE, GREEN, RED][usize::from(angle)];
+                if c & bit != 0 {
+                    out.push(d, bit, t);
+                }
+            }
+        },
+        Piece::Twister => out.push(turn(d, 6), c, t),
     }
     out
 }
@@ -137,10 +156,16 @@ mod tests {
         Cell { piece, colour, dir }
     }
 
-    /// (dir, colour, tag) triples for a beam entering `cell`, with the tag counter at 5.
+    /// (dir, colour, tag) triples for a beam entering `cell` under Chromatron 1's rules, with the
+    /// tag counter at 5.
     fn run(cell: Cell, d: Dir, c: Colour, t: i32) -> Vec<(Dir, Colour, i32)> {
+        run_in(&RuleSet::C1, cell, d, c, t)
+    }
+
+    /// As `run`, under `rules`.
+    fn run_in(rules: &RuleSet, cell: Cell, d: Dir, c: Colour, t: i32) -> Vec<(Dir, Colour, i32)> {
         let mut next_tag = 5;
-        transfer(cell, d, c, t, &mut next_tag)
+        transfer(rules, cell, d, c, t, &mut next_tag)
             .as_slice()
             .iter()
             .map(|e| (e.dir, e.colour, e.tag))
@@ -386,7 +411,14 @@ mod tests {
     #[test]
     fn tangler_emits_a_fresh_tagged_pair_per_colour_bit() {
         let mut next_tag = 5;
-        let out = transfer(cell(Piece::Tangler, 0, 1), 3, WHITE, 2, &mut next_tag);
+        let out = transfer(
+            &RuleSet::C1,
+            cell(Piece::Tangler, 0, 1),
+            3,
+            WHITE,
+            2,
+            &mut next_tag,
+        );
         let got: Vec<_> = out
             .as_slice()
             .iter()
@@ -410,6 +442,126 @@ mod tests {
                 [],
                 "r={r}"
             );
+        }
+    }
+
+    /// Every C1 piece behaves the same under Chromatron 2's rules, except the splitter.
+    #[test]
+    fn chromatron_2_keeps_every_chromatron_1_rule_but_the_splitter() {
+        for piece in Piece::ALL[..13].iter().filter(|&&p| p != Piece::Splitter) {
+            for p in 0..10 {
+                for d in 0..8 {
+                    for t in [0, 3] {
+                        let c1 = run(cell(*piece, GREEN, p), d, WHITE, t);
+                        let c2 = run_in(&RuleSet::C2, cell(*piece, GREEN, p), d, WHITE, t);
+                        assert_eq!(c1, c2, "{piece:?} p={p} d={d} t={t}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chromatron_2_splitter_reflects_head_on_and_always_disentangles() {
+        for p in 0..8 {
+            let at = |r: u8| {
+                run_in(
+                    &RuleSet::C2,
+                    cell(Piece::Splitter, 0, p),
+                    turn(p, r),
+                    RED,
+                    3,
+                )
+            };
+            assert_eq!(at(0), [], "parallel");
+            assert_eq!(at(4), [], "parallel");
+            // logic.md L3: straight on, then the mirror formula (2p − d), both with tag 0.
+            assert_eq!(
+                at(2),
+                [(turn(p, 2), RED, 0), (turn(p, 6), RED, 0)],
+                "and back"
+            );
+            assert_eq!(
+                at(6),
+                [(turn(p, 6), RED, 0), (turn(p, 2), RED, 0)],
+                "and back"
+            );
+            assert_eq!(at(1), [(turn(p, 1), RED, 0), (turn(p, 7), RED, 0)]);
+            assert_eq!(at(3), [(turn(p, 3), RED, 0), (turn(p, 5), RED, 0)]);
+            assert_eq!(at(5), [(turn(p, 5), RED, 0), (turn(p, 3), RED, 0)]);
+            assert_eq!(at(7), [(turn(p, 7), RED, 0), (turn(p, 1), RED, 0)]);
+        }
+    }
+
+    #[test]
+    fn multi_filter_passes_one_colour_bit_chosen_by_the_angle() {
+        // logic.md L3: r ≡ 0 blue, r ≡ 1 green, r ≡ 2 red, r ≡ 3 everything; tag kept.
+        for p in 0..8 {
+            for r in 0..8 {
+                let d = turn(p, r);
+                let multi = cell(Piece::MultiFilter, 4, p);
+                let expected = match r & 3 {
+                    0 => vec![(d, BLUE, 3)],
+                    1 => vec![(d, GREEN, 3)],
+                    2 => vec![(d, RED, 3)],
+                    _ => vec![(d, WHITE, 3)],
+                };
+                assert_eq!(
+                    run_in(&RuleSet::C2, multi, d, WHITE, 3),
+                    expected,
+                    "p={p} r={r}"
+                );
+                let missing = match r & 3 {
+                    0 => RED | GREEN,
+                    1 => RED | BLUE,
+                    2 => GREEN | BLUE,
+                    _ => continue,
+                };
+                assert_eq!(
+                    run_in(&RuleSet::C2, multi, d, missing, 3),
+                    [],
+                    "p={p} r={r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn twister_turns_every_beam_90_degrees_left_whatever_its_dir() {
+        // N→W, NE→NW, E→N, SE→NE, S→E, SW→SE, W→S, NW→SW, colour and tag kept.
+        let out = [6, 7, 0, 1, 2, 3, 4, 5];
+        for p in 0..8 {
+            for d in 0..8 {
+                assert_eq!(
+                    run_in(&RuleSet::C2, cell(Piece::Twister, 4, p), d, GREEN, 3),
+                    [(out[usize::from(d)], GREEN, 3)],
+                    "p={p} d={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn twister_is_not_reversible() {
+        let twister = cell(Piece::Twister, 4, 0);
+        let [(back, _, _)] = run_in(&RuleSet::C2, twister, 2, RED, 0)[..] else {
+            panic!("one beam")
+        };
+        assert_eq!(back, 0, "E → N");
+        // logic.md L3: sent back (travelling S) it leaves travelling E again, not W.
+        assert_eq!(run_in(&RuleSet::C2, twister, turn(back, 4), RED, 0)[0].0, 2);
+    }
+
+    #[test]
+    fn complementor_absorbs_in_the_tracer() {
+        for p in 0..8 {
+            for d in 0..8 {
+                assert_eq!(
+                    run_in(&RuleSet::C2, cell(Piece::Complementor, 4, p), d, RED, 3),
+                    [],
+                    "p={p} d={d}"
+                );
+            }
         }
     }
 }

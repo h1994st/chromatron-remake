@@ -2,6 +2,7 @@
 
 pub mod blit;
 pub mod c1;
+pub mod c2;
 pub mod damage;
 pub mod frame_timing;
 pub mod menus;
@@ -20,8 +21,8 @@ pub use game_window::run;
 
 use spectrograph::GameData;
 
-/// What differs between the games' apps. Chromatron 2–4 each add one, plus a bin and an
-/// `EMBEDDED` entry in build.rs.
+/// What differs between the games' apps, besides what `lumen::RuleSet::of(data.game)` says.
+/// Each game adds one, plus a bin and an `EMBEDDED` entry in build.rs.
 pub struct AppSpec {
     pub data: &'static GameData,
     /// The bundle id; also the preferences domain.
@@ -35,3 +36,43 @@ pub static CHROMATRON_1: AppSpec = AppSpec {
     bundle_id: "me.shengtuo.chromatron1",
     support_dir: "Chromatron 1",
 };
+
+pub static CHROMATRON_2: AppSpec = AppSpec {
+    data: &c2::GAME,
+    bundle_id: "me.shengtuo.chromatron2",
+    support_dir: "Chromatron 2",
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::progress_file::ProgressFile;
+    use lumen::RuleSet;
+    use spectrograph::Game;
+
+    #[test]
+    fn each_app_runs_its_own_game() {
+        for (spec, game, title) in [
+            (&CHROMATRON_1, Game::C1, "Chromatron 1 (v1.15)"),
+            (&CHROMATRON_2, Game::C2, "Chromatron 2 (v1.4)"),
+        ] {
+            assert_eq!(spec.data.game, game);
+            assert_eq!(spec.data.ui.window_title, title);
+            assert_eq!(
+                spec.bundle_id,
+                format!("me.shengtuo.chromatron{}", game.number())
+            );
+            assert_eq!(spec.support_dir, format!("Chromatron {}", game.number()));
+        }
+    }
+
+    #[test]
+    fn chromatron_2_saves_where_the_spec_says() {
+        let rules = RuleSet::of(CHROMATRON_2.data.game);
+        let file = ProgressFile::for_app(CHROMATRON_2.support_dir, rules)
+            .expect("tests run with a home directory");
+        assert!(file.path().ends_with(
+            "Library/Application Support/Chromatron 2/com.silverspaceship.chromatron2.dat"
+        ));
+    }
+}

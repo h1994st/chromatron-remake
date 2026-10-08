@@ -1,8 +1,9 @@
 //! The board: 15 × 15 cells plus a 60-slot toolbox, as in the original's `board` (data.md D2).
 
-use spectrograph::Level;
+use spectrograph::{Game, Level};
 
 use crate::piece::{Colour, Dir, Piece};
+use crate::rule_set::RuleSet;
 
 pub const SIDE: usize = 15;
 pub const BOARD_CELLS: usize = SIDE * SIDE;
@@ -22,16 +23,18 @@ pub struct Cell {
     pub dir: Dir,
 }
 
+/// A board of one game: the game decides what its cell bytes mean and how beams behave
+/// (`Board::rules`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Board {
     pub cells: [Cell; CELLS],
+    pub game: Game,
 }
 
+/// An empty Chromatron 1 board.
 impl Default for Board {
     fn default() -> Board {
-        Board {
-            cells: [Cell::default(); CELLS],
-        }
+        Board::new(Game::C1)
     }
 }
 
@@ -46,12 +49,28 @@ pub fn toolbox_index(slot: usize) -> usize {
 }
 
 impl Board {
-    /// `load_level_data` @ 0x69fc: an empty board with every record placed, movable pieces at
-    /// their stored (solution) positions.
+    /// An empty board of `game`.
+    pub fn new(game: Game) -> Board {
+        Board {
+            cells: [Cell::default(); CELLS],
+            game,
+        }
+    }
+
+    /// The rules of the board's game.
+    pub fn rules(&self) -> &'static RuleSet {
+        RuleSet::of(self.game)
+    }
+
+    /// `load_level_data` @ 0x69fc: an empty board of the level's game with every record placed,
+    /// movable pieces at their stored (solution) positions.
     pub fn from_level(level: &Level) -> Board {
-        let mut board = Board::default();
+        let mut board = Board::new(level.game);
+        let rules = board.rules();
         for r in level.records.iter() {
-            let piece = Piece::from_byte(r.kind).expect("spectrograph rejects unknown kinds");
+            let piece = rules
+                .piece(r.kind)
+                .expect("spectrograph rejects kinds the game doesn't have");
             board.cells[board_index(usize::from(r.x), usize::from(r.y))] = Cell {
                 piece,
                 colour: r.colour,
@@ -83,13 +102,15 @@ impl Board {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spectrograph::Record;
+    use spectrograph::{Game, Record};
     use std::borrow::Cow;
 
     fn level(records: &[Record]) -> Level {
         Level {
+            game: Game::C1,
             id: 1,
             records: Cow::Owned(records.to_vec()),
+            name: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
         }
     }
@@ -136,6 +157,25 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_board_belongs_to_its_levels_game() {
+        assert_eq!(Board::default().game, Game::C1);
+        assert_eq!(Board::default().rules(), &RuleSet::C1);
+        let mut c2 = level(&[Record {
+            kind: 3,
+            dir: 1,
+            colour: 4,
+            x: 3,
+            y: 4,
+        }]);
+        c2.game = Game::C2;
+        let board = Board::from_level(&c2);
+        assert_eq!(board.game, Game::C2);
+        assert_eq!(board.rules(), &RuleSet::C2);
+        assert_eq!(board.at(3, 4).piece, Piece::Mirror);
+        assert_eq!(Board::new(Game::C2).cells, Board::default().cells);
     }
 
     #[test]

@@ -4,8 +4,9 @@ use spectrograph::GameData;
 
 use crate::board::{Board, Cell};
 use crate::layout::{LAST_SLOT, Rect, STRIP_SLOTS};
-use crate::progress::{PROGRESS_SLOTS, update_unlocked};
-use crate::save::{SAVED_IDS, SaveData, encode_save};
+use crate::progress::PROGRESS_SLOTS;
+use crate::rule_set::RuleSet;
+use crate::save::{SaveData, encode_save};
 use crate::solution::{apply_solution, encode_solution};
 use crate::toolbox::move_pieces_to_toolbox;
 use crate::trace::{BeamField, trace};
@@ -112,6 +113,7 @@ pub(crate) struct Pointer {
 
 pub struct GameState<'a> {
     data: &'a GameData,
+    rules: &'static RuleSet,
     pub(crate) board: Board,
     field: BeamField,
     slot: usize,
@@ -147,16 +149,20 @@ fn clamp_pointer(event: InputEvent) -> InputEvent {
 
 impl<'a> GameState<'a> {
     /// `game_init`: progress from `save`, then slot 0, restoring its saved board if there is one.
-    /// `save.boards` is brought to `SAVED_IDS` entries if it has another length.
+    /// The game's rules come from `data.game`. `save.boards` is brought to the game's
+    /// `RuleSet::saved_ids` entries if it has another length.
     ///
-    /// Trusts `save`: build it only with `decode_save` or `Default`. The initial level's
-    /// `Effects` are not returned, so callers must paint the whole window first.
+    /// Trusts `save`: build it only with `decode_save` for the same game, `SaveData::fresh` or
+    /// `Default`. The initial level's `Effects` are not returned, so callers must paint the whole
+    /// window first.
     pub fn new(data: &'a GameData, save: SaveData) -> GameState<'a> {
+        let rules = RuleSet::of(data.game);
         let mut saved = save.boards;
-        saved.resize(SAVED_IDS, None);
+        saved.resize(rules.saved_ids, None);
         let mut state = GameState {
             data,
-            board: Board::default(),
+            rules,
+            board: Board::new(data.game),
             field: BeamField::default(),
             slot: 0,
             won: false,
@@ -166,7 +172,7 @@ impl<'a> GameState<'a> {
             saved,
             pointer: Pointer::default(),
         };
-        update_unlocked(&state.completed, &mut state.unlocked);
+        rules.unlock.apply(&state.completed, &mut state.unlocked);
         state.start_level(true);
         state
     }
@@ -211,11 +217,16 @@ impl<'a> GameState<'a> {
 
     /// The save file's bytes for the current progress and saved boards.
     pub fn save_bytes(&self) -> Vec<u8> {
-        encode_save(&self.completed, &self.saved)
+        encode_save(self.rules, &self.completed, &self.saved)
     }
 
     pub fn data(&self) -> &'a GameData {
         self.data
+    }
+
+    /// The rules of the game being played.
+    pub fn rules(&self) -> &'static RuleSet {
+        self.rules
     }
 
     pub fn board(&self) -> &Board {
@@ -269,6 +280,15 @@ impl<'a> GameState<'a> {
             .hint
     }
 
+    /// The current level's name, "" in a game without names.
+    pub fn level_name(&self) -> &'a str {
+        let data: &'a GameData = self.data;
+        &data
+            .slot_level(self.slot)
+            .expect("level order names decoded levels")
+            .name
+    }
+
     pub fn drag(&self) -> Option<Drag> {
         let p = &self.pointer;
         (p.state == DragState::Dragging).then_some(Drag {
@@ -284,7 +304,7 @@ impl<'a> GameState<'a> {
             b' ' | b'=' | b'+' => self.next_level(),
             b'-' => self.prev_level(),
             b'r' => self.start_level(false),
-            b'L' => {
+            cheat if cheat == self.rules.cheat_key => {
                 self.force_win = true;
                 self.check_win()
             }
@@ -348,7 +368,7 @@ impl<'a> GameState<'a> {
         if self.won && !self.completed[self.slot] {
             self.completed[self.slot] = true;
             self.save_level_state();
-            update_unlocked(&self.completed, &mut self.unlocked);
+            self.rules.unlock.apply(&self.completed, &mut self.unlocked);
             effects.write_save = true;
         }
         effects
@@ -359,9 +379,10 @@ impl<'a> GameState<'a> {
 mod tests {
     use super::*;
     use crate::board::{board_index, toolbox_index};
-    use crate::fixture::tiny_game;
+    use crate::fixture::{tiny_game, tiny_game_of};
     use crate::piece::Piece;
     use crate::save::decode_save;
+    use spectrograph::Game;
 
     fn fresh(data: &GameData) -> GameState<'_> {
         GameState::new(data, SaveData::default())
@@ -600,7 +621,7 @@ mod tests {
                 ..Effects::default()
             }
         );
-        let save = decode_save(&state.save_bytes()).unwrap();
+        let save = decode_save(&RuleSet::C1, &state.save_bytes()).unwrap();
         assert!(save.completed[0] && !save.completed[1]);
         assert_eq!(
             save.boards[1].as_ref().unwrap().at(8, 7).piece,
@@ -621,8 +642,8 @@ mod tests {
         };
         let mut state = GameState::new(&data, save);
         state.handle(InputEvent::Quit);
-        let saved = decode_save(&state.save_bytes()).unwrap();
-        assert_eq!(saved.boards.len(), SAVED_IDS);
+        let saved = decode_save(&RuleSet::C1, &state.save_bytes()).unwrap();
+        assert_eq!(saved.boards.len(), RuleSet::C1.saved_ids);
         assert!(saved.boards[1].is_some());
     }
 
@@ -642,5 +663,53 @@ mod tests {
         assert!(state.is_won());
         assert_eq!(state.board().at(0, 0).piece, Piece::Wall);
         assert!(state.is_unlocked(1));
+    }
+
+    #[test]
+    fn chromatron_2_cheats_with_z_and_opens_five_levels() {
+        let data = tiny_game_of(Game::C2);
+        let mut state = fresh(&data);
+        assert_eq!(state.rules(), &RuleSet::C2);
+        assert_eq!(state.board().game, Game::C2);
+        assert_eq!(
+            (0..6).map(|s| state.is_unlocked(s)).collect::<Vec<_>>(),
+            [true, true, true, true, true, false]
+        );
+        assert_eq!(state.handle(InputEvent::Key(b'L')), Effects::default());
+        assert!(state.handle(InputEvent::Key(b'z')).write_save);
+        assert!(state.is_won() && state.is_completed(0));
+        assert!(
+            !state.is_unlocked(5),
+            "after the first win four uncompleted slots stay open"
+        );
+    }
+
+    #[test]
+    fn chromatron_2_copies_pastes_and_saves_in_its_own_formats() {
+        let data = tiny_game_of(Game::C2);
+        let mut state = fresh(&data);
+        assert_eq!(
+            state.handle(InputEvent::Copy).clipboard.as_deref(),
+            Some("2-01-er")
+        );
+        assert_eq!(
+            state.handle(InputEvent::Paste("1-01-hI".into())),
+            Effects::default()
+        );
+        assert!(state.handle(InputEvent::Paste("2-01-hI".into())).write_save);
+        let bytes = state.save_bytes();
+        assert_eq!(
+            bytes[..3],
+            [0x00, 0x00, 0x10],
+            "platform.md P7: slot 0 only"
+        );
+        let save = decode_save(&RuleSet::C2, &bytes).unwrap();
+        assert!(save.completed[0]);
+        assert_eq!(save.boards.len(), 52);
+        let board = save.boards[1].as_ref().unwrap();
+        assert_eq!(
+            (board.game, board.at(8, 7).piece),
+            (Game::C2, Piece::Mirror)
+        );
     }
 }

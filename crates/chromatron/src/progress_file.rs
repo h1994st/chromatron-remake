@@ -1,37 +1,37 @@
-//! The save file: `~/Library/Application Support/Chromatron N/com.silverspaceship.chromatron.dat`,
-//! byte for byte the original's format (platform.md P7), so an old save can be dropped in.
+//! The save file: `~/Library/Application Support/Chromatron N/<the original's file name>`, byte for
+//! byte the original's format (platform.md P7), so an old save can be dropped in.
 
 use std::cell::Cell;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
 
-use lumen::{SaveData, decode_save};
-
-/// The original's file name (no game number in it).
-pub const SAVE_FILE_NAME: &str = "com.silverspaceship.chromatron.dat";
+use lumen::{RuleSet, SaveData, decode_save};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProgressFile {
     path: PathBuf,
+    rules: &'static RuleSet,
     /// Set by `load` when a save it could not use is still in place: `store` then refuses.
     locked: Cell<bool>,
 }
 
 impl ProgressFile {
-    /// The save file inside `dir`.
-    pub fn in_dir(dir: &Path) -> ProgressFile {
+    /// The save file of `rules`' game inside `dir`, named as the original named it.
+    pub fn in_dir(dir: &Path, rules: &'static RuleSet) -> ProgressFile {
         ProgressFile {
-            path: dir.join(SAVE_FILE_NAME),
+            path: dir.join(rules.save_file_name),
+            rules,
             locked: Cell::new(false),
         }
     }
 
     /// `~/Library/Application Support/<support_dir>/`. `None` without a home directory.
-    pub fn for_app(support_dir: &str) -> Option<ProgressFile> {
+    pub fn for_app(support_dir: &str, rules: &'static RuleSet) -> Option<ProgressFile> {
         let home = env::home_dir()?;
         Some(ProgressFile::in_dir(
             &home.join("Library/Application Support").join(support_dir),
+            rules,
         ))
     }
 
@@ -46,17 +46,17 @@ impl ProgressFile {
         PathBuf::from(name)
     }
 
-    /// The saved progress. A missing file is a fresh game. A corrupt or unreadable one is renamed
+    /// The saved progress, read with the game's save format. A missing file is a fresh game. A corrupt or unreadable one is renamed
     /// to `.bak`, logged, and gives a fresh game (spec §7); a corrupt file replaces any older
     /// `.bak`. If such a file cannot be moved aside either, the game still starts fresh but this
     /// `ProgressFile` is locked: `store` refuses, so the unread save is never overwritten.
     pub fn load(&self) -> SaveData {
         let (reason, bytes) = match fs::read(&self.path) {
-            Ok(bytes) => match decode_save(&bytes) {
+            Ok(bytes) => match decode_save(self.rules, &bytes) {
                 Ok(save) => return save,
                 Err(e) => (format!("is corrupt ({e})"), bytes),
             },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return SaveData::default(),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return SaveData::fresh(self.rules),
             Err(e) => (format!("cannot be read ({e})"), Vec::new()),
         };
         drop(bytes);
@@ -75,7 +75,7 @@ impl ProgressFile {
                 );
             }
         }
-        SaveData::default()
+        SaveData::fresh(self.rules)
     }
 
     /// Writes the whole file: into a temporary file next to it, then renamed over it, so a crash
@@ -106,7 +106,8 @@ mod tests {
 
     #[test]
     fn the_app_file_lives_in_application_support() {
-        let file = ProgressFile::for_app("Chromatron 1").expect("tests run with a home directory");
+        let file = ProgressFile::for_app("Chromatron 1", &RuleSet::C1)
+            .expect("tests run with a home directory");
         let home = env::home_dir().unwrap();
         assert_eq!(
             file.path(),
@@ -125,7 +126,7 @@ mod tests {
     #[test]
     fn a_missing_file_is_a_fresh_game() {
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(&dir.path().join("Chromatron 1"));
+        let file = ProgressFile::in_dir(&dir.path().join("Chromatron 1"), &RuleSet::C1);
         assert_eq!(file.load(), SaveData::default());
         assert!(!file.backup_path().exists());
     }
@@ -133,7 +134,7 @@ mod tests {
     #[test]
     fn store_creates_the_folder_and_load_reads_it_back() {
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(&dir.path().join("Chromatron 1"));
+        let file = ProgressFile::in_dir(&dir.path().join("Chromatron 1"), &RuleSet::C1);
         let mut bytes = vec![0u8; 32];
         bytes[0] = 0x01;
         file.store(&bytes).unwrap();
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn a_corrupt_file_is_moved_to_bak_and_the_game_starts_fresh() {
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(dir.path());
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C1);
         // Slot 0's check value is 1, so an all-ones bitmap is corrupt (platform.md P7).
         let corrupt = [0xffu8; 32];
         fs::write(file.path(), corrupt).unwrap();
@@ -169,7 +170,7 @@ mod tests {
     #[test]
     fn a_short_file_is_a_fresh_game_and_stays_put() {
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(dir.path());
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C1);
         fs::write(file.path(), [1u8; 10]).unwrap();
         assert_eq!(file.load(), SaveData::default());
         assert!(file.path().exists());
@@ -180,7 +181,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blocker = dir.path().join("Chromatron 1");
         fs::write(&blocker, b"a file where the folder should be").unwrap();
-        let file = ProgressFile::in_dir(&blocker);
+        let file = ProgressFile::in_dir(&blocker, &RuleSet::C1);
         assert!(file.store(&[0u8; 32]).is_err());
         assert_eq!(file.load(), SaveData::default());
     }
@@ -206,7 +207,7 @@ mod tests {
     #[test]
     fn an_unreadable_save_is_moved_aside_not_overwritten() {
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(dir.path());
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C1);
         let mut bytes = vec![0u8; 32];
         bytes[0] = 1;
         fs::write(file.path(), &bytes).unwrap();
@@ -228,7 +229,7 @@ mod tests {
     fn a_save_that_can_be_neither_read_nor_moved_is_never_written() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(dir.path());
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C1);
         let mut bytes = vec![0u8; 32];
         bytes[0] = 1;
         fs::write(file.path(), &bytes).unwrap();
@@ -255,7 +256,7 @@ mod tests {
     fn a_corrupt_save_that_cannot_be_moved_is_never_written() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let file = ProgressFile::in_dir(dir.path());
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C1);
         fs::write(file.path(), [0xffu8; 32]).unwrap();
         let _dir_guard = Unreadable(dir.path().to_owned(), 0o755);
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
@@ -263,5 +264,35 @@ mod tests {
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         assert!(file.store(&[0u8; 32]).is_err());
         assert_eq!(fs::read(file.path()).unwrap(), [0xffu8; 32]);
+    }
+
+    #[test]
+    fn chromatron_2_keeps_its_own_file_and_format() {
+        let file = ProgressFile::for_app("Chromatron 2", &RuleSet::C2)
+            .expect("tests run with a home directory");
+        assert_eq!(
+            file.path(),
+            env::home_dir().unwrap().join(
+                "Library/Application Support/Chromatron 2/com.silverspaceship.chromatron2.dat"
+            )
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C2);
+        assert_eq!(file.load(), SaveData::fresh(&RuleSet::C2));
+        let mut bytes = vec![0u8; 32];
+        bytes[2] = 0x10;
+        file.store(&bytes).unwrap();
+        let save = file.load();
+        assert!(
+            save.completed[0],
+            "`00 00 10`: slot 0 only (platform.md P7)"
+        );
+        assert!(save.completed[1..].iter().all(|&c| !c));
+        // Chromatron 1's slot-0 bitmap is corrupt for Chromatron 2.
+        let mut c1_bytes = vec![0u8; 32];
+        c1_bytes[0] = 0x01;
+        fs::write(file.path(), &c1_bytes).unwrap();
+        assert_eq!(file.load(), SaveData::fresh(&RuleSet::C2));
+        assert_eq!(fs::read(file.backup_path()).unwrap(), c1_bytes);
     }
 }
