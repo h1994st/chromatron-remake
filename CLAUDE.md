@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A faithful native macOS (Apple Silicon) port, in Rust, of Sean Barrett's Chromatron 1–4 laser puzzle games. The originals in `chromatron_mac/` are 32-bit PowerPC Mach-O Carbon apps (C1 v1.15, C2 v1.4, C3 v1.1, C4 v1.0). Everything — game rules, levels, sprites, text — is recovered from our own decompilation of those binaries. The reference look is the **Mac** version (not Win32).
 
-Status: design approved stage; the full design spec lives locally at `docs/superpowers/specs/2026-10-07-chromatron-port-design.md` (read it before implementing anything). The workspace below is the planned layout.
+Status: Plan 1 done: spectrograph loads and pins originals and decodes strings; C1 reverse-engineering notes in `re/notes/chromatron1/`. Next: Plan 2 (C1 decoders). The full design spec lives locally at `docs/superpowers/specs/2026-10-07-chromatron-port-design.md` (read it before implementing anything). The workspace below is the planned layout.
 
 ## Hard rules
 
@@ -31,12 +31,14 @@ Status: design approved stage; the full design spec lives locally at `docs/super
 |---|---|
 | `just setup` | `brew bundle` (ghidra, just, radare2) |
 | `just decompile <game>` | Ghidra headless (`re/ghidra/` scripts) → `re/out/chromatron<game>/` |
-| `just dump <game>` | `spectrograph` CLI: levels as ASCII, strings, sprite-sheet PNG → `re/out/` |
-| `just run <game>` | run app for game 1–4 |
-| `just shot <game> <level> [solution]` | render a level to PNG for visual review |
+| `just dump <game>` | `spectrograph` CLI: print a game's sections and strings (levels and sprites come in later plans) |
+| `just run <game>` | run app for game 1–4 (added in later plans) |
+| `just shot <game> <level> [solution]` | render a level to PNG for visual review (added in later plans) |
+| `just lint` | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets -- -D warnings` |
 | `just test` | verifies originals are present, then `cargo test --workspace` |
-| `just bench` | criterion benches vs. perf budgets |
-| `just bundle` | release build → `dist/Chromatron*.app`, ad-hoc signed |
+| `just bench` | criterion benches vs. perf budgets (added in later plans) |
+| `just bundle` | release build → `dist/Chromatron*.app`, ad-hoc signed (added in later plans) |
+| `cargo run -p spectrograph -- path <game>` | print a game's executable path |
 
 Single test: `cargo test -p <crate> <test_name>`; snapshot review: `cargo insta review`.
 
@@ -47,7 +49,7 @@ Cargo workspace, three crates, strict layering `spectrograph` → `lumen` → `c
 - **`crates/spectrograph`** — parses the PPC Mach-O (`object` crate, big-endian) and decodes `GameData` (levels, sprites → RGBA, MacRoman strings, palette) via a per-game table of data locations. Each game pins the SHA-256 of its expected binary; mismatch is a hard error.
 - **`crates/lumen`** — pure engine, no platform deps. Board/pieces model (`Color` = 3-bit RGB mask, 8 `Dir`s, beams carry an optional entanglement id), `trace` (beam propagation into reusable scratch → `BeamField`), win check, per-game `RuleSet`, `GameState` + pure `handle(InputEvent) -> Effects`, and `render` into an RGBA framebuffer at native resolution plus a list of text boxes.
 - **`crates/chromatron`** — macOS shell: winit + softbuffer + muda menus + objc2 (NSUserDefaults, NSPasteboard, Core Text with Lucida Grande for text boxes). Four bin targets `chromatron1..4` select a `Game`. Its `build.rs` runs `spectrograph` on the originals and generates `static` data, so startup does no decoding.
-- **`re/`** — `ghidra/` (our headless scripts, committed), `notes/chromatronN.md` (our RE findings: function roles, data addresses, formats, quirks — committed), `out/` (ignored).
+- **`re/`** — `ghidra/` (our headless scripts, committed), `notes/chromatronN/{data,logic,platform}.md` plus `*.names.tsv` (our RE findings: function roles, data addresses, formats, quirks, and the names `ApplyNames` applies — committed), `out/` (ignored).
 
 Per-game behavior differs and must come from **that game's own binary**: e.g. C2 changed splitter semantics ("Splitters in the original Chromatron didn't work correctly") and adds complementor/multi-filter/twister; C3 adds dual-reflector/quad-bender; C4 adds logic gates, starburst, mobile teleporter, occupied squares. Games 2–4 are reverse-engineered by diffing against game 1.
 
