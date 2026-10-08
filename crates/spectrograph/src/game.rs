@@ -1,5 +1,6 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::{env, fs};
 
 /// One of the four original games. Each maps to exactly one pinned binary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -64,6 +65,32 @@ impl Game {
     pub fn binary_path(self, originals: &Path) -> PathBuf {
         originals.join(self.executable())
     }
+
+    /// Parses a game number given on the command line.
+    pub fn parse_arg(arg: &str) -> Result<Game, String> {
+        arg.parse::<u8>()
+            .ok()
+            .and_then(Game::from_number)
+            .ok_or_else(|| format!("unknown game {arg:?}; expected 1, 2, 3 or 4"))
+    }
+
+    /// Reads this game's original executable from [`originals_dir`].
+    pub fn read_original(self) -> Result<Vec<u8>, String> {
+        let path = self.binary_path(&originals_dir());
+        fs::read(&path).map_err(|e| {
+            format!(
+                "{}: {e}; put the original apps in chromatron_mac/ or set CHROMATRON_ORIGINALS",
+                path.display()
+            )
+        })
+    }
+}
+
+/// Where the original apps live: `$CHROMATRON_ORIGINALS`, or `chromatron_mac/` in this repository.
+pub fn originals_dir() -> PathBuf {
+    env::var_os("CHROMATRON_ORIGINALS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chromatron_mac"))
 }
 
 impl fmt::Display for Game {
@@ -94,6 +121,16 @@ mod tests {
     fn display_names_game_and_version() {
         assert_eq!(Game::C1.to_string(), "Chromatron 1 v1.15");
         assert_eq!(Game::C2.to_string(), "Chromatron 2 v1.4");
+    }
+
+    #[test]
+    fn parses_game_arguments() {
+        assert_eq!(Game::parse_arg("1"), Ok(Game::C1));
+        assert_eq!(Game::parse_arg("4"), Ok(Game::C4));
+        for bad in ["0", "5", "x", ""] {
+            let err = Game::parse_arg(bad).unwrap_err();
+            assert!(err.contains("expected 1, 2, 3 or 4"), "{bad}: {err}");
+        }
     }
 
     #[test]

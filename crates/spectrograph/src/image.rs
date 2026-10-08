@@ -80,6 +80,14 @@ impl<'a> Image<'a> {
             s.data.get(start..start.checked_add(len)?)
         })
     }
+
+    /// The bytes from `vmaddr` to the end of the section that contains it.
+    pub fn tail(&self, vmaddr: u32) -> Option<&'a [u8]> {
+        self.sections.iter().find_map(|s| {
+            let start = vmaddr.checked_sub(s.vmaddr)? as usize;
+            s.data.get(start..).filter(|rest| !rest.is_empty())
+        })
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

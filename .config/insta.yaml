@@ -1,0 +1,4 @@
+# Snapshots are local regression baselines derived from the originals, so they are git-ignored.
+# A missing snapshot is recorded and passes; a changed one fails for review (`cargo insta review`).
+behavior:
+  update: unseen

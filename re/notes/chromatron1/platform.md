@@ -622,5 +622,5 @@ r2 -e scr.color=0 -qc 'ir' "$BIN" </dev/null 2>/dev/null | grep -c -i -E 'timer|
 # 0
 # positive control: the import list itself is non-empty
 r2 -e scr.color=0 -qc 'ir' "$BIN" </dev/null 2>/dev/null | wc -l
-# @@N@@
+# 79
 ```

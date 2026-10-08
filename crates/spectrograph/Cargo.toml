@@ -5,7 +5,27 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+default = ["cli"]
+# Parse the original binaries. Off for crates that only need the data types.
+decode = ["dep:encoding_rs", "dep:object", "dep:sha2"]
+# The `spectrograph` command-line tool (adds PNG output).
+cli = ["decode", "dep:png"]
+
 [dependencies]
-encoding_rs = "0.8"
-object = "0.40"
-sha2 = "0.11"
+encoding_rs = { version = "0.8", optional = true }
+object = { version = "0.40", optional = true }
+png = { version = "0.18.1", optional = true }
+sha2 = { version = "0.11", optional = true }
+
+[[bin]]
+name = "spectrograph"
+required-features = ["cli"]
+
+[[test]]
+name = "originals"
+required-features = ["decode"]
+
+[[test]]
+name = "c1_data"
+required-features = ["decode"]

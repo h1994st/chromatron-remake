@@ -20,6 +20,13 @@ pub fn cstrings(image: &Image) -> Result<Vec<CString>, DecodeError> {
     Ok(split_cstrings(section.vmaddr, section.data))
 }
 
+/// The NUL-terminated string starting at `vmaddr`, if a NUL follows within the same section.
+pub fn cstring_at(image: &Image, vmaddr: u32) -> Option<String> {
+    let rest = image.tail(vmaddr)?;
+    let end = rest.iter().position(|&b| b == 0)?;
+    Some(decode_mac_roman(&rest[..end]))
+}
+
 fn split_cstrings(base: u32, data: &[u8]) -> Vec<CString> {
     let mut out = Vec::new();
     let mut start = 0;

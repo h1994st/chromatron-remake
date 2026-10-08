@@ -13,15 +13,31 @@ setup:
 # Check formatting and lints
 lint:
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings
 
 # Run all tests (needs the original apps)
 test: _require-originals
-    cargo test --workspace
+    cargo test --workspace --features lumen/cli
 
-# Print a game's sections and strings (game: 1-4)
+# Print a game's sections, strings and levels; write its sprite sheet to re/out/chromatron<game>/ (game: 1-4)
 dump game: _require-originals
-    cargo run --quiet -p spectrograph -- dump {{game}}
+    cargo run --quiet -p spectrograph -- dump {{game}} "{{justfile_directory()}}/re/out/chromatron{{game}}"
+
+# Render a level to re/out/shots/ (level: 1-50; solution: "stored" or a copied solution such as 1-01-hI)
+shot game level solution="": _require-originals
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="{{justfile_directory()}}/re/out/shots"
+    mkdir -p "$out"
+    if [ -n "{{solution}}" ]; then
+        cargo run --quiet -p lumen --features cli -- shot {{game}} {{level}} "$out/chromatron{{game}}-level{{level}}-solved.png" "{{solution}}"
+    else
+        cargo run --quiet -p lumen --features cli -- shot {{game}} {{level}} "$out/chromatron{{game}}-level{{level}}.png"
+    fi
+
+# Benchmark trace and render on real levels; fails if over the spec's budgets
+bench: _require-originals
+    cargo bench -p lumen --bench engine
 
 _require-originals:
     @test -d "{{originals}}/Chromatron.app" || { echo "error: originals not found — put the original apps in chromatron_mac/" >&2; exit 1; }

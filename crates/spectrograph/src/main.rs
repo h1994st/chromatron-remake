@@ -1,8 +1,10 @@
-use std::{env, fs, path::PathBuf, process::ExitCode};
+use std::{env, fs, path::Path, process::ExitCode};
 
-use spectrograph::{Game, Image, cstrings};
+use spectrograph::{Game, GameData, Image, cstrings, decode, originals_dir, write_rgb_png};
 
-const USAGE: &str = "usage: spectrograph <path|dump> <game 1-4>";
+mod dump;
+
+const USAGE: &str = "usage: spectrograph path <game 1-4> | spectrograph dump <game 1-4> [out-dir]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -16,20 +18,16 @@ fn main() -> ExitCode {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    let [command, game] = args else {
-        return Err(USAGE.into());
+    let (command, game, out_dir) = match args {
+        [command, game] => (command, game, None),
+        [command, game, out_dir] => (command, game, Some(Path::new(out_dir))),
+        _ => return Err(USAGE.into()),
     };
-    let game = parse_game(game)?;
-    let path = game.binary_path(&originals_dir());
+    let game = Game::parse_arg(game)?;
     match command.as_str() {
-        "path" => println!("{}", path.display()),
+        "path" if out_dir.is_none() => println!("{}", game.binary_path(&originals_dir()).display()),
         "dump" => {
-            let bytes = fs::read(&path).map_err(|e| {
-                format!(
-                    "{}: {e}; put the original apps in chromatron_mac/ or set CHROMATRON_ORIGINALS",
-                    path.display()
-                )
-            })?;
+            let bytes = game.read_original()?;
             let image = Image::load(game, &bytes).map_err(|e| e.to_string())?;
             println!("# {game}\n\n## sections");
             for s in image.sections() {
@@ -45,41 +43,61 @@ fn run(args: &[String]) -> Result<(), String> {
             for s in cstrings(&image).map_err(|e| e.to_string())? {
                 println!("{:#010x}  {:?}", s.vmaddr, s.text);
             }
+            if game != Game::C1 {
+                println!("\n## levels\n(not decoded yet for {game})");
+                return Ok(());
+            }
+            let data = decode(game, &bytes).map_err(|e| e.to_string())?;
+            print_levels(&data);
+            if let Some(dir) = out_dir {
+                write_sprite_sheet(&data, dir)?;
+            }
         }
         _ => return Err(USAGE.into()),
     }
     Ok(())
 }
 
-fn parse_game(arg: &str) -> Result<Game, String> {
-    arg.parse::<u8>()
-        .ok()
-        .and_then(Game::from_number)
-        .ok_or_else(|| format!("unknown game {arg:?}; expected 1, 2, 3 or 4"))
+fn print_levels(data: &GameData) {
+    println!("\n## levels");
+    for (slot, &id) in data.level_order.iter().enumerate() {
+        print_level(data, id, &format!("slot {} (id {id})", slot + 1));
+    }
+    for level in data
+        .levels
+        .iter()
+        .filter(|l| !data.level_order.contains(&l.id))
+    {
+        print_level(data, level.id, &format!("id {} (unreachable)", level.id));
+    }
 }
 
-fn originals_dir() -> PathBuf {
-    env::var_os("CHROMATRON_ORIGINALS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../chromatron_mac"))
+fn print_level(data: &GameData, id: u8, title: &str) {
+    let level = data.level(id).expect("level order names a decoded level");
+    println!("\n### {title}: {} records", level.records.len());
+    if !level.hint.is_empty() {
+        println!("hint: {:?}", level.hint);
+    }
+    print!("{}", dump::level_grid(level));
+}
+
+fn write_sprite_sheet(data: &GameData, dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let path = dir.join("sprites.png");
+    let (width, height, pixels) = dump::sprite_sheet(data);
+    write_rgb_png(&path, width, height, &pixels).map_err(|e| format!("{}: {e}", path.display()))?;
+    eprintln!("wrote {}", path.display());
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spectrograph::Game;
 
     #[test]
-    fn parses_game_numbers() {
-        assert_eq!(parse_game("1"), Ok(Game::C1));
-        assert_eq!(parse_game("4"), Ok(Game::C4));
-    }
-
-    #[test]
-    fn rejects_bad_game_arguments() {
-        for bad in ["0", "5", "x", ""] {
-            let err = parse_game(bad).unwrap_err();
-            assert!(err.contains("expected 1, 2, 3 or 4"), "{bad}: {err}");
-        }
+    fn rejects_extra_arguments() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(run(&args(&["path", "1", "x"])), Err(USAGE.into()));
+        assert_eq!(run(&args(&["dump", "1", "x", "y"])), Err(USAGE.into()));
     }
 }
