@@ -8,7 +8,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use lumen::layout::STRIP_SLOTS;
-use lumen::{FRAME_HEIGHT, FRAME_WIDTH, GameState, InputEvent, Rect};
+use lumen::{
+    Button, ButtonLatch, Damage, FRAME_HEIGHT, FRAME_WIDTH, GameState, Held, InputEvent, Rect,
+    ScrollDelta, WheelGate, key_byte, resume_slot, typed_text,
+};
 use muda::MenuEvent;
 use softbuffer::{Context, Surface};
 use winit::application::ApplicationHandler;
@@ -24,17 +27,14 @@ use winit::window::{Fullscreen, Window, WindowButtons, WindowId};
 
 use crate::AppSpec;
 use crate::blit::{LETTERBOX, blit_scaled, fill_letterbox};
-use crate::damage::Damage;
 use crate::frame_timing::{FrameTimes, Profiler};
 use crate::menus::{MenuBar, MenuCommand};
 use crate::pasteboard;
-use crate::pointer_keys::{Button, ButtonLatch, Held, key_byte, typed_text};
 use crate::progress_file::ProgressFile;
 use crate::snapshot;
 use crate::typeset::TypesetCache;
 use crate::user_defaults::Preferences;
 use crate::viewport::{DeviceRect, Viewport, window_size};
-use crate::wheel::{ScrollDelta, WheelGate};
 
 /// The whole frame, as a damage rect.
 const FULL_FRAME: Rect = Rect::new(0, 0, FRAME_WIDTH as i32, FRAME_HEIGHT as i32);
@@ -129,6 +129,8 @@ struct App {
     cursor: (i32, i32),
     modifiers: ModifiersState,
     wheel: WheelGate,
+    /// The origin of the wheel gate's millisecond clock.
+    clock: Instant,
     /// Time in `GameState::handle` since the last present.
     handle_time: Duration,
     profiler: Profiler,
@@ -180,6 +182,7 @@ impl App {
             cursor: (-1, -1),
             modifiers: ModifiersState::empty(),
             wheel: WheelGate::default(),
+            clock: Instant::now(),
             handle_time: Duration::ZERO,
             profiler,
             snapshot,
@@ -498,7 +501,10 @@ impl ApplicationHandler<UserEvent> for App {
                         }
                     }
                 };
-                if let Some(delta) = self.wheel.feed(scroll, Instant::now()) {
+                if let Some(delta) = self
+                    .wheel
+                    .feed(scroll, self.clock.elapsed().as_secs_f64() * 1000.0)
+                {
                     self.send(InputEvent::Wheel { delta });
                 }
             }
@@ -540,40 +546,9 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-/// The slot to reopen on: the stored one if it is on the strip, not slot 0 (where the game
-/// starts anyway) and unlocked.
-fn resume_slot(
-    stored: Option<i64>,
-    strip_slots: usize,
-    unlocked: impl Fn(usize) -> bool,
-) -> Option<usize> {
-    let slot = usize::try_from(stored?).ok()?;
-    (slot != 0 && slot < strip_slots && unlocked(slot)).then_some(slot)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{resume_slot, view_update};
-
-    #[test]
-    fn resume_needs_a_stored_unlocked_slot_other_than_the_first() {
-        let open = |slot: usize| slot <= 7;
-        assert_eq!(resume_slot(None, 50, open), None);
-        assert_eq!(resume_slot(Some(0), 50, open), None);
-        assert_eq!(resume_slot(Some(7), 50, open), Some(7));
-        assert_eq!(resume_slot(Some(8), 50, open), None);
-        assert_eq!(resume_slot(Some(-3), 50, open), None);
-        assert_eq!(resume_slot(Some(50), 50, |_| true), None);
-        assert_eq!(resume_slot(Some(49), 50, |_| true), Some(49));
-        // Range is checked before `unlocked`, which indexes the strip.
-        assert_eq!(
-            resume_slot(Some(60), 50, |s| {
-                assert!(s < 50, "unlocked called for {s}");
-                true
-            }),
-            None
-        );
-    }
+    use super::view_update;
 
     #[test]
     fn the_view_menu_is_updated_only_when_its_state_changed() {

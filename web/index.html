@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chromatron</title>
+  <meta name="description" content="Sean Barrett's Chromatron 1–4 laser puzzle games in the browser: an independent port.">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='5' cy='6' r='4' fill='%23f44'/%3E%3Ccircle cx='11' cy='6' r='4' fill='%234d4'/%3E%3Ccircle cx='8' cy='11' r='4' fill='%2348f'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css?v=__BUILD__">
+  <script type="module" src="main.js?v=__BUILD__"></script>
+</head>
+<body>
+  <header>
+    <nav class="games" aria-label="Game">
+      <button type="button" data-game="1">Chromatron 1</button>
+      <button type="button" data-game="2">Chromatron 2</button>
+      <button type="button" data-game="3">Chromatron 3</button>
+      <button type="button" data-game="4">Chromatron 4</button>
+    </nav>
+    <div class="toolbar" role="toolbar" aria-label="Level">
+      <button type="button" data-command="reset" title="Put every piece back (r)">Reset</button>
+      <button type="button" data-command="previous" title="Previous level (-)">Previous</button>
+      <button type="button" data-command="next" title="Next level (Space or =)">Next</button>
+      <button type="button" id="copy" title="Copy your solution as text (⌘C / Ctrl+C)">Copy solution</button>
+      <button type="button" id="paste" title="Paste a copied solution (⌘V / Ctrl+V)">Paste solution</button>
+      <button type="button" id="wheel" aria-pressed="true" title="Scrolling over the game changes level">Mouse wheel changes level</button>
+      <button type="button" id="clockwise" aria-pressed="false" title="Taps turn pieces clockwise" hidden>Turn clockwise</button>
+      <button type="button" id="fullscreen" hidden>Full screen</button>
+    </div>
+  </header>
+  <main id="stage">
+    <div id="game">
+      <canvas id="pixels" width="640" height="480" aria-label="Chromatron game board"></canvas>
+      <canvas id="text" aria-hidden="true"></canvas>
+    </div>
+    <p id="message" role="status" aria-live="polite"></p>
+    <p id="fatal" hidden>Chromatron could not start. It needs a current browser with WebAssembly and JavaScript enabled, such as Safari, Chrome or Firefox.</p>
+  </main>
+  <p class="help">Drag pieces from the toolbox onto the board. Click a piece to turn it anticlockwise; right-click, or Shift-, Option- or Control-click, to turn it clockwise (on a touch screen, tap, and switch on “Turn clockwise” for the other way). Space or = next level, - previous level, r reset. ⌘C / ⌘V (Ctrl+C / Ctrl+V) copy and paste a solution.</p>
+  <footer>Chromatron 1–4 by Sean Barrett / <a href="https://silverspaceship.com/chromatron/">Silver Spaceship Software</a>. This is an independent port, not affiliated with or endorsed by the author. <a href="https://github.com/h1994st/chromatron-remake">Source on GitHub</a>.</footer>
+  <script nomodule>document.getElementById("fatal").hidden = false;</script>
+</body>
+</html>

@@ -70,6 +70,46 @@ shot game level solution="":
 bench:
     cargo bench -p lumen --bench engine
 
+# Print the wasm-bindgen version locked in Cargo.lock; the wasm-bindgen CLI must be exactly this version
+wasm-bindgen-version:
+    @awk '$0 == "name = \"wasm-bindgen\"" { getline; gsub(/version = |"/, ""); print; exit }' "{{justfile_directory()}}/Cargo.lock"
+
+# Build the browser version into dist/web/: one static page that plays all four games
+web: _require-originals
+    #!/usr/bin/env bash
+    set -euo pipefail
+    want="$("{{just_executable()}}" --justfile "{{justfile()}}" wasm-bindgen-version)"
+    [[ -n "$want" ]] || { echo "error: no wasm-bindgen version found in Cargo.lock" >&2; exit 1; }
+    have="$(wasm-bindgen --version 2> /dev/null | awk '{ print $2 }' || true)"
+    if [[ "$have" != "$want" ]]; then
+        echo "error: the wasm-bindgen CLI is ${have:-not installed}, Cargo.lock has $want; run: cargo install wasm-bindgen-cli --locked --version $want" >&2
+        exit 1
+    fi
+    targets="$(rustup target list --installed)"
+    grep -x wasm32-unknown-unknown <<< "$targets" > /dev/null \
+        || { echo "error: the wasm32 target is missing; run: rustup target add wasm32-unknown-unknown" >&2; exit 1; }
+    cargo build --quiet -p chromatron-web --profile web-release --target wasm32-unknown-unknown
+    out="{{justfile_directory()}}/dist/web"
+    rm -rf "$out"
+    mkdir -p "$out"
+    wasm-bindgen --target web --no-typescript --out-dir "$out" \
+        "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-unknown-unknown/web-release/chromatron_web.wasm"
+    cp "{{justfile_directory()}}"/web/* "$out/"
+    # Every page URL carries a hash of all shipped files (wasm, glue, main.js, style.css, index.html template), so a browser never mixes files of two deploys.
+    build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js style.css index.html | shasum -a 256 | cut -c 1-12)"
+    perl -pi -e "s/__BUILD__/$build/g" "$out/index.html" "$out/main.js"
+    for file in "$out"/*; do
+        printf '%8d bytes %8d gzip  %s\n' "$(wc -c < "$file")" "$(gzip -9 -c "$file" | wc -c)" "$(basename "$file")"
+    done
+
+# Serve dist/web/ at http://127.0.0.1:<port>/ for playing in a browser (Ctrl-C stops it)
+web-serve port="8000": web
+    cd "{{justfile_directory()}}/dist/web" && python3 -m http.server {{port}} --bind 127.0.0.1
+
+# Build dist/web/ and smoke-test it in Node: every game starts, every tests/solutions/ fixture wins and reloads, size budgets hold
+web-check: web
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/web_check.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
+
 # Run a game's app (game: 1-4)
 run game:
     cargo run --release --bin chromatron{{game}}

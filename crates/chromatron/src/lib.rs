@@ -5,17 +5,14 @@ pub mod c1;
 pub mod c2;
 pub mod c3;
 pub mod c4;
-pub mod damage;
 pub mod frame_timing;
 pub mod menus;
 pub mod pasteboard;
-pub mod pointer_keys;
 pub mod progress_file;
 pub mod snapshot;
 pub mod typeset;
 pub mod user_defaults;
 pub mod viewport;
-pub mod wheel;
 
 mod game_window;
 

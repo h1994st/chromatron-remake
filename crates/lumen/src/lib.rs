@@ -1,12 +1,14 @@
-//! Chromatron engine: board model, beam tracer, rules, input and software renderer. Pure: no
-//! platform dependencies and no I/O.
+//! Chromatron engine: board model, beam tracer, rules, input rules, damage tracking and software
+//! renderer. Pure: no platform dependencies and no I/O.
 
 pub mod board;
 pub mod bsd_qsort;
+pub mod damage;
 pub mod diagram;
 #[cfg(test)]
 mod fixture;
 pub mod game_state;
+pub mod gesture;
 pub mod layout;
 pub mod piece;
 mod pointer;
@@ -25,12 +27,17 @@ pub use board::{
     toolbox_index,
 };
 pub use bsd_qsort::bsd_qsort;
+pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use diagram::beam_diagram;
 pub use game_state::{Drag, Effects, GameState, InputEvent, Redraw, SlotState};
+pub use gesture::{
+    Button, ButtonLatch, Held, PIXELS_PER_STEP, QUIET_MS, ScrollDelta, WheelGate, key_byte,
+    typed_text,
+};
 pub use layout::{FRAME_HEIGHT, FRAME_WIDTH, Hit, Rect, hit_test};
 pub use piece::{BLUE, Colour, DX, DY, Dir, GREEN, Piece, RED, WHITE, turn};
 pub use progress::{
-    PROGRESS_SLOTS, update_unlocked, update_unlocked_by_count, update_unlocked_fixed,
+    PROGRESS_SLOTS, resume_slot, update_unlocked, update_unlocked_by_count, update_unlocked_fixed,
 };
 pub use render::{BACKGROUND, TextBox, TextBoxes, cell_sprite, render, text_boxes};
 pub use rule_set::{Passes, RuleSet, Splitter, TextBoxSet, Unlock};

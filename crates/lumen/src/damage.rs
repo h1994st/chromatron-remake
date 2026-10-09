@@ -1,6 +1,7 @@
 //! The frame rects waiting to be repainted, merged across events between two presents.
 
-use lumen::{Rect, Redraw};
+use crate::game_state::Redraw;
+use crate::layout::Rect;
 
 /// More rects than this between two presents become one full repaint.
 pub const MAX_DAMAGE_RECTS: usize = 8;

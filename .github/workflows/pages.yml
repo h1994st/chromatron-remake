@@ -1,0 +1,111 @@
+# Builds the browser version (all four games in one page) and checks it on every push to main,
+# which also keeps the caches warm for releases. A `v*` tag (or a manual run) also publishes it
+# with GitHub Pages: https://shengtuo.me/chromatron-remake/ (the user site h1994st.github.io has
+# the custom domain shengtuo.me, so this project site is served under it; no CNAME here).
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # macOS: fetch-originals uses ditto and shasum.
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install just and unar
+        run: brew install just unar
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install Rust stable with the wasm32 target
+        run: |
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Read pinned versions
+        id: versions
+        run: |
+          echo "wasm-bindgen=$(just wasm-bindgen-version)" >> "$GITHUB_OUTPUT"
+          echo "originals=$(just --evaluate originals_sha256)" >> "$GITHUB_OUTPUT"
+
+      # Caches made on main are readable from tag runs; each is saved as soon as it is filled,
+      # so a later failing step does not lose it.
+      - name: Restore the wasm-bindgen CLI
+        id: wasm-bindgen-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: wasm-bindgen-cli-${{ steps.versions.outputs.wasm-bindgen }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install the wasm-bindgen CLI
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --locked --version "${{ steps.versions.outputs.wasm-bindgen }}"
+
+      - name: Save the wasm-bindgen CLI
+        if: steps.wasm-bindgen-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ~/.cargo/bin/wasm-bindgen
+          key: ${{ steps.wasm-bindgen-cache.outputs.cache-primary-key }}
+
+      # Download the originals from the author's site once per zip version, not on every run.
+      - name: Restore the original games
+        id: originals-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: chromatron_mac
+          key: chromatron-originals-${{ steps.versions.outputs.originals }}
+
+      - name: Fetch the original games
+        run: just fetch-originals
+
+      - name: Save the original games
+        if: steps.originals-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: chromatron_mac
+          key: ${{ steps.originals-cache.outputs.cache-primary-key }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build and check the site
+        run: just web-check
+
+      - name: Upload the site
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist/web
+
+  deploy:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: https://shengtuo.me/chromatron-remake/
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v5

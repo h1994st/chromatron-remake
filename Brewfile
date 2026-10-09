@@ -6,3 +6,5 @@ brew "just"
 brew "radare2"
 # Command-line unarchiving tools supporting multiple formats
 brew "unar"
+# Open-source, cross-platform JavaScript runtime environment
+brew "node"

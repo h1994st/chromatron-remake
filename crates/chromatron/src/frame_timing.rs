@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::damage::Damage;
+use lumen::Damage;
 
 pub const TARGET: &str = "chromatron::frame_timing";
 

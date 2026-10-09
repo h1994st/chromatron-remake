@@ -71,6 +71,17 @@ impl Unlock {
     }
 }
 
+/// The slot to reopen a game on: the stored one if it is on the strip, not slot 0 (where the game
+/// starts anyway) and unlocked. Range is checked before `unlocked`, which may index the strip.
+pub fn resume_slot(
+    stored: Option<i64>,
+    strip_slots: usize,
+    unlocked: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let slot = usize::try_from(stored?).ok()?;
+    (slot != 0 && slot < strip_slots && unlocked(slot)).then_some(slot)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +234,26 @@ mod tests {
         assert_eq!(
             open_after_in(Unlock::Fixed(25), &first_25),
             (0..50).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn resume_needs_a_stored_unlocked_slot_other_than_the_first() {
+        let open = |slot: usize| slot <= 7;
+        assert_eq!(resume_slot(None, 50, open), None);
+        assert_eq!(resume_slot(Some(0), 50, open), None);
+        assert_eq!(resume_slot(Some(7), 50, open), Some(7));
+        assert_eq!(resume_slot(Some(8), 50, open), None);
+        assert_eq!(resume_slot(Some(-3), 50, open), None);
+        assert_eq!(resume_slot(Some(50), 50, |_| true), None);
+        assert_eq!(resume_slot(Some(49), 50, |_| true), Some(49));
+        // Range is checked before `unlocked`, which indexes the strip.
+        assert_eq!(
+            resume_slot(Some(60), 50, |s| {
+                assert!(s < 50, "unlocked called for {s}");
+                true
+            }),
+            None
         );
     }
 }

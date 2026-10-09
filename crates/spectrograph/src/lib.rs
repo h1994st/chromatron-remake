@@ -18,6 +18,8 @@ mod c4;
 #[cfg(feature = "decode")]
 mod data_map;
 #[cfg(feature = "decode")]
+pub mod embed;
+#[cfg(feature = "decode")]
 mod error;
 #[cfg(feature = "decode")]
 mod image;

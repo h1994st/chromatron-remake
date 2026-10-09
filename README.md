@@ -2,7 +2,7 @@
 
 Native Apple Silicon versions of Sean Barrett's laser puzzle games **Chromatron**, **Chromatron 2**, **Chromatron 3** and **Chromatron 4** (Silver Spaceship Software, 2003–2004). 🔦✨
 
-The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps that look and play like the originals: same rules, levels, sprites and text.
+The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps that look and play like the originals: same rules, levels, sprites and text. The same engine also runs in the browser.
 
 <table>
   <tr>
@@ -17,6 +17,10 @@ The original Mac versions are PowerPC Carbon apps, which no longer run on curren
 
 > [!NOTE]
 > 📦 This repository contains **no game data**. The build reads the levels, graphics and text from the original apps, which you download from the author's site (see below), and embeds them in the new apps on your machine. The screenshots above are of this port.
+
+## 🌐 Play in your browser
+
+**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
 
 ## 🧰 Requirements
 
@@ -55,7 +59,7 @@ Guide the coloured beams 🌈 to light every target. Drag pieces between the too
 
 ## 🧑‍💻 Development
 
-See [CLAUDE.md](CLAUDE.md) for the architecture and the full list of `just` recipes. In short: `just test` runs the tests, `just lint` checks formatting and lints, `just bench` checks the engine against its performance budgets, and `just screenshots` regenerates the images above.
+See [CLAUDE.md](CLAUDE.md) for the architecture and the full list of `just` recipes. In short: `just test` runs the tests, `just lint` checks formatting and lints, `just bench` checks the engine against its performance budgets, `just screenshots` regenerates the images above, and `just web-check` builds the browser version and plays every stored solution through it in Node.
 
 ## 🙏 Credits
 

@@ -250,6 +250,13 @@ impl<'a> GameState<'a> {
         self.data.level_order[self.slot]
     }
 
+    /// Whether `handle(InputEvent::Key(ch))` acts on `ch`: the keys `handle_key` reads (space,
+    /// `=`, `+`, `-`, `r`) and the game's cheat key. A shell lets every other key keep its usual
+    /// meaning.
+    pub fn reads_key(&self, ch: u8) -> bool {
+        matches!(ch, b' ' | b'=' | b'+' | b'-' | b'r') || ch == self.rules.cheat_key
+    }
+
     /// The result of the last win check.
     pub fn is_won(&self) -> bool {
         self.won
@@ -404,6 +411,22 @@ mod tests {
 
     fn fresh(data: &GameData) -> GameState<'_> {
         GameState::new(data, SaveData::default())
+    }
+
+    #[test]
+    fn only_the_original_keys_and_the_cheat_are_read() {
+        let c1 = tiny_game();
+        let state = fresh(&c1);
+        for ch in *b" =+-rL" {
+            assert!(state.reads_key(ch), "{:?}", ch as char);
+        }
+        for ch in [b'x', b'R', b'/', 0x0f, 0x1b] {
+            assert!(!state.reads_key(ch), "{ch:#x}");
+        }
+        let c4 = tiny_game_of(Game::C4);
+        let state = fresh(&c4);
+        assert!(state.reads_key(0x0f), "Control-O");
+        assert!(!state.reads_key(b'L'));
     }
 
     #[test]

@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/spectrograph", "crates/lumen", "crates/chromatron"]
+members = [
+    "crates/spectrograph",
+    "crates/lumen",
+    "crates/chromatron",
+    "crates/chromatron-web",
+]
 
 [workspace.package]
 edition = "2024"
@@ -11,3 +16,9 @@ publish = false
 opt-level = 3
 lto = "fat"
 codegen-units = 1
+
+# The browser build (`just web`): the release profile, plus abort on panic and no symbols.
+[profile.web-release]
+inherits = "release"
+panic = "abort"
+strip = true
