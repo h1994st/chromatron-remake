@@ -11,20 +11,20 @@ setup:
     brew bundle
 
 # Check formatting and lints
-lint: _require-originals
+lint:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings
 
-# Run all tests (needs the original apps)
-test: _require-originals
+# Run all tests
+test:
     cargo test --workspace --features lumen/cli
 
 # Print a game's sections, strings and levels; write its sprite sheet to re/out/chromatron<game>/ (game: 1-4)
-dump game: (_require-original game)
+dump game:
     cargo run --quiet -p spectrograph -- dump {{game}} "{{justfile_directory()}}/re/out/chromatron{{game}}"
 
 # Render a level to re/out/shots/ (game: 1-4; level: 1-50; solution: "stored" or a copied solution such as 1-01-hI)
-shot game level solution="": (_require-original game)
+shot game level solution="":
     #!/usr/bin/env bash
     set -euo pipefail
     out="{{justfile_directory()}}/re/out/shots"
@@ -36,15 +36,15 @@ shot game level solution="": (_require-original game)
     fi
 
 # Benchmark trace and render on real levels of every game; fails if over the spec's budgets
-bench: _require-originals
+bench:
     cargo bench -p lumen --bench engine
 
 # Run a game's app (game: 1-4)
-run game: _require-originals
+run game:
     cargo run --release --bin chromatron{{game}}
 
 # Write a game's first presented frame, text included, to a PNG, then quit (game: 1-4)
-snapshot game png: _require-originals
+snapshot game png:
     cargo build --release --quiet --bin chromatron{{game}}
     CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
@@ -133,16 +133,12 @@ smoke game="1": (_bundle game)
     [[ "$after" != none && "$after" != "$before" ]] || { echo "error: quitting did not write $save" >&2; exit 1; }
     echo "ok: launched, idled, quit and saved"
 
-# All four games: the chromatron crate's build.rs embeds every game
+# All four games: bundling copies each original's Info.plist and icon
 _require-originals:
     @for app in "Chromatron" "Chromatron 2" "Chromatron 3" "Chromatron 4"; do test -d "{{originals}}/$app.app" || { echo "error: $app.app not found — put all four original apps in chromatron_mac/" >&2; exit 1; }; done
 
-# One game's original app (game: 1-4)
-_require-original game:
-    @app="Chromatron"; [[ "{{game}}" == 1 ]] || app="Chromatron {{game}}"; test -d "{{originals}}/$app.app" || { echo "error: $app.app not found — put the original apps in chromatron_mac/" >&2; exit 1; }
-
 # Decompile a game with Ghidra headless into re/out/chromatron<game>/ (game: 1-4)
-decompile game: (_require-original game)
+decompile game:
     #!/usr/bin/env bash
     set -euo pipefail
     bin="$(cargo run --quiet -p spectrograph -- path {{game}})"

@@ -36,7 +36,7 @@ Status: Plan 5 done: all four games are decoded, played by their own `RuleSet` a
 | `just snapshot <game> <png>` | run the app, write its first presented frame (text included) to a PNG and quit; never writes the save file |
 | `just shot <game> <level> [solution]` | `lumen shot`: render level 1–50 of game 1–4 to `re/out/shots/`; `solution` is `stored` or copied text such as `1-01-hI` |
 | `just lint` | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings` |
-| `just test` | verifies originals are present, then `cargo test --workspace --features lumen/cli` |
+| `just test` | `cargo test --workspace --features lumen/cli` (needs the originals: `chromatron`'s `build.rs` embeds them) |
 | `just bench` | criterion benches for `trace` and `render` on real levels of every game; fails when over the spec's budgets |
 | `just bundle` | release builds → `dist/Chromatron.app`, `dist/Chromatron 2.app`, `dist/Chromatron 3.app` and `dist/Chromatron 4.app` (Info.plist, icon and Get Info text from each original), ad-hoc signed |
 | `just smoke [game]` | bundle game 1 (default) to 4, launch, check ~0% idle CPU, quit via Apple Event, check the save file was written (touches the real save folder) |
