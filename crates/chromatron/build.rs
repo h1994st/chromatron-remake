@@ -9,9 +9,11 @@ use std::{env, fs};
 use spectrograph::{Game, GameData, decode, originals_dir};
 
 /// The games this crate embeds, and the file each one's data goes to.
-const EMBEDDED: [(Game, &str); 2] = [
+const EMBEDDED: [(Game, &str); 4] = [
     (Game::C1, "chromatron1_data.rs"),
     (Game::C2, "chromatron2_data.rs"),
+    (Game::C3, "chromatron3_data.rs"),
+    (Game::C4, "chromatron4_data.rs"),
 ];
 
 fn main() -> ExitCode {

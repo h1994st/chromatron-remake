@@ -1,5 +1,6 @@
-//! The save file (`com.silverspaceship.chromatron.dat`, `…chromatron2.dat`), byte for byte
-//! (platform.md P7 of each game). Bytes only: reading and writing the file is the shell's job.
+//! The save file (`com.silverspaceship.chromatron.dat`, `…chromatron2.dat`, `…3.dat`, `…4.dat`),
+//! byte for byte (platform.md P7 of each game). Bytes only: reading and writing the file is the
+//! shell's job.
 
 use std::fmt;
 
@@ -19,6 +20,9 @@ pub struct SaveData {
     /// Indexed by level id; `RuleSet::saved_ids` entries from `decode_save`. `GameState::new`
     /// brings any other length to the game's.
     pub boards: Vec<Option<Board>>,
+    /// The file lacked its game's format marker (Chromatron 3, platform.md P7): `completed` was
+    /// thrown away, and `GameState::new` recomputes it by running the win check on the boards.
+    pub replay_wins: bool,
 }
 
 /// A fresh game, with room for Chromatron 1's 128 saved boards.
@@ -34,6 +38,7 @@ impl SaveData {
         SaveData {
             completed: [false; PROGRESS_SLOTS],
             boards: vec![None; rules.saved_ids],
+            replay_wins: false,
         }
     }
 }
@@ -126,14 +131,15 @@ pub fn decode_bitmap(
     Ok(completed)
 }
 
-/// The whole file: bitmap, then every saved board with an id below `rules.saved_ids`, in
-/// ascending level-id order.
+/// The whole file: bitmap, the game's format marker if it has one, then every saved board with an
+/// id below `rules.saved_ids`, in ascending level-id order.
 pub fn encode_save(
     rules: &RuleSet,
     completed: &[bool; PROGRESS_SLOTS],
     boards: &[Option<Board>],
 ) -> Vec<u8> {
     let mut out = encode_bitmap(rules, completed).to_vec();
+    out.extend(rules.save_marker);
     for (id, board) in boards.iter().enumerate().take(rules.saved_ids) {
         if let Some(board) = board {
             out.push(id as u8);
@@ -146,16 +152,27 @@ pub fn encode_save(
 }
 
 /// Reads a save file of `rules`' game as the original does: a file shorter than the bitmap means
-/// a fresh game, and a truncated last record is dropped. Unlike the original, a bad bitmap, a
-/// level id with no saved state, or a bad cell (a type the game doesn't have, colour above 7, dir
-/// above 9 on a movable piece or above 7 otherwise) is an error instead of a crash.
+/// a fresh game, and a truncated last record is dropped. In a game with a format marker the marker
+/// byte may stand anywhere an id may; a file without it keeps its boards but not its completed
+/// slots (`SaveData::replay_wins`). Unlike the original, a bad bitmap, a level id with no saved
+/// state, or a bad cell (a type the game doesn't have, colour above 7, dir above 9 on a movable
+/// piece or above 7 otherwise) is an error instead of a crash.
 pub fn decode_save(rules: &RuleSet, bytes: &[u8]) -> Result<SaveData, SaveError> {
     let mut save = SaveData::fresh(rules);
     let Some((bitmap, mut rest)) = bytes.split_first_chunk::<BITMAP_LEN>() else {
         return Ok(save);
     };
     save.completed = decode_bitmap(rules, bitmap)?;
-    while let Some((record, tail)) = rest.split_first_chunk::<RECORD_LEN>() {
+    let mut marked = false;
+    loop {
+        if let Some(tail) = rules.save_marker.and_then(|m| rest.strip_prefix(&[m])) {
+            marked = true;
+            rest = tail;
+            continue;
+        }
+        let Some((record, tail)) = rest.split_first_chunk::<RECORD_LEN>() else {
+            break;
+        };
         let id = record[0];
         if usize::from(id) >= rules.saved_ids {
             return Err(SaveError::BadLevelId { id });
@@ -186,6 +203,10 @@ pub fn decode_save(rules: &RuleSet, bytes: &[u8]) -> Result<SaveData, SaveError>
         }
         save.boards[usize::from(id)] = Some(board);
         rest = tail;
+    }
+    if rules.save_marker.is_some() && !marked {
+        save.completed = [false; PROGRESS_SLOTS];
+        save.replay_wins = true;
     }
     Ok(save)
 }
@@ -456,6 +477,169 @@ mod tests {
         assert!(save.completed[1]);
         assert_eq!(save.boards[9].as_ref().map(|b| b.game), Some(Game::C2));
         assert_eq!(save.boards[9], Some(board));
+    }
+
+    #[test]
+    fn chromatron_3_and_4_keep_chromatron_2s_bitmap() {
+        // platform.md P7 of both games: C2's table, so C2's examples hold.
+        for rules in [RuleSet::C3, RuleSet::C4] {
+            assert_eq!(
+                hex(&encode_bitmap(&rules, &completed(0..50))),
+                "9dd4579637ca28db4eacb9525cf3512d284b114840059064286a091840228622"
+            );
+            assert_eq!(
+                encode_bitmap(&rules, &completed([0]))[..3],
+                [0x00, 0x00, 0x10]
+            );
+        }
+    }
+
+    #[test]
+    fn chromatron_3_writes_its_marker_after_the_bitmap() {
+        let mut boards = vec![None; 128];
+        boards[7] = Some(Board::new(Game::C3));
+        let bytes = encode_save(&RuleSet::C3, &completed([0]), &boards);
+        assert_eq!(bytes.len(), BITMAP_LEN + 1 + RECORD_LEN, "33 + 856·k");
+        assert_eq!(bytes[BITMAP_LEN..BITMAP_LEN + 2], [0xff, 7]);
+        let save = decode_save(&RuleSet::C3, &bytes).unwrap();
+        assert!(save.completed[0] && !save.replay_wins);
+        assert_eq!(save.boards[7], Some(Board::new(Game::C3)));
+    }
+
+    #[test]
+    fn chromatron_3_accepts_its_marker_anywhere_and_twice() {
+        let mut boards = vec![None; 128];
+        boards[7] = Some(Board::new(Game::C3));
+        let mut bytes = encode_bitmap(&RuleSet::C3, &completed([2])).to_vec();
+        bytes.extend(&encode_save(&RuleSet::C3, &completed([]), &boards)[BITMAP_LEN + 1..]);
+        bytes.extend([0xff, 0xff]);
+        let save = decode_save(&RuleSet::C3, &bytes).unwrap();
+        assert!(save.completed[2] && !save.replay_wins);
+        assert!(save.boards[7].is_some());
+    }
+
+    #[test]
+    fn chromatron_3_accepts_its_marker_between_records() {
+        let mut boards = vec![None; 128];
+        boards[7] = Some(Board::new(Game::C3));
+        boards[9] = Some(Board::new(Game::C3));
+        let records = encode_save(&RuleSet::C3, &completed([]), &boards);
+        let records = &records[BITMAP_LEN + 1..];
+        assert_eq!(records.len(), 2 * RECORD_LEN);
+        let mut bytes = encode_bitmap(&RuleSet::C3, &completed([2])).to_vec();
+        bytes.extend(&records[..RECORD_LEN]);
+        bytes.push(0xff);
+        bytes.extend(&records[RECORD_LEN..]);
+        let save = decode_save(&RuleSet::C3, &bytes).unwrap();
+        assert!(save.completed[2] && !save.replay_wins);
+        assert!(save.boards[7].is_some() && save.boards[9].is_some());
+    }
+
+    #[test]
+    fn a_chromatron_3_file_without_its_marker_must_replay_its_wins() {
+        let mut boards = vec![None; 128];
+        boards[7] = Some(Board::new(Game::C3));
+        let mut bytes = encode_bitmap(&RuleSet::C3, &completed([0, 3])).to_vec();
+        bytes.extend(&encode_save(&RuleSet::C3, &completed([]), &boards)[BITMAP_LEN + 1..]);
+        let save = decode_save(&RuleSet::C3, &bytes).unwrap();
+        assert!(save.replay_wins);
+        assert_eq!(
+            save.completed, [false; PROGRESS_SLOTS],
+            "the bitmap is thrown away"
+        );
+        assert!(save.boards[7].is_some(), "the boards are kept");
+        let mut damaged = bytes;
+        damaged[..BITMAP_LEN].fill(0xff);
+        assert!(
+            matches!(
+                decode_save(&RuleSet::C3, &damaged),
+                Err(SaveError::BadCheck { .. })
+            ),
+            "the bitmap is still checked first"
+        );
+        assert_eq!(
+            decode_save(&RuleSet::C3, &[0; 20]),
+            Ok(SaveData::fresh(&RuleSet::C3)),
+            "a short file is a fresh game with nothing to replay"
+        );
+    }
+
+    #[test]
+    fn chromatron_4_has_no_marker_and_saves_ids_0_to_127() {
+        let mut boards = vec![None; 128];
+        boards[1] = Some(Board::new(Game::C4));
+        boards[127] = Some(Board::new(Game::C4));
+        let bytes = encode_save(&RuleSet::C4, &completed([0]), &boards);
+        assert_eq!(bytes.len(), BITMAP_LEN + 2 * RECORD_LEN, "32 + 856·k");
+        assert_eq!(bytes[BITMAP_LEN], 1, "the first record follows the bitmap");
+        let save = decode_save(&RuleSet::C4, &bytes).unwrap();
+        assert!(save.completed[0] && !save.replay_wins);
+        assert_eq!(save.boards.len(), 128);
+        assert!(save.boards[127].is_some());
+        for id in [128, 0xff] {
+            let mut bad = bytes.clone();
+            bad[BITMAP_LEN] = id;
+            assert_eq!(
+                decode_save(&RuleSet::C4, &bad),
+                Err(SaveError::BadLevelId { id }),
+                "id {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn chromatron_3_rejects_ids_from_128_that_are_not_its_marker() {
+        let mut boards = vec![None; 128];
+        boards[1] = Some(Board::new(Game::C3));
+        let mut bad = encode_save(&RuleSet::C3, &completed([]), &boards);
+        bad[BITMAP_LEN + 1] = 128;
+        assert_eq!(
+            decode_save(&RuleSet::C3, &bad),
+            Err(SaveError::BadLevelId { id: 128 })
+        );
+    }
+
+    #[test]
+    fn chromatron_4_saves_hold_its_new_pieces() {
+        let mut board = Board::new(Game::C4);
+        for (x, piece, dir) in [
+            (0, Piece::LogicGate, 9),
+            (1, Piece::MobileTeleporter, 7),
+            (2, Piece::OccupiedSquare, 5),
+            (3, Piece::PrimaryLogicGate, 8),
+        ] {
+            board.cells[board_index(x, 0)] = Cell {
+                piece,
+                colour: 4,
+                dir,
+            };
+        }
+        let mut boards = vec![None; 128];
+        boards[4] = Some(board.clone());
+        let bytes = encode_save(&RuleSet::C4, &completed([]), &boards);
+        assert_eq!(bytes[BITMAP_LEN + 1..BITMAP_LEN + 4], [16, 4, 9]);
+        assert_eq!(
+            decode_save(&RuleSet::C4, &bytes).unwrap().boards[4],
+            Some(board)
+        );
+        let mut fixed_dir_8 = bytes.clone();
+        fixed_dir_8[BITMAP_LEN + 1 + 3 * 2 + 2] = 8;
+        assert!(
+            matches!(
+                decode_save(&RuleSet::C4, &fixed_dir_8),
+                Err(SaveError::BadCell { id: 4, cell: 2, .. })
+            ),
+            "the occupied square is fixed, so dir 8 is corrupt"
+        );
+        let mut c3 = bytes;
+        c3.insert(BITMAP_LEN, 0xff);
+        assert!(
+            matches!(
+                decode_save(&RuleSet::C3, &c3),
+                Err(SaveError::BadCell { id: 4, cell: 2, .. })
+            ),
+            "Chromatron 3 has no type 21"
+        );
     }
 
     #[test]

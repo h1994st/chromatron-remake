@@ -12,6 +12,10 @@ mod c1;
 #[cfg(feature = "decode")]
 mod c2;
 #[cfg(feature = "decode")]
+mod c3;
+#[cfg(feature = "decode")]
+mod c4;
+#[cfg(feature = "decode")]
 mod data_map;
 #[cfg(feature = "decode")]
 mod error;
@@ -45,6 +49,7 @@ pub fn decode(game: Game, binary: &[u8]) -> Result<GameData, DecodeError> {
     match game {
         Game::C1 => data_map::decode(&image, &c1::MAP),
         Game::C2 => data_map::decode(&image, &c2::MAP),
-        _ => Err(DecodeError::Unsupported { game }),
+        Game::C3 => data_map::decode(&image, &c3::MAP),
+        Game::C4 => data_map::decode(&image, &c4::MAP),
     }
 }

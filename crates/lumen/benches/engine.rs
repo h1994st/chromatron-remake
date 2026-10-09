@@ -1,4 +1,4 @@
-//! `just bench`: trace and render on real Chromatron 1 and 2 levels, checked against the spec's
+//! `just bench`: trace and render on real levels of every game, checked against the spec's
 //! §6 budgets (Apple Silicon, release build). Exits non-zero if a budget is exceeded.
 
 use std::{
@@ -85,7 +85,7 @@ fn bench_game(criterion: &mut Criterion, game: Game) -> bool {
 fn main() -> ExitCode {
     let mut criterion = Criterion::default().configure_from_args();
     let mut ok = true;
-    for game in [Game::C1, Game::C2] {
+    for game in Game::ALL {
         ok &= bench_game(&mut criterion, game);
     }
     criterion.final_summary();

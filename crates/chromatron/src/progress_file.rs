@@ -295,4 +295,25 @@ mod tests {
         assert_eq!(file.load(), SaveData::fresh(&RuleSet::C2));
         assert_eq!(fs::read(file.backup_path()).unwrap(), c1_bytes);
     }
+
+    #[test]
+    fn a_chromatron_3_save_keeps_its_marker_through_a_store_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = ProgressFile::in_dir(dir.path(), &RuleSet::C3);
+        assert!(file.path().ends_with("com.silverspaceship.chromatron3.dat"));
+        let mut bytes = vec![0u8; 33];
+        bytes[2] = 0x10;
+        bytes[32] = 0xff;
+        file.store(&bytes).unwrap();
+        let save = file.load();
+        assert!(save.completed[0] && !save.replay_wins);
+        // Without the marker the same bitmap is not trusted: the wins are replayed instead.
+        file.store(&bytes[..32]).unwrap();
+        let save = file.load();
+        assert!(save.replay_wins && !save.completed[0]);
+        assert!(
+            !file.backup_path().exists(),
+            "a markerless file is not corrupt"
+        );
+    }
 }

@@ -33,3 +33,11 @@ required-features = ["decode"]
 [[test]]
 name = "c2_data"
 required-features = ["decode"]
+
+[[test]]
+name = "c3_data"
+required-features = ["decode"]
+
+[[test]]
+name = "c4_data"
+required-features = ["decode"]

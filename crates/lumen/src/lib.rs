@@ -29,9 +29,11 @@ pub use diagram::beam_diagram;
 pub use game_state::{Drag, Effects, GameState, InputEvent, Redraw, SlotState};
 pub use layout::{FRAME_HEIGHT, FRAME_WIDTH, Hit, Rect, hit_test};
 pub use piece::{BLUE, Colour, DX, DY, Dir, GREEN, Piece, RED, WHITE, turn};
-pub use progress::{PROGRESS_SLOTS, update_unlocked, update_unlocked_by_count};
+pub use progress::{
+    PROGRESS_SLOTS, update_unlocked, update_unlocked_by_count, update_unlocked_fixed,
+};
 pub use render::{BACKGROUND, TextBox, TextBoxes, cell_sprite, render, text_boxes};
-pub use rule_set::{RuleSet, Splitter, TextBoxSet, Unlock};
+pub use rule_set::{Passes, RuleSet, Splitter, TextBoxSet, Unlock};
 pub use save::{SaveData, SaveError, decode_save, encode_save};
 pub use solution::{apply_solution, encode_solution};
 pub use toolbox::move_pieces_to_toolbox;

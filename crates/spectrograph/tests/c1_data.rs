@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use spectrograph::{DecodeError, Game, GameData, Image, Record, decode, decode_rle};
+use spectrograph::{Game, GameData, Image, Record, decode, decode_rle};
 
 /// The original executable, from `$CHROMATRON_ORIGINALS` or `chromatron_mac/`.
 fn original(game: Game) -> Vec<u8> {
@@ -220,12 +220,4 @@ fn ui_text_is_decoded() {
     assert_eq!(ui.freeware, "freeware");
     assert_eq!(ui.more_levels, "more levels @");
     assert_eq!(ui.site_url, "silverspaceship.com");
-}
-
-#[test]
-fn other_games_are_not_decoded_yet() {
-    assert_eq!(
-        decode(Game::C3, &original(Game::C3)),
-        Err(DecodeError::Unsupported { game: Game::C3 })
-    );
 }

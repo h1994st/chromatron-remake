@@ -25,3 +25,27 @@ fn the_embedded_chromatron_2_data_matches_the_original() {
         "embedded data differs from a fresh decode"
     );
 }
+
+#[test]
+fn the_embedded_chromatron_3_data_matches_the_original() {
+    let binary = Game::C3
+        .read_original()
+        .expect("the original Chromatron 3 is present");
+    let decoded = decode(Game::C3, &binary).expect("the original decodes");
+    assert!(
+        chromatron::c3::GAME == decoded,
+        "embedded data differs from a fresh decode"
+    );
+}
+
+#[test]
+fn the_embedded_chromatron_4_data_matches_the_original() {
+    let binary = Game::C4
+        .read_original()
+        .expect("the original Chromatron 4 is present");
+    let decoded = decode(Game::C4, &binary).expect("the original decodes");
+    assert!(
+        chromatron::c4::GAME == decoded,
+        "embedded data differs from a fresh decode"
+    );
+}

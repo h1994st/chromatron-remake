@@ -150,7 +150,8 @@ fn clamp_pointer(event: InputEvent) -> InputEvent {
 impl<'a> GameState<'a> {
     /// `game_init`: progress from `save`, then slot 0, restoring its saved board if there is one.
     /// The game's rules come from `data.game`. `save.boards` is brought to the game's
-    /// `RuleSet::saved_ids` entries if it has another length.
+    /// `RuleSet::saved_ids` entries if it has another length. If `save.replay_wins`, the completed
+    /// slots are first recomputed from the saved boards (`replay_wins`).
     ///
     /// Trusts `save`: build it only with `decode_save` for the same game, `SaveData::fresh` or
     /// `Default`. The initial level's `Effects` are not returned, so callers must paint the whole
@@ -172,6 +173,9 @@ impl<'a> GameState<'a> {
             saved,
             pointer: Pointer::default(),
         };
+        if save.replay_wins {
+            state.replay_wins();
+        }
         rules.unlock.apply(&state.completed, &mut state.unlocked);
         state.start_level(true);
         state
@@ -297,6 +301,20 @@ impl<'a> GameState<'a> {
             x: p.at.0,
             y: p.at.1,
         })
+    }
+
+    /// `load_save_file`'s migration of a save without the format marker (Chromatron 3,
+    /// platform.md P7): every strip slot whose level has a saved board counts as completed exactly
+    /// when that board is a solved position. The original's reads past the 50 slots are left out.
+    /// The file itself is rewritten at the next save, not at once as in the original.
+    fn replay_wins(&mut self) {
+        let data = self.data;
+        for (slot, &id) in data.level_order.iter().enumerate().take(STRIP_SLOTS) {
+            if let Some(board) = &self.saved[usize::from(id)] {
+                trace(board, &mut self.field);
+                self.completed[slot] = is_won(board, &self.field);
+            }
+        }
     }
 
     fn key(&mut self, ch: u8) -> Effects {
@@ -681,6 +699,90 @@ mod tests {
         assert!(
             !state.is_unlocked(5),
             "after the first win four uncompleted slots stay open"
+        );
+    }
+
+    #[test]
+    fn chromatron_3_cheats_with_a_caret_and_keeps_25_levels_open() {
+        let data = tiny_game_of(Game::C3);
+        let mut state = fresh(&data);
+        assert_eq!(state.rules(), &RuleSet::C3);
+        assert!((0..25).all(|s| state.is_unlocked(s)) && !state.is_unlocked(25));
+        for other in [b'z', b'L', 0x0f] {
+            assert_eq!(state.handle(InputEvent::Key(other)), Effects::default());
+        }
+        assert!(state.handle(InputEvent::Key(b'^')).write_save);
+        assert!(state.is_won() && state.is_completed(0));
+        assert!(state.is_unlocked(25), "each first win opens one more");
+    }
+
+    #[test]
+    fn chromatron_4_cheats_with_control_o() {
+        let data = tiny_game_of(Game::C4);
+        let mut state = fresh(&data);
+        for other in *b"z^oO" {
+            assert_eq!(state.handle(InputEvent::Key(other)), Effects::default());
+        }
+        assert!(state.handle(InputEvent::Key(0x0f)).write_save);
+        assert!(state.is_won() && state.is_completed(0) && state.is_unlocked(25));
+    }
+
+    #[test]
+    fn chromatron_3_and_4_copy_paste_and_save_in_their_own_formats() {
+        for (game, digit) in [(Game::C3, '3'), (Game::C4, '4')] {
+            let data = tiny_game_of(game);
+            let mut state = fresh(&data);
+            assert_eq!(
+                state.handle(InputEvent::Copy).clipboard,
+                Some(format!("{digit}-01-er"))
+            );
+            assert_eq!(
+                state.handle(InputEvent::Paste("2-01-hI".into())),
+                Effects::default()
+            );
+            assert!(
+                state
+                    .handle(InputEvent::Paste(format!("{digit}-01-hI")))
+                    .write_save
+            );
+            let rules = RuleSet::of(game);
+            let save = decode_save(rules, &state.save_bytes()).unwrap();
+            assert!(save.completed[0] && !save.replay_wins);
+            assert_eq!(save.boards.len(), 128);
+            assert_eq!(save.boards[1].as_ref().unwrap().game, game);
+        }
+    }
+
+    #[test]
+    fn a_chromatron_3_save_without_its_marker_is_completed_by_its_solved_boards() {
+        // platform.md P7: the bitmap is discarded and every slot whose saved board wins counts.
+        let data = tiny_game_of(Game::C3);
+        let mut boards = vec![None; 128];
+        boards[1] = Some(Board::from_level(data.level(1).unwrap()));
+        let mut unsolved = Board::from_level(data.level(2).unwrap());
+        move_pieces_to_toolbox(&mut unsolved);
+        boards[2] = Some(unsolved);
+        let mut bitmap_says = [false; PROGRESS_SLOTS];
+        bitmap_says[1] = true;
+        bitmap_says[7] = true;
+        let mut bytes = encode_save(&RuleSet::C3, &bitmap_says, &boards);
+        bytes.remove(32);
+        let save = decode_save(&RuleSet::C3, &bytes).unwrap();
+        assert!(save.replay_wins);
+        let state = GameState::new(&data, save);
+        let completed: Vec<usize> = (0..STRIP_SLOTS)
+            .filter(|&s| state.is_completed(s))
+            .collect();
+        assert_eq!(
+            completed,
+            (0..STRIP_SLOTS).step_by(2).collect::<Vec<_>>(),
+            "id 1 (every even slot) is solved, id 2 is not, the bitmap's slots 1 and 7 are gone"
+        );
+        assert!(state.is_won());
+        assert_eq!(
+            state.save_bytes()[32],
+            0xff,
+            "the next write has the marker"
         );
     }
 

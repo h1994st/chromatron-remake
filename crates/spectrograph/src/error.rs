@@ -20,9 +20,6 @@ pub enum DecodeError {
         segment: &'static str,
         section: &'static str,
     },
-    Unsupported {
-        game: Game,
-    },
     Malformed {
         game: Game,
         message: String,
@@ -49,9 +46,6 @@ impl fmt::Display for DecodeError {
                 section,
             } => {
                 write!(f, "{game}: section {segment},{section} not found")
-            }
-            DecodeError::Unsupported { game } => {
-                write!(f, "{game}: decoding this game is not implemented yet")
             }
             DecodeError::Malformed { game, message } => {
                 write!(f, "{game}: unexpected data: {message}")

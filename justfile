@@ -23,7 +23,7 @@ test: _require-originals
 dump game: (_require-original game)
     cargo run --quiet -p spectrograph -- dump {{game}} "{{justfile_directory()}}/re/out/chromatron{{game}}"
 
-# Render a level to re/out/shots/ (game: 1 or 2; level: 1-50; solution: "stored" or a copied solution such as 1-01-hI)
+# Render a level to re/out/shots/ (game: 1-4; level: 1-50; solution: "stored" or a copied solution such as 1-01-hI)
 shot game level solution="": (_require-original game)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -35,24 +35,24 @@ shot game level solution="": (_require-original game)
         cargo run --quiet -p lumen --features cli -- shot {{game}} {{level}} "$out/chromatron{{game}}-level{{level}}.png"
     fi
 
-# Benchmark trace and render on real levels of games 1 and 2; fails if over the spec's budgets
+# Benchmark trace and render on real levels of every game; fails if over the spec's budgets
 bench: _require-originals
     cargo bench -p lumen --bench engine
 
-# Run a game's app (game: 1 or 2)
+# Run a game's app (game: 1-4)
 run game: _require-originals
     cargo run --release --bin chromatron{{game}}
 
-# Write a game's first presented frame, text included, to a PNG, then quit (game: 1 or 2)
+# Write a game's first presented frame, text included, to a PNG, then quit (game: 1-4)
 snapshot game png: _require-originals
     cargo build --release --quiet --bin chromatron{{game}}
     CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
 
-# Build dist/Chromatron.app and dist/Chromatron 2.app: Info.plist and icon from each original, ad-hoc signed
-bundle: (_bundle "1") (_bundle "2")
+# Build the four apps in dist/ (Chromatron.app, Chromatron 2.app, …): Info.plist and icon from each original, ad-hoc signed
+bundle: (_bundle "1") (_bundle "2") (_bundle "3") (_bundle "4")
 
-# Build one game's app in dist/, named like its original (game: 1 or 2)
+# Build one game's app in dist/, named like its original (game: 1-4)
 _bundle game: _require-originals
     #!/usr/bin/env bash
     set -euo pipefail
@@ -90,7 +90,7 @@ _bundle game: _require-originals
     codesign --verify --strict "$app"
     echo "built $app"
 
-# Bundle a game, open it, check it idles at ~0% CPU, quit it with an Apple Event and check that it saved (game: 1 or 2)
+# Bundle a game, open it, check it idles at ~0% CPU, quit it with an Apple Event and check that it saved (game: 1-4)
 smoke game="1": (_bundle game)
     #!/usr/bin/env bash
     set -euo pipefail
@@ -133,9 +133,9 @@ smoke game="1": (_bundle game)
     [[ "$after" != none && "$after" != "$before" ]] || { echo "error: quitting did not write $save" >&2; exit 1; }
     echo "ok: launched, idled, quit and saved"
 
-# Both Chromatron 1 and 2: the chromatron crate's build.rs embeds both games
+# All four games: the chromatron crate's build.rs embeds every game
 _require-originals:
-    @test -d "{{originals}}/Chromatron.app" -a -d "{{originals}}/Chromatron 2.app" || { echo "error: originals not found — put Chromatron.app and Chromatron 2.app in chromatron_mac/" >&2; exit 1; }
+    @for app in "Chromatron" "Chromatron 2" "Chromatron 3" "Chromatron 4"; do test -d "{{originals}}/$app.app" || { echo "error: $app.app not found — put all four original apps in chromatron_mac/" >&2; exit 1; }; done
 
 # One game's original app (game: 1-4)
 _require-original game:

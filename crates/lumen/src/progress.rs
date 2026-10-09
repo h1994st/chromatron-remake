@@ -1,5 +1,5 @@
-//! Which strip slots are open (`update_unlocked`: C1 logic.md L6 @ 0x4050, C2 logic.md L6
-//! @ 0x4328).
+//! Which strip slots are open (`update_unlocked`: C1 logic.md L6 @ 0x4050, C2 @ 0x4328, C3
+//! @ 0x4454, C4 @ 0x4258).
 
 use crate::rule_set::Unlock;
 
@@ -42,12 +42,31 @@ pub fn update_unlocked_by_count(
     }
 }
 
+/// Chromatron 3 and 4: opens every completed slot plus the `open` lowest uncompleted ones, however
+/// many slots are completed. Never closes a slot.
+pub fn update_unlocked_fixed(
+    open: usize,
+    completed: &[bool; PROGRESS_SLOTS],
+    unlocked: &mut [bool; PROGRESS_SLOTS],
+) {
+    let mut n = open;
+    for (done, slot) in completed.iter().zip(unlocked.iter_mut()) {
+        if *done {
+            *slot = true;
+        } else if n > 0 {
+            *slot = true;
+            n -= 1;
+        }
+    }
+}
+
 impl Unlock {
     /// Recomputes `unlocked` from `completed` with this game's rule.
     pub fn apply(self, completed: &[bool; PROGRESS_SLOTS], unlocked: &mut [bool; PROGRESS_SLOTS]) {
         match self {
             Unlock::HighestCompleted => update_unlocked(completed, unlocked),
             Unlock::CompletedCount => update_unlocked_by_count(completed, unlocked),
+            Unlock::Fixed(open) => update_unlocked_fixed(open, completed, unlocked),
         }
     }
 }
@@ -172,5 +191,38 @@ mod tests {
     #[test]
     fn chromatron_2_with_40_wins_opens_everything_on_the_strip() {
         assert_eq!(c2_open_after_first(40), (0..52).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn chromatron_3_and_4_open_25_uncompleted_slots_whatever_is_done() {
+        // logic.md L6 of both games: a fresh game opens slots 1–25, each first win one more.
+        let fixed = Unlock::Fixed(25);
+        assert_eq!(open_after_in(fixed, &[]), (0..25).collect::<Vec<_>>());
+        assert_eq!(open_after_in(fixed, &[0]), (0..26).collect::<Vec<_>>());
+        assert_eq!(
+            open_after_in(fixed, &[40]),
+            (0..25).chain([40]).collect::<Vec<_>>(),
+            "a win beyond the open range opens nothing more below it"
+        );
+        let first_ten: Vec<usize> = (0..10).collect();
+        assert_eq!(
+            open_after_in(fixed, &first_ten),
+            (0..35).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn chromatron_3_and_4_spill_open_slots_past_the_strip() {
+        // logic.md L6 (C4): with k ≥ 25 the leftover count opens the slots 50–63 that don't exist.
+        let all: Vec<usize> = (0..50).collect();
+        assert_eq!(
+            open_after_in(Unlock::Fixed(25), &all),
+            (0..64).collect::<Vec<_>>()
+        );
+        let first_25: Vec<usize> = (0..25).collect();
+        assert_eq!(
+            open_after_in(Unlock::Fixed(25), &first_25),
+            (0..50).collect::<Vec<_>>()
+        );
     }
 }

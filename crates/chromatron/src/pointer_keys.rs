@@ -63,6 +63,22 @@ pub fn key_byte(text: Option<&str>, command: bool, repeat: bool) -> Option<u8> {
     }
 }
 
+/// What a key press types for `handle_key`, given winit's `text` (the character with Control
+/// stripped: Control-O types "o") and `mac_chars` (`text_with_all_modifiers`, NSEvent's
+/// `characters`: Control-O is "\u{f}", the Mac char code the original read). The Mac char code
+/// is used only when it is the game's cheat key and that key is a control character (Chromatron
+/// 4's Control-O, platform.md P4), so every other key keeps the meaning it has in every game.
+pub fn typed_text<'a>(
+    text: Option<&'a str>,
+    mac_chars: Option<&'a str>,
+    cheat_key: u8,
+) -> Option<&'a str> {
+    match mac_chars.map(str::as_bytes) {
+        Some([byte]) if *byte == cheat_key && byte.is_ascii_control() => mac_chars,
+        _ => text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +157,37 @@ mod tests {
         assert_eq!(key_byte(Some("é"), false, false), None);
         assert_eq!(key_byte(Some("ab"), false, false), None);
         assert_eq!(key_byte(None, false, false), None);
+    }
+
+    #[test]
+    fn control_o_types_0x0f_only_where_it_is_the_cheat() {
+        let control_o = (Some("o"), Some("\u{f}"));
+        assert_eq!(
+            typed_text(control_o.0, control_o.1, 0x0f),
+            Some("\u{f}"),
+            "Chromatron 4"
+        );
+        for cheat in *b"Lz^" {
+            assert_eq!(typed_text(control_o.0, control_o.1, cheat), Some("o"));
+        }
+        assert_eq!(
+            typed_text(Some("r"), Some("\u{12}"), 0x0f),
+            Some("r"),
+            "Control-R"
+        );
+        assert_eq!(typed_text(Some("^"), Some("^"), b'^'), Some("^"));
+        assert_eq!(typed_text(None, None, 0x0f), None);
+        let byte = key_byte(typed_text(control_o.0, control_o.1, 0x0f), false, false);
+        assert_eq!(byte, Some(0x0f));
+        assert_eq!(
+            key_byte(typed_text(control_o.0, control_o.1, 0x0f), true, false),
+            None,
+            "Command-Control-O is a menu key"
+        );
+        assert_eq!(
+            key_byte(typed_text(control_o.0, control_o.1, 0x0f), false, true),
+            None,
+            "repeats are ignored"
+        );
     }
 }

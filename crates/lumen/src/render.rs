@@ -11,7 +11,7 @@ use crate::layout::{
     cell_origin, strip_origin,
 };
 use crate::piece::{Colour, DX, DY, Piece};
-use crate::rule_set::TextBoxSet;
+use crate::rule_set::{RuleSet, TextBoxSet};
 use crate::trace::BeamField;
 
 /// The cleared frame, RGB a4a4a4 (`memset(fb, 0xa4, …)`).
@@ -29,9 +29,11 @@ const DIGIT_SIZE: i32 = 12;
 const BEAM_REACH: i32 = 13;
 pub const MAX_TEXT_BOXES: usize = 5;
 
-/// `cell_image_index` @ 0x45d4: the sprite for a cell, or `None` for colours the original has no
-/// sprite for. `received` (what enters the cell) only matters for pinwheels, which light up when
-/// satisfied.
+/// `cell_image_index` (C1 @ 0x45d4, C3 @ 0x4a54, C4 @ 0x4784): the sprite for a cell, the same in
+/// every game that has the piece, or `None` for colours the original has no sprite for. The
+/// mobile teleporter's sprite differs between games, so it is `None` here and drawn through
+/// `RuleSet::cell_sprite`. `received` (what enters the cell) only matters for pinwheels, which
+/// light up when satisfied.
 pub fn cell_sprite(cell: Cell, received: Colour) -> Option<usize> {
     let d = usize::from(cell.dir);
     let axis = d & 3;
@@ -68,7 +70,24 @@ pub fn cell_sprite(cell: Cell, received: Colour) -> Option<usize> {
         Piece::MultiFilter => 100 + axis,
         Piece::Twister => 15,
         Piece::Complementor => 116 + (d & 1),
+        Piece::LogicGate => 128 + d,
+        Piece::Starburst => 144,
+        Piece::MobileTeleporter => return None,
+        Piece::DualReflector => 136 + axis,
+        Piece::QuadBender => 140 + axis,
+        Piece::OccupiedSquare => 146,
+        Piece::PrimaryLogicGate => 150 + d,
     })
+}
+
+impl RuleSet {
+    /// The sprite this game draws for `cell` (see `cell_sprite`).
+    pub fn cell_sprite(&self, cell: Cell, received: Colour) -> Option<usize> {
+        match cell.piece {
+            Piece::MobileTeleporter => self.mobile_teleporter_sprite,
+            _ => cell_sprite(cell, received),
+        }
+    }
 }
 
 /// One string for the shell to draw with Lucida Grande 13 pt, black, left-aligned and wrapped to
@@ -152,6 +171,7 @@ pub fn render<'a>(state: &GameState<'a>, frame: &mut [u32]) -> TextBoxes<'a> {
     let data = state.data();
     let scene = Scene {
         data,
+        rules: state.rules(),
         board: state.board(),
         field: state.field(),
         hidden: state.drag().map(|d| d.source),
@@ -181,7 +201,7 @@ pub fn render<'a>(state: &GameState<'a>, frame: &mut [u32]) -> TextBoxes<'a> {
         draw_strip_number(frame, data, slot, state.slot_state(slot));
     }
     if let Some(drag) = state.drag()
-        && let Some(sprite) = cell_sprite(drag.piece, 0)
+        && let Some(sprite) = state.rules().cell_sprite(drag.piece, 0)
     {
         let src = &data.sprites[sprite];
         blit(
@@ -201,6 +221,7 @@ pub fn render<'a>(state: &GameState<'a>, frame: &mut [u32]) -> TextBoxes<'a> {
 
 struct Scene<'s> {
     data: &'s GameData,
+    rules: &'s RuleSet,
     board: &'s Board,
     field: &'s BeamField,
     /// The cell a piece is being dragged out of; it is drawn empty.
@@ -220,7 +241,7 @@ impl Scene<'_> {
         } else {
             0
         };
-        if let Some(sprite) = cell_sprite(cell, received) {
+        if let Some(sprite) = self.rules.cell_sprite(cell, received) {
             let (left, top) = cell_origin(index);
             blit(
                 frame,
@@ -406,6 +427,58 @@ mod tests {
             .map(|d| cell_sprite(cell(Piece::Complementor, d), 0).unwrap())
             .collect();
         assert_eq!(complementor, [116, 117, 116, 117, 116, 117, 116, 117]);
+    }
+
+    #[test]
+    fn chromatron_3_and_4_pieces_use_the_sprites_after_127() {
+        // C3 data.md D5 and C4 data.md D2: gate 128 + dir, dual-reflector 136 + (dir & 3),
+        // quad-bender 140 + (dir & 3), starburst 144; C4: occupied 146, primary gate 150 + dir.
+        let cell = |piece, dir| Cell {
+            piece,
+            colour: 4,
+            dir,
+        };
+        let by_dir = |piece| -> Vec<usize> {
+            (0..8)
+                .map(|d| cell_sprite(cell(piece, d), 0).unwrap())
+                .collect()
+        };
+        assert_eq!(by_dir(Piece::LogicGate), (128..136).collect::<Vec<_>>());
+        assert_eq!(
+            by_dir(Piece::DualReflector),
+            [136, 137, 138, 139, 136, 137, 138, 139]
+        );
+        assert_eq!(
+            by_dir(Piece::QuadBender),
+            [140, 141, 142, 143, 140, 141, 142, 143]
+        );
+        assert_eq!(
+            by_dir(Piece::PrimaryLogicGate),
+            (150..158).collect::<Vec<_>>()
+        );
+        assert_eq!(cell_sprite(cell(Piece::Starburst, 3), 0), Some(144));
+        assert_eq!(cell_sprite(cell(Piece::OccupiedSquare, 5), 0), Some(146));
+    }
+
+    #[test]
+    fn the_mobile_teleporter_is_drawn_as_its_game_draws_it() {
+        // C3 reuses the teleporter's sprite 14 (C3 logic.md L1); C4 has its own, 145.
+        let mobile = Cell {
+            piece: Piece::MobileTeleporter,
+            colour: 4,
+            dir: 7,
+        };
+        assert_eq!(cell_sprite(mobile, 0), None);
+        assert_eq!(RuleSet::C3.cell_sprite(mobile, 0), Some(14));
+        assert_eq!(RuleSet::C4.cell_sprite(mobile, 0), Some(145));
+        let mirror = Cell {
+            piece: Piece::Mirror,
+            colour: 4,
+            dir: 2,
+        };
+        for rules in [RuleSet::C1, RuleSet::C2, RuleSet::C3, RuleSet::C4] {
+            assert_eq!(rules.cell_sprite(mirror, 0), Some(34), "{:?}", rules.game);
+        }
     }
 
     #[test]

@@ -1,8 +1,6 @@
 use std::{env, fs, path::Path, process::ExitCode};
 
-use spectrograph::{
-    DecodeError, Game, GameData, Image, cstrings, decode, originals_dir, write_rgb_png,
-};
+use spectrograph::{Game, GameData, Image, cstrings, decode, originals_dir, write_rgb_png};
 
 mod dump;
 
@@ -45,13 +43,7 @@ fn run(args: &[String]) -> Result<(), String> {
             for s in cstrings(&image).map_err(|e| e.to_string())? {
                 println!("{:#010x}  {:?}", s.vmaddr, s.text);
             }
-            let data = match decode(game, &bytes) {
-                Err(DecodeError::Unsupported { .. }) => {
-                    println!("\n## levels\n(not decoded yet for {game})");
-                    return Ok(());
-                }
-                decoded => decoded.map_err(|e| e.to_string())?,
-            };
+            let data = decode(game, &bytes).map_err(|e| e.to_string())?;
             print_levels(&data);
             if let Some(dir) = out_dir {
                 write_sprite_sheet(&data, dir)?;

@@ -18,6 +18,7 @@ use winit::keyboard::ModifiersState;
 use winit::platform::macos::{
     ActiveEventLoopExtMacOS, EventLoopBuilderExtMacOS, WindowAttributesExtMacOS,
 };
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::{Fullscreen, Window, WindowButtons, WindowId};
 
 use crate::AppSpec;
@@ -26,7 +27,7 @@ use crate::damage::Damage;
 use crate::frame_timing::{FrameTimes, Profiler};
 use crate::menus::{MenuBar, MenuCommand};
 use crate::pasteboard;
-use crate::pointer_keys::{Button, ButtonLatch, Held, key_byte};
+use crate::pointer_keys::{Button, ButtonLatch, Held, key_byte, typed_text};
 use crate::progress_file::ProgressFile;
 use crate::snapshot;
 use crate::typeset::TypesetCache;
@@ -477,11 +478,12 @@ impl ApplicationHandler<UserEvent> for App {
                 is_synthetic: false,
                 ..
             } if event.state == ElementState::Pressed => {
-                if let Some(byte) = key_byte(
+                let typed = typed_text(
                     event.text.as_deref(),
-                    self.modifiers.super_key(),
-                    event.repeat,
-                ) {
+                    event.text_with_all_modifiers(),
+                    self.state.rules().cheat_key,
+                );
+                if let Some(byte) = key_byte(typed, self.modifiers.super_key(), event.repeat) {
                     self.send(InputEvent::Key(byte));
                 }
             }

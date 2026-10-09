@@ -1,13 +1,15 @@
-//! The beam tracer (logic.md L3–L4: `retrace_beams` C1 @ 0x3ea4, C2 @ 0x415c; `trace_laser`
-//! C1 @ 0x3a58, C2 @ 0x39e0), with Chromatron 2's complementor pass.
+//! The beam tracer (logic.md L3–L4: `retrace_beams` C1 @ 0x3ea4, C2 @ 0x415c, C3 @ 0x4258,
+//! C4 @ 0x405c; `trace_laser` C1 @ 0x3a58, C2 @ 0x39e0), with the complementor pass of
+//! Chromatron 2 on and the gate pass of Chromatron 3 on.
 
 use crate::board::{BOARD_CELLS, Board, SIDE, board_index};
-use crate::piece::{Colour, DX, DY, Dir, Piece, WHITE};
-use crate::rule_set::RuleSet;
+use crate::piece::{BLUE, Colour, DX, DY, Dir, GREEN, Piece, RED, WHITE, turn};
+use crate::rule_set::{Passes, RuleSet};
 use crate::transfer::transfer;
 
-/// Beams one generation can hold; further pushes are dropped (`push_beam` @ 0x34ec).
-pub const MAX_BEAMS: usize = 32;
+/// Most beams a generation holds in any game (Chromatron 4's `push_beam` @ 0x3020); the others
+/// hold 32 (`RuleSet::max_beams`). Further pushes are dropped.
+pub const MAX_BEAMS: usize = 128;
 /// Generations traced per laser before giving up (`li r30, 0x3ff`).
 pub const MAX_GENERATIONS: u32 = 1023;
 
@@ -55,14 +57,16 @@ struct Beam {
     tag: i32,
 }
 
+/// One generation's beams, in fixed storage for the largest cap; `cap` is the game's.
 #[derive(Clone, Copy)]
 struct BeamList {
     beams: [Beam; MAX_BEAMS],
     len: usize,
+    cap: usize,
 }
 
 impl BeamList {
-    const fn new() -> BeamList {
+    const fn new(cap: usize) -> BeamList {
         BeamList {
             beams: [Beam {
                 x: 0,
@@ -72,22 +76,30 @@ impl BeamList {
                 tag: 0,
             }; MAX_BEAMS],
             len: 0,
+            cap: if cap < MAX_BEAMS { cap } else { MAX_BEAMS },
         }
     }
 
     fn push(&mut self, beam: Beam) {
-        if self.len < MAX_BEAMS {
+        if self.len < self.cap {
             self.beams[self.len] = beam;
             self.len += 1;
         }
     }
 }
 
-/// Recomputes `field` from scratch for every laser on `board`, then lets the complementors
-/// emit until nothing changes (`retrace_beams`). Allocation-free: the complementor pass works in
+/// Recomputes `field` from scratch for every laser on `board`, then lets the gates and
+/// complementors emit until nothing changes (`retrace_beams`). Allocation-free: the passes work in
 /// two fixed-size arrays on the stack.
 pub fn trace(board: &Board, field: &mut BeamField) {
     let complementors = (0..BOARD_CELLS).any(|i| board.cells[i].piece == Piece::Complementor);
+    let gates = board.rules().passes == Passes::GatesAroundComplementors
+        && (0..BOARD_CELLS).any(|i| {
+            matches!(
+                board.cells[i].piece,
+                Piece::LogicGate | Piece::PrimaryLogicGate
+            )
+        });
     // `clear_complementor_flags`: cell +3, "shut down", for this retrace only.
     let mut shut = [false; BOARD_CELLS];
     // `snapshot_cell_inputs`: cell +20..+27, the inputs before the latest emission.
@@ -95,13 +107,16 @@ pub fn trace(board: &Board, field: &mut BeamField) {
     loop {
         field.clear();
         trace_all_lasers(board, field);
-        if !complementors {
+        if !complementors && !gates {
             return;
         }
         loop {
             snapshot.copy_from_slice(&field.inbound);
+            let mut changed = gates && emit_gates(board, field);
             emit_complementors(board, field, &shut);
-            if !complementor_new_input(board, field, &snapshot, &shut) {
+            changed |= complementor_new_input(board, field, &snapshot, &shut);
+            changed |= gates && emit_gates(board, field);
+            if !changed {
                 break;
             }
         }
@@ -149,6 +164,38 @@ fn emit_complementors(board: &Board, field: &mut BeamField, shut: &[bool; BOARD_
             }
         }
     }
+}
+
+/// `emit_gates` (C3 @ 0x4198) / `emit_logic_gates` (C4 @ 0x3f1c), row by row: a gate pointing
+/// `p` sends the colour bits its two inputs share (the beams that entered travelling `p + 1` and
+/// `p − 1`) and that it hasn't sent yet, as a new laser trace from its own cell in direction `p`.
+/// A primary logic gate sends only when the shared colour is exactly one primary. Inputs are read
+/// live. Returns whether any gate emitted. A raw dir of 8 or 9 (from an original save) acts as
+/// `dir & 7`. The original reads past `out[]` and also starts its `trace_laser` in the raw dir,
+/// reading `dx`/`dy` past their tables (dir 8 steps west, dir 9 steps (-1, +2)).
+fn emit_gates(board: &Board, field: &mut BeamField) -> bool {
+    let mut fired = false;
+    for index in 0..BOARD_CELLS {
+        let cell = board.cells[index];
+        let primary = match cell.piece {
+            Piece::LogicGate => false,
+            Piece::PrimaryLogicGate => true,
+            _ => continue,
+        };
+        let p = cell.dir & 7;
+        let inputs = &field.inbound[index];
+        let shared = inputs[usize::from(turn(p, 1))] & inputs[usize::from(turn(p, 7))];
+        if primary && !matches!(shared, BLUE | GREEN | RED) {
+            continue;
+        }
+        let k = shared & !field.outbound[index][usize::from(p)];
+        if k != 0 {
+            let (x, y) = xy(index);
+            trace_laser(board, field, x, y, p, k);
+            fired = true;
+        }
+    }
+    fired
 }
 
 /// `complementor_new_input`: some live complementor got an input, in any of the 8 directions,
@@ -208,9 +255,12 @@ fn trace_laser(
     dir: Dir,
     colour: Colour,
 ) -> u32 {
-    let mut cur = BeamList::new();
-    let mut next = BeamList::new();
     let rules = board.rules();
+    let mut lists = [
+        BeamList::new(rules.max_beams),
+        BeamList::new(rules.max_beams),
+    ];
+    let [mut cur, mut next] = lists.each_mut();
     let mut next_tag = 1;
     next.push(Beam {
         x,
@@ -233,13 +283,13 @@ fn trace_laser(
                     rules,
                     board,
                     field,
-                    &mut next,
+                    next,
                     &mut next_tag,
                     Beam { x, y, ..*beam },
                 );
             }
         }
-        entangle(board, &mut next);
+        entangle(board, next);
         if next.len == 0 || generations == MAX_GENERATIONS {
             return generations;
         }
@@ -257,8 +307,8 @@ fn enter_cell(
     let index = board_index(usize::from(beam.x), usize::from(beam.y));
     field.inbound[index][usize::from(beam.dir)] |= beam.colour;
     let cell = board.cells[index];
-    if cell.piece == Piece::Teleporter {
-        if let Some((x, y)) = teleport_target(board, beam.x, beam.y, beam.dir) {
+    if matches!(cell.piece, Piece::Teleporter | Piece::MobileTeleporter) {
+        if let Some((x, y)) = teleport_target(rules, board, beam.x, beam.y, beam.dir) {
             next.push(Beam { x, y, ..beam });
         }
         return;
@@ -273,14 +323,22 @@ fn enter_cell(
     }
 }
 
-/// The next teleporter along `dir`, skipping every other cell (walls included).
-fn teleport_target(board: &Board, mut x: u8, mut y: u8, dir: Dir) -> Option<(u8, u8)> {
+/// The next cell along `dir` that holds one of the game's teleport targets, skipping every other
+/// cell (walls included).
+fn teleport_target(
+    rules: &RuleSet,
+    board: &Board,
+    mut x: u8,
+    mut y: u8,
+    dir: Dir,
+) -> Option<(u8, u8)> {
     loop {
         (x, y) = step(x, y, dir);
         if !on_board(x, y) {
             return None;
         }
-        if board.at(usize::from(x), usize::from(y)).piece == Piece::Teleporter {
+        let piece = board.at(usize::from(x), usize::from(y)).piece;
+        if rules.teleport_targets.contains(&piece) {
             return Some((x, y));
         }
     }
@@ -458,15 +516,29 @@ mod tests {
 
     #[test]
     fn a_generation_holds_at_most_32_beams() {
-        let mut list = BeamList::new();
+        let mut list = BeamList::new(RuleSet::C1.max_beams);
         for i in 0..40 {
             list.push(Beam {
                 x: i,
                 ..Beam::default()
             });
         }
-        assert_eq!(list.len, MAX_BEAMS);
-        assert_eq!(list.beams[MAX_BEAMS - 1].x, 31, "later pushes are dropped");
+        assert_eq!(list.len, 32);
+        assert_eq!(list.beams[31].x, 31, "later pushes are dropped");
+    }
+
+    #[test]
+    fn a_chromatron_4_generation_holds_128_beams() {
+        let mut list = BeamList::new(RuleSet::C4.max_beams);
+        for i in 0..200 {
+            list.push(Beam {
+                x: i,
+                ..Beam::default()
+            });
+        }
+        assert_eq!((list.len, MAX_BEAMS), (128, 128));
+        assert_eq!(list.beams[127].x, 127, "later pushes are dropped");
+        assert_eq!(BeamList::new(500).cap, MAX_BEAMS, "never past the storage");
     }
 
     #[test]
@@ -661,5 +733,296 @@ mod tests {
         let field = traced(&board);
         assert_eq!(field.outbound[board_index(5, 5)][2], CYAN);
         assert_eq!(field.received(board_index(8, 0)), CYAN);
+    }
+
+    /// A board of `game`.
+    fn board_of(game: Game, pieces: &[(usize, usize, Piece, Colour, Dir)]) -> Board {
+        Board {
+            game,
+            ..board(pieces)
+        }
+    }
+
+    const MAGENTA: Colour = RED | BLUE;
+    const YELLOW: Colour = RED | GREEN;
+
+    #[test]
+    fn teleporters_of_both_kinds_pair_with_each_other() {
+        for game in [Game::C3, Game::C4] {
+            for (entry, target) in [
+                (Piece::Teleporter, Piece::MobileTeleporter),
+                (Piece::MobileTeleporter, Piece::Teleporter),
+                (Piece::MobileTeleporter, Piece::MobileTeleporter),
+            ] {
+                let field = traced(&board_of(
+                    game,
+                    &[
+                        (0, 3, Piece::Laser, GREEN, 2),
+                        (3, 3, entry, 4, 0),
+                        (5, 3, Piece::Wall, 0, 0),
+                        (9, 3, target, 4, 7),
+                    ],
+                ));
+                assert_eq!(field.received(board_index(5, 3)), 0, "{game:?}");
+                assert_eq!(
+                    field.outbound[board_index(9, 3)][2],
+                    GREEN,
+                    "{game:?} {entry:?} → {target:?}"
+                );
+                assert_eq!(field.inbound[board_index(10, 3)][2], GREEN);
+            }
+        }
+    }
+
+    #[test]
+    fn a_starburst_sends_four_beams_of_the_other_parity() {
+        let field = traced(&board_of(
+            Game::C3,
+            &[(0, 7, Piece::Laser, RED, 2), (7, 7, Piece::Starburst, 4, 0)],
+        ));
+        let at = board_index(7, 7);
+        assert_eq!(field.inbound[at][2], RED);
+        assert_eq!(field.outbound[at], [0, RED, 0, RED, 0, RED, 0, RED]);
+        assert_eq!(
+            field.received(board_index(8, 7)),
+            0,
+            "nothing goes straight on"
+        );
+        assert_eq!(field.received(board_index(10, 4)), RED);
+        assert_eq!(field.received(board_index(4, 10)), RED);
+    }
+
+    #[test]
+    fn chromatron_4_keeps_beams_that_chromatron_3_drops() {
+        // Five starbursts multiply one beam past 32 per generation: Chromatron 3 drops the extra
+        // pushes, Chromatron 4 (128 beams) keeps them and lights more of the board.
+        let pieces = [
+            (0, 7, Piece::Laser, RED, 2),
+            (4, 7, Piece::Starburst, 4, 0),
+            (6, 5, Piece::Starburst, 4, 0),
+            (6, 9, Piece::Starburst, 4, 0),
+            (2, 5, Piece::Starburst, 4, 0),
+            (2, 9, Piece::Starburst, 4, 0),
+        ];
+        let c3 = traced(&board_of(Game::C3, &pieces));
+        let c4 = traced(&board_of(Game::C4, &pieces));
+        for (x, y) in [(13, 9), (14, 9), (2, 14)] {
+            let at = board_index(x, y);
+            assert_eq!((c3.received(at), c4.received(at)), (0, RED), "({x},{y})");
+        }
+        assert!((0..BOARD_CELLS).all(|i| c3.received(i) == 0 || c4.received(i) == RED));
+    }
+
+    /// A gate at (7,7) pointing N, fed from the SW (beam heading NE) and the SE (beam heading NW).
+    fn gate_board(game: Game, gate: Piece, from_sw: Colour, from_se: Colour) -> Board {
+        let mut pieces = vec![(7, 7, gate, 4, 0), (7, 2, Piece::Pinwheel, 0, 0)];
+        if from_sw != 0 {
+            pieces.push((4, 10, Piece::Laser, from_sw, 1));
+        }
+        if from_se != 0 {
+            pieces.push((10, 10, Piece::Laser, from_se, 7));
+        }
+        board_of(game, &pieces)
+    }
+
+    #[test]
+    fn a_logic_gate_sends_on_the_colour_both_inputs_share() {
+        // logic.md L3 (C4 slot 6): magenta AND yellow is red, sent straight ahead from the gate.
+        for game in [Game::C3, Game::C4] {
+            let field = traced(&gate_board(game, Piece::LogicGate, MAGENTA, YELLOW));
+            let at = board_index(7, 7);
+            assert_eq!(
+                (field.inbound[at][1], field.inbound[at][7]),
+                (MAGENTA, YELLOW)
+            );
+            assert_eq!(field.outbound[at], [RED, 0, 0, 0, 0, 0, 0, 0], "{game:?}");
+            assert_eq!(field.received(board_index(7, 2)), RED);
+            for (sw, se) in [(MAGENTA, 0), (0, YELLOW), (RED, BLUE)] {
+                let field = traced(&gate_board(game, Piece::LogicGate, sw, se));
+                assert_eq!(field.outbound[at], [0; 8], "{game:?} {sw} {se}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_gate_ignores_beams_from_other_sides() {
+        let field = traced(&board_of(
+            Game::C4,
+            &[
+                (7, 7, Piece::LogicGate, 4, 0),
+                (0, 7, Piece::Laser, WHITE, 2),
+                (7, 14, Piece::Laser, WHITE, 0),
+                (7, 2, Piece::Pinwheel, 0, 0),
+            ],
+        ));
+        assert_eq!(field.outbound[board_index(7, 7)], [0; 8]);
+        assert_eq!(field.received(board_index(8, 7)), 0, "it absorbs");
+    }
+
+    #[test]
+    fn a_primary_logic_gate_sends_only_a_single_primary() {
+        let at = board_index(7, 7);
+        for (sw, se, out) in [
+            (MAGENTA, YELLOW, RED),
+            (CYAN, YELLOW, GREEN),
+            (WHITE, BLUE, BLUE),
+            (WHITE, WHITE, 0),
+            (MAGENTA, MAGENTA, 0),
+            (YELLOW, CYAN | RED, 0),
+        ] {
+            let field = traced(&gate_board(Game::C4, Piece::PrimaryLogicGate, sw, se));
+            assert_eq!(field.outbound[at][0], out, "{sw} & {se}");
+            assert_eq!(field.received(board_index(7, 2)), out);
+        }
+        let plain = traced(&gate_board(Game::C4, Piece::LogicGate, WHITE, WHITE));
+        assert_eq!(
+            plain.outbound[at][0], WHITE,
+            "a plain gate sends any colour"
+        );
+    }
+
+    #[test]
+    fn a_gate_fed_its_own_output_settles() {
+        // The gate's red goes N, W, then SE into a splitter that merges it into the gate's own
+        // NE-bound input: the input doesn't change, so the pass ends with one emission.
+        let board = board_of(
+            Game::C4,
+            &[
+                (3, 11, Piece::Laser, RED, 1),
+                (10, 10, Piece::Laser, YELLOW, 7),
+                (5, 9, Piece::Splitter, 0, 2),
+                (7, 7, Piece::LogicGate, 4, 0),
+                (7, 5, Piece::Mirror, 0, 7),
+                (1, 5, Piece::Bender, 0, 5),
+            ],
+        );
+        let field = traced(&board);
+        let at = board_index(7, 7);
+        assert_eq!(field.inbound[at][1], RED);
+        assert_eq!(field.outbound[at], [RED, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            field.inbound[board_index(5, 9)][3],
+            RED,
+            "the loop is closed"
+        );
+        assert_eq!(traced(&board), field, "and the same every time");
+    }
+
+    #[test]
+    fn a_gate_with_a_raw_dir_of_8_or_9_acts_as_dir_0_or_1() {
+        let mut board = gate_board(Game::C4, Piece::LogicGate, MAGENTA, YELLOW);
+        board.cells[board_index(7, 7)].dir = 8;
+        assert_eq!(traced(&board).received(board_index(7, 2)), RED);
+    }
+
+    /// The first gate pass of a round runs before the complementors: a green gate output merges
+    /// (through a splitter) with red into a complementor's east-bound input, which therefore
+    /// sends only blue. Without that first pass the complementor would also send red's cyan.
+    fn gate_before_complementor() -> Board {
+        board_of(
+            Game::C3,
+            &[
+                (3, 4, Piece::Laser, GREEN, 3),
+                (3, 10, Piece::Laser, GREEN, 1),
+                (6, 7, Piece::LogicGate, 4, 2),
+                (8, 0, Piece::Laser, RED, 4),
+                (8, 7, Piece::Splitter, 0, 3),
+                (10, 7, Piece::Complementor, 4, 0),
+                (13, 7, Piece::Pinwheel, BLUE, 0),
+            ],
+        )
+    }
+
+    #[test]
+    fn gates_emit_before_the_complementors_in_each_round() {
+        let board = gate_before_complementor();
+        let field = traced(&board);
+        assert_eq!(field.inbound[board_index(10, 7)][2], YELLOW);
+        assert_eq!(
+            field.outbound[board_index(10, 7)][2],
+            BLUE,
+            "not cyan | blue"
+        );
+        assert!(crate::win::is_won(&board, &field));
+    }
+
+    /// The second gate pass of a round runs after the complementors: a complementor's cyan reaches a
+    /// gate that then sends green on, with no complementor input new (C4 logic.md L4, slot 15).
+    fn complementor_before_gate(game: Game) -> Board {
+        board_of(
+            game,
+            &[
+                (0, 7, Piece::Laser, RED, 2),
+                (3, 7, Piece::Complementor, 4, 0),
+                (6, 7, Piece::LogicGate, 4, 1),
+                (6, 12, Piece::Laser, GREEN, 0),
+                (9, 4, Piece::Pinwheel, GREEN, 0),
+            ],
+        )
+    }
+
+    #[test]
+    fn gates_emit_again_after_the_complementors() {
+        for game in [Game::C3, Game::C4] {
+            let board = complementor_before_gate(game);
+            let field = traced(&board);
+            assert_eq!(field.inbound[board_index(6, 7)][2], CYAN);
+            assert_eq!(field.outbound[board_index(6, 7)][1], GREEN, "{game:?}");
+            assert!(crate::win::is_won(&board, &field), "{game:?}");
+        }
+    }
+
+    /// The second gate pass of a round counts as a change: in round 1 the complementor's cyan
+    /// reaches gate G (6,7) only in the second pass, and G's green (NE) lands in the gate G0 (9,4)
+    /// on an earlier row, which can only emit in round 2 (green N to the pinwheel at (9,1)). If the
+    /// second pass did not count, the rounds would stop after round 1.
+    #[test]
+    fn the_second_gate_pass_counts_as_a_change() {
+        for game in [Game::C3, Game::C4] {
+            let board = board_of(
+                game,
+                &[
+                    (0, 7, Piece::Laser, RED, 2),
+                    (3, 7, Piece::Complementor, 4, 0),
+                    (6, 7, Piece::LogicGate, 4, 1),
+                    (6, 12, Piece::Laser, GREEN, 0),
+                    (9, 4, Piece::LogicGate, 4, 0),
+                    (12, 7, Piece::Laser, WHITE, 7),
+                    (9, 1, Piece::Pinwheel, GREEN, 0),
+                ],
+            );
+            let field = traced(&board);
+            assert_eq!(field.outbound[board_index(9, 4)][0], GREEN, "{game:?}");
+            assert!(crate::win::is_won(&board, &field), "{game:?}");
+        }
+    }
+
+    /// Three gates, each fed by the next one down: G1 (row 10) feeds G2 (row 7), which feeds G3
+    /// (row 4). Row-major order reaches G3 before G2 and G2 before G1, so G3 only emits in the
+    /// second round: the rounds repeat because a gate emitted, with no complementor at all.
+    fn gate_chain() -> Board {
+        board_of(
+            Game::C4,
+            &[
+                (4, 13, Piece::Laser, WHITE, 1),
+                (10, 13, Piece::Laser, WHITE, 7),
+                (7, 10, Piece::LogicGate, 4, 0),
+                (3, 7, Piece::Laser, WHITE, 2),
+                (7, 7, Piece::LogicGate, 4, 1),
+                (13, 7, Piece::Laser, WHITE, 7),
+                (10, 4, Piece::LogicGate, 4, 0),
+                (10, 1, Piece::Pinwheel, WHITE, 0),
+            ],
+        )
+    }
+
+    #[test]
+    fn rounds_repeat_while_a_gate_emits() {
+        let board = gate_chain();
+        let field = traced(&board);
+        assert_eq!(field.outbound[board_index(7, 10)][0], WHITE);
+        assert_eq!(field.outbound[board_index(7, 7)][1], WHITE);
+        assert_eq!(field.outbound[board_index(10, 4)][0], WHITE);
+        assert!(crate::win::is_won(&board, &field));
     }
 }

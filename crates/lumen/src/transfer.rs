@@ -1,4 +1,5 @@
-//! What each piece does to a beam that enters its cell (logic.md L3, `beam_enter_cell` @ 0x3568).
+//! What each piece does to a beam that enters its cell (logic.md L3, `beam_enter_cell` C1
+//! @ 0x3568, C3 @ 0x3320, C4 @ 0x309c).
 
 use crate::board::Cell;
 use crate::piece::{BLUE, Colour, Dir, GREEN, Piece, RED, turn};
@@ -12,7 +13,7 @@ pub struct Emission {
     pub tag: i32,
 }
 
-/// Most beams one entry can produce: a white beam through a tangler gives 3 pairs.
+/// Most beams one entry can produce: a white beam through a tangler gives 3 pairs (a starburst 4).
 pub const MAX_EMISSIONS: usize = 6;
 
 /// The beams one entry produces, in the order the original pushes them.
@@ -61,9 +62,9 @@ pub fn doppler_backward(c: Colour) -> Colour {
 }
 
 /// The beams that leave `cell` when a beam travelling `d` with colour `c` and tag `t` enters it,
-/// under `rules`. `next_tag` is the trace's `entangle_counter`. Teleporters are handled by the
-/// tracer (they need the board) and complementors by its complementor pass, so both produce
-/// nothing here.
+/// under `rules`. `next_tag` is the trace's `entangle_counter`. Teleporters of both kinds are
+/// handled by the tracer (they need the board), and complementors and logic gates by its
+/// fixed-point passes, so they produce nothing here.
 pub fn transfer(
     rules: &RuleSet,
     cell: Cell,
@@ -77,8 +78,14 @@ pub fn transfer(
     let r = d.wrapping_sub(p) & 7;
     let mirrored = p.wrapping_mul(2).wrapping_sub(d) & 7;
     match cell.piece {
-        Piece::Empty | Piece::Pinwheel => out.push(d, c, t),
-        Piece::Wall | Piece::Laser | Piece::Teleporter | Piece::Complementor => {}
+        Piece::Empty | Piece::Pinwheel | Piece::OccupiedSquare => out.push(d, c, t),
+        Piece::Wall
+        | Piece::Laser
+        | Piece::Teleporter
+        | Piece::Complementor
+        | Piece::LogicGate
+        | Piece::MobileTeleporter
+        | Piece::PrimaryLogicGate => {}
         Piece::Mirror => {
             if (1..=3).contains(&r) {
                 out.push(mirrored, c, t);
@@ -143,6 +150,22 @@ pub fn transfer(
             }
         },
         Piece::Twister => out.push(turn(d, 6), c, t),
+        Piece::Starburst => {
+            let dirs = if d & 1 == 0 {
+                [1, 7, 3, 5]
+            } else {
+                [0, 2, 4, 6]
+            };
+            for dir in dirs {
+                out.push(dir, c, 0);
+            }
+        }
+        Piece::DualReflector => {
+            if r != 0 && r != 4 {
+                out.push(mirrored, c, t);
+            }
+        }
+        Piece::QuadBender => out.push(turn(mirrored, 7), c, t),
     }
     out
 }
@@ -550,6 +573,171 @@ mod tests {
         assert_eq!(back, 0, "E → N");
         // logic.md L3: sent back (travelling S) it leaves travelling E again, not W.
         assert_eq!(run_in(&RuleSet::C2, twister, turn(back, 4), RED, 0)[0].0, 2);
+    }
+
+    /// As `check_turns`, under `rules`.
+    fn check_turns_in(rules: &RuleSet, piece: Piece, table: [Option<u8>; 8]) {
+        for p in 0..8 {
+            for r in 0..8 {
+                let d = turn(p, r);
+                let expected: Vec<_> = table[usize::from(r)]
+                    .map(|k| (turn(p, k), RED, 3))
+                    .into_iter()
+                    .collect();
+                assert_eq!(
+                    run_in(rules, cell(piece, 4, p), d, RED, 3),
+                    expected,
+                    "{piece:?} p={p} r={r}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dual_reflector_reflects_from_both_faces() {
+        // logic.md L3: out = 2p − d, absorbed along the surface (r = 0, 4), colour and tag kept.
+        for rules in [RuleSet::C3, RuleSet::C4] {
+            check_turns_in(
+                &rules,
+                Piece::DualReflector,
+                [
+                    None,
+                    Some(7),
+                    Some(6),
+                    Some(5),
+                    None,
+                    Some(3),
+                    Some(2),
+                    Some(1),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn quad_bender_bends_from_both_faces_and_never_absorbs() {
+        // logic.md L3: out = 2p + 7 − d for every r, colour and tag kept.
+        for rules in [RuleSet::C3, RuleSet::C4] {
+            check_turns_in(
+                &rules,
+                Piece::QuadBender,
+                [
+                    Some(7),
+                    Some(6),
+                    Some(5),
+                    Some(4),
+                    Some(3),
+                    Some(2),
+                    Some(1),
+                    Some(0),
+                ],
+            );
+        }
+    }
+
+    #[test]
+    fn quad_bender_paths_are_reversible() {
+        for p in 0..8 {
+            for d in 0..8 {
+                let quad = cell(Piece::QuadBender, 4, p);
+                let [(out, _, _)] = run_in(&RuleSet::C3, quad, d, RED, 0)[..] else {
+                    panic!("one beam")
+                };
+                assert_eq!(
+                    run_in(&RuleSet::C3, quad, turn(out, 4), RED, 0),
+                    [(turn(d, 4), RED, 0)],
+                    "p={p} d={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn starburst_turns_a_beam_into_four_of_the_other_parity_untagged() {
+        // logic.md L3: even d → 1, 7, 3, 5; odd d → 0, 2, 4, 6, in that order, tag 0; dir ignored.
+        for rules in [RuleSet::C3, RuleSet::C4] {
+            for p in 0..10 {
+                for d in 0..8 {
+                    let dirs = if d % 2 == 0 {
+                        [1, 7, 3, 5]
+                    } else {
+                        [0, 2, 4, 6]
+                    };
+                    let expected: Vec<_> = dirs.iter().map(|&o| (o, GREEN, 0)).collect();
+                    assert_eq!(
+                        run_in(&rules, cell(Piece::Starburst, 4, p), d, GREEN, 9),
+                        expected,
+                        "p={p} d={d}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn logic_gates_and_mobile_teleporters_emit_nothing_here() {
+        // Gates absorb in the tracer (their pass emits); teleporting needs the board.
+        for piece in [
+            Piece::LogicGate,
+            Piece::MobileTeleporter,
+            Piece::PrimaryLogicGate,
+        ] {
+            for p in 0..8 {
+                for d in 0..8 {
+                    assert_eq!(
+                        run_in(&RuleSet::C4, cell(piece, 4, p), d, WHITE, 3),
+                        [],
+                        "{piece:?} p={p} d={d}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn occupied_square_passes_everything_like_an_empty_cell() {
+        for p in 0..8 {
+            for d in 0..8 {
+                assert_eq!(
+                    run_in(&RuleSet::C4, cell(Piece::OccupiedSquare, 2, p), d, WHITE, 3),
+                    [(d, WHITE, 3)],
+                    "p={p} d={d}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_raw_dir_of_8_or_9_turns_the_new_pieces_as_dir_0_or_1() {
+        for piece in [Piece::DualReflector, Piece::QuadBender, Piece::Starburst] {
+            for p in [8, 9] {
+                for d in 0..8 {
+                    assert_eq!(
+                        run_in(&RuleSet::C4, cell(piece, 4, p), d, RED, 2),
+                        run_in(&RuleSet::C4, cell(piece, 4, p & 7), d, RED, 2),
+                        "{piece:?} p={p} d={d}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Types 0–15 behave in Chromatron 3 and 4 exactly as in Chromatron 2 (logic.md L3 of both).
+    #[test]
+    fn chromatron_3_and_4_keep_every_chromatron_2_rule() {
+        for piece in &Piece::ALL[..16] {
+            for p in 0..10 {
+                for d in 0..8 {
+                    for t in [0, 3] {
+                        let c2 = run_in(&RuleSet::C2, cell(*piece, GREEN, p), d, WHITE, t);
+                        for rules in [RuleSet::C3, RuleSet::C4] {
+                            let later = run_in(&rules, cell(*piece, GREEN, p), d, WHITE, t);
+                            assert_eq!(later, c2, "{:?} {piece:?} p={p} d={d} t={t}", rules.game);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

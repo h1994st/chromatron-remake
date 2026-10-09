@@ -44,10 +44,24 @@ pub enum Piece {
     Twister = 14,
     /// Chromatron 2 on.
     Complementor = 15,
+    /// Chromatron 3 on: absorbs, and the gate pass emits what its two inputs share.
+    LogicGate = 16,
+    /// Chromatron 3 on; fixed.
+    Starburst = 17,
+    /// Chromatron 3 on: a teleporter that can be moved.
+    MobileTeleporter = 18,
+    /// Chromatron 3 on: a mirror on both faces.
+    DualReflector = 19,
+    /// Chromatron 3 on: a bender on both faces.
+    QuadBender = 20,
+    /// Chromatron 4; fixed: passes light like an empty cell, but nothing can be dropped on it.
+    OccupiedSquare = 21,
+    /// Chromatron 4: a logic gate that emits only a single primary colour.
+    PrimaryLogicGate = 22,
 }
 
 impl Piece {
-    pub const ALL: [Piece; 16] = [
+    pub const ALL: [Piece; 23] = [
         Piece::Empty,
         Piece::Wall,
         Piece::Laser,
@@ -64,17 +78,34 @@ impl Piece {
         Piece::MultiFilter,
         Piece::Twister,
         Piece::Complementor,
+        Piece::LogicGate,
+        Piece::Starburst,
+        Piece::MobileTeleporter,
+        Piece::DualReflector,
+        Piece::QuadBender,
+        Piece::OccupiedSquare,
+        Piece::PrimaryLogicGate,
     ];
 
     pub fn from_byte(byte: u8) -> Option<Piece> {
         Piece::ALL.get(usize::from(byte)).copied()
     }
 
-    /// `is_movable` (C1 @ 0x34d8, C2 @ 0x33a8): types 3–9, 13 and 15 can be dragged and rotated;
-    /// everything else is fixed. Types 13 and 15 exist only from Chromatron 2 on, so this one test
-    /// serves every game.
+    /// `is_movable` (C1 @ 0x34d8, C2 @ 0x33a8, C3 @ 0x3214, C4 @ 0x2f88): types 3–9, 13, 15, 16,
+    /// 18, 19, 20 and 22 can be dragged and rotated; everything else is fixed. Each type exists only
+    /// from the game that added it on, so this one test serves every game.
     pub fn is_movable(self) -> bool {
-        (self as u8).wrapping_sub(3) < 7 || matches!(self, Piece::MultiFilter | Piece::Complementor)
+        (self as u8).wrapping_sub(3) < 7
+            || matches!(
+                self,
+                Piece::MultiFilter
+                    | Piece::Complementor
+                    | Piece::LogicGate
+                    | Piece::MobileTeleporter
+                    | Piece::DualReflector
+                    | Piece::QuadBender
+                    | Piece::PrimaryLogicGate
+            )
     }
 }
 
@@ -87,11 +118,11 @@ mod tests {
         for piece in Piece::ALL {
             assert_eq!(Piece::from_byte(piece as u8), Some(piece));
         }
-        assert_eq!(Piece::from_byte(16), None);
+        assert_eq!(Piece::from_byte(23), None);
     }
 
     #[test]
-    fn exactly_mirror_to_tangler_multi_filter_and_complementor_are_movable() {
+    fn exactly_the_originals_movable_types_are_movable() {
         let movable: Vec<Piece> = Piece::ALL.into_iter().filter(|p| p.is_movable()).collect();
         assert_eq!(
             movable,
@@ -104,7 +135,12 @@ mod tests {
                 Piece::Splitter,
                 Piece::Tangler,
                 Piece::MultiFilter,
-                Piece::Complementor
+                Piece::Complementor,
+                Piece::LogicGate,
+                Piece::MobileTeleporter,
+                Piece::DualReflector,
+                Piece::QuadBender,
+                Piece::PrimaryLogicGate
             ]
         );
     }

@@ -3,6 +3,8 @@
 pub mod blit;
 pub mod c1;
 pub mod c2;
+pub mod c3;
+pub mod c4;
 pub mod damage;
 pub mod frame_timing;
 pub mod menus;
@@ -43,6 +45,18 @@ pub static CHROMATRON_2: AppSpec = AppSpec {
     support_dir: "Chromatron 2",
 };
 
+pub static CHROMATRON_3: AppSpec = AppSpec {
+    data: &c3::GAME,
+    bundle_id: "me.shengtuo.chromatron3",
+    support_dir: "Chromatron 3",
+};
+
+pub static CHROMATRON_4: AppSpec = AppSpec {
+    data: &c4::GAME,
+    bundle_id: "me.shengtuo.chromatron4",
+    support_dir: "Chromatron 4",
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -55,6 +69,8 @@ mod tests {
         for (spec, game, title) in [
             (&CHROMATRON_1, Game::C1, "Chromatron 1 (v1.15)"),
             (&CHROMATRON_2, Game::C2, "Chromatron 2 (v1.4)"),
+            (&CHROMATRON_3, Game::C3, "Chromatron 3 (v1.1)"),
+            (&CHROMATRON_4, Game::C4, "Chromatron 4 (v1.0)"),
         ] {
             assert_eq!(spec.data.game, game);
             assert_eq!(spec.data.ui.window_title, title);
@@ -74,5 +90,23 @@ mod tests {
         assert!(file.path().ends_with(
             "Library/Application Support/Chromatron 2/com.silverspaceship.chromatron2.dat"
         ));
+    }
+
+    #[test]
+    fn chromatron_3_and_4_save_where_the_spec_says() {
+        for (spec, path) in [
+            (
+                &CHROMATRON_3,
+                "Library/Application Support/Chromatron 3/com.silverspaceship.chromatron3.dat",
+            ),
+            (
+                &CHROMATRON_4,
+                "Library/Application Support/Chromatron 4/com.silverspaceship.chromatron4.dat",
+            ),
+        ] {
+            let file = ProgressFile::for_app(spec.support_dir, RuleSet::of(spec.data.game))
+                .expect("tests run with a home directory");
+            assert!(file.path().ends_with(path), "{path}");
+        }
     }
 }

@@ -97,6 +97,13 @@ pub fn kind_symbol(kind: u8) -> char {
         13 => 'U',
         14 => 'W',
         15 => 'C',
+        16 => 'G',
+        17 => 'X',
+        18 => 'V',
+        19 => 'R',
+        20 => 'K',
+        21 => ':',
+        22 => 'H',
         _ => '?',
     }
 }
@@ -158,8 +165,8 @@ mod tests {
 
     #[test]
     fn symbols_cover_every_kind_and_colour() {
-        let kinds: String = (0..=16).map(kind_symbol).collect();
-        assert_eq!(kinds, ".#*MBFPDSQo=TUWC?");
+        let kinds: String = (0..=23).map(kind_symbol).collect();
+        assert_eq!(kinds, ".#*MBFPDSQo=TUWCGXVRK:H?");
         let colours: String = (0..=8).map(colour_symbol).collect();
         assert_eq!(colours, "kbgcrmyw?");
     }

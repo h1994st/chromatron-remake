@@ -11,14 +11,15 @@ const SHEET_BACKGROUND: u32 = 0xa4a4a4;
 /// A 15 × 15 grid, three characters per cell: kind, colour, direction (blank where unused).
 /// Kinds: `.` empty `#` wall `*` laser `M` mirror `B` bender `F` filter `P` prism `D` doppler
 /// `S` splitter `Q` tangler `o` pinwheel `=` conduit `T` teleporter `U` multi-filter `W` twister
-/// `C` complementor. Colours: k b g c r m y w.
+/// `C` complementor `G` logic gate `X` starburst `V` mobile teleporter `R` dual-reflector
+/// `K` quad-bender `:` occupied square `H` primary logic gate. Colours: k b g c r m y w.
 pub fn level_grid(level: &Level) -> String {
     let mut cells = [[*b".  "; SIDE]; SIDE];
     for r in level.records.iter() {
         let (colour, dir) = match r.kind {
             2 | 5 => (true, true),
             10 => (true, false),
-            3 | 4 | 6..=9 | 11 | 13 | 15 => (false, true),
+            3 | 4 | 6..=9 | 11 | 13 | 15 | 16 | 19 | 20 | 22 => (false, true),
             _ => (false, false),
         };
         cells[usize::from(r.y)][usize::from(r.x)] = [
