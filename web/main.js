@@ -868,7 +868,11 @@ function wire() {
     { passive: true },
   );
   stage.addEventListener("contextmenu", (event) => {
-    if (isView(event.target)) event.preventDefault();
+    // A press on a view captures the pointer, so the event can target the stage itself: decide by
+    // position too. The portrait texts, the toolbar and the dialogs keep the browser's menu.
+    const [x, y] = framePoint(event.clientX, event.clientY);
+    const [offX, offY] = touchLayout.OFF_FRAME;
+    if (isView(event.target) || x !== offX || y !== offY) event.preventDefault();
   });
   pixels.addEventListener(
     "wheel",

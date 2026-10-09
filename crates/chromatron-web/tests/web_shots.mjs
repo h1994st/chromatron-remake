@@ -293,6 +293,16 @@ function touch(type, x = 0, y = 0) {
   return send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
 }
 
+// A real right mouse press and release at viewport point (x, y); whether the page default-prevented
+// the contextmenu event that followed (recorded by a bubbling listener on the document).
+async function rightClick(x, y) {
+  await evaluate(`window.__menus = []; document.addEventListener("contextmenu", (event) => window.__menus.push(event.defaultPrevented), { once: true })`);
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "right", buttons: 2, clickCount: 1 });
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "right", clickCount: 1 });
+  await evaluate(SETTLE);
+  return evaluate(`window.__menus`);
+}
+
 // Where frame point (x, y) of region `frame` ([left, top, right, bottom]) is, in the view `box` (FACTS).
 function clientPoint(box, frame, [x, y]) {
   return [box.left + ((x - frame[0]) * box.width) / (frame[2] - frame[0]), box.top + ((y - frame[1]) * box.height) / (frame[3] - frame[1])];
@@ -652,6 +662,18 @@ const ACTIONS = {
     await evaluate(SETTLE);
     const returned = await evaluate(CELLS);
     assert.deepEqual({ cell: returned.cell, top: returned.top }, { cell: turned.cell, top: gapped.top }, "and dropped it back on cell (8, 7), unturned");
+    // A right-click on the board turns the piece clockwise and keeps the browser's menu away;
+    // on the texts the menu stays.
+    assert.deepEqual(await rightClick(...cell), [true], "no browser menu on the portrait board");
+    assert.notEqual((await evaluate(CELLS)).cell, turned.cell, "the right-click turned the piece");
+    const scrollY = await evaluate("scrollY");
+    const texts = await evaluate(`(() => { document.getElementById("text-list").scrollIntoView(); const r = document.getElementById("text-list").getBoundingClientRect(); return [r.left + r.width / 2, r.top + Math.min(r.height / 2, 10)]; })()`);
+    assert.deepEqual(await rightClick(...texts), [false], "the browser menu stays on the portrait texts");
+    await evaluate(`scrollTo(0, ${scrollY})`);
+    await evaluate(SETTLE);
+    // Turn the piece round to where it was, for the steps below.
+    for (let turns = 0; turns < 8 && (await evaluate(CELLS)).cell !== turned.cell; turns += 1) await rightClick(...cell);
+    assert.equal((await evaluate(CELLS)).cell, turned.cell, "right-clicks brought the piece round");
     // Turning the phone mid-drag ends the drag: the piece stays where it was.
     await touch("touchStart", ...cell);
     await touch("touchMove", cell[0], cell[1] - 30);
@@ -800,6 +822,9 @@ const ACTIONS = {
     await evaluate(`document.getElementById("levels-close").click()`);
   },
   async desktop() {
+    // A right-click on the board keeps the browser's menu away (the event targets the stage, as the press captured the pointer).
+    const game = await evaluate(`(() => { const r = document.getElementById("pixels").getBoundingClientRect(); return [r.left + r.width / 2, r.top + r.height / 2]; })()`);
+    assert.deepEqual(await rightClick(...game), [true], "no browser menu on the desktop board");
     // The Actions menu opens under its button, runs Reset, closes, and leaves the keys to the game.
     await evaluate(`document.getElementById("actions").click()`);
     await evaluate(SETTLE);
