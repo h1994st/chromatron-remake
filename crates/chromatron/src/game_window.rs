@@ -90,6 +90,15 @@ pub fn run(spec: &'static AppSpec) -> ExitCode {
         snapshot,
         Profiler::new(profiling, launched),
     );
+    if app.snapshot.is_some() {
+        // The first paint is still a full repaint: `damage` starts as `Full` and only the
+        // state changes here.
+        let scene = snapshot::Scene::from_env().and_then(|scene| scene.apply(&mut app.state));
+        if let Err(e) = scene {
+            log::error!("snapshot: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     if let Err(e) = event_loop.run_app(&mut app) {
         log::error!("event loop failed: {e}");
         return ExitCode::FAILURE;

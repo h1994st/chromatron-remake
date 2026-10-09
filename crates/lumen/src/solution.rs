@@ -7,6 +7,7 @@ use std::cmp::Ordering;
 use crate::board::{BOARD_CELLS, Board, CELLS, Cell, VISIBLE_TOOLBOX_SLOTS};
 use crate::bsd_qsort::bsd_qsort;
 use crate::piece::Piece;
+use spectrograph::GameData;
 
 /// Copy gives up at this many pieces (`2·n + 6 >= 55`).
 const MAX_COPIED_PIECES: usize = 25;
@@ -73,6 +74,14 @@ pub fn encode_solution(board: &Board, slot: usize) -> Option<String> {
         text.push(base52_char(v % 52));
     }
     Some(text)
+}
+
+/// The level's stored placement (data.md D3) as clipboard text, for strip slot `slot` (0-based).
+/// `None` for a slot off the strip or a level with too many pieces to copy. Level 32 of
+/// Chromatron 1 stores a misplaced mirror, so its text does not win.
+pub fn stored_solution(data: &GameData, slot: usize) -> Option<String> {
+    let level = data.slot_level(slot)?;
+    encode_solution(&Board::from_level(level), slot)
 }
 
 /// Pastes `text` onto `board` for strip slot `slot` (0-based); it must start with the board's

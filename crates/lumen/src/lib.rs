@@ -35,7 +35,7 @@ pub use progress::{
 pub use render::{BACKGROUND, TextBox, TextBoxes, cell_sprite, render, text_boxes};
 pub use rule_set::{Passes, RuleSet, Splitter, TextBoxSet, Unlock};
 pub use save::{SaveData, SaveError, decode_save, encode_save};
-pub use solution::{apply_solution, encode_solution};
+pub use solution::{apply_solution, encode_solution, stored_solution};
 pub use toolbox::move_pieces_to_toolbox;
 pub use trace::{BeamField, MAX_BEAMS, MAX_GENERATIONS, trace};
 pub use transfer::{Emission, Emissions, doppler_backward, doppler_forward, transfer};

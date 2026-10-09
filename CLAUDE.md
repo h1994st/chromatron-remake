@@ -11,7 +11,7 @@ Status: Plan 5 done: all four games are decoded, played by their own `RuleSet` a
 ## Hard rules
 
 - **No code or data from other ports of Chromatron** (their source, decompiled output, extracted data, scripts). This port is independent. Resolve unclear behavior from our own disassembly.
-- **No copyrighted game data in git.** `chromatron_mac/`, the zip, and `re/out/` (decompiled output) are git-ignored. Levels/sprites/strings are decoded from the local originals at build time and embedded in the binary. Chromatron 2–4 were paid shareware.
+- **No copyrighted game data in git.** `chromatron_mac/`, the zip, and `re/out/` (decompiled output) are git-ignored. Levels/sprites/strings are decoded from the local originals at build time and embedded in the binary. Chromatron 2–4 were paid shareware. The one exception: the four README screenshots of our port in `assets/screenshots/` (made by `just screenshots`); commit no other images derived from the games.
 - **`docs/` is local-only** (git-ignored) — never commit specs or plans.
 - **Commands go in the `justfile`**, not shell scripts.
 - **Homebrew deps go in `Brewfile` only via `brew bundle add <name>`** (`--cask` for casks) — never edit the Brewfile by hand. Rust comes from rustup, not Homebrew.
@@ -35,7 +35,8 @@ Status: Plan 5 done: all four games are decoded, played by their own `RuleSet` a
 | `just decompile <game>` | Ghidra headless (`re/ghidra/` scripts) → `re/out/chromatron<game>/` |
 | `just dump <game>` | `spectrograph` CLI: print a game's sections, strings and levels with names and hints as ASCII grids; write `re/out/chromatron<game>/sprites.png` |
 | `just run <game>` | `cargo run --release --bin chromatron<game>` (game 1–4); `CHROMATRON_PROFILE=1` logs frame timings |
-| `just snapshot <game> <png>` | run the app, write its first presented frame (text included) to a PNG and quit; never writes the save file |
+| `just snapshot <game> <png> [level] [solution]` | run the app, write its first presented frame (text included) to a PNG and quit; `level` is a strip number 1–50 (default 1), `solution` is `stored` or copied text such as `3-17-hODwhH`; never reads or writes the save file |
+| `just screenshots` | regenerate the README screenshots in `assets/screenshots/` (a solved level of each game, via `snapshot`) |
 | `just shot <game> <level> [solution]` | `lumen shot`: render level 1–50 of game 1–4 to `re/out/shots/`; `solution` is `stored` or copied text such as `1-01-hI` |
 | `just lint` | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings` |
 | `just test` | `cargo test --workspace --features lumen/cli` (needs the originals: `chromatron`'s `build.rs` embeds them) |

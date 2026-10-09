@@ -36,3 +36,12 @@ fn every_solution_fixture_wins() {
     }
     assert!(checked > 0, "no fixtures in {}", dir.display());
 }
+
+#[test]
+fn the_stored_placement_of_level_1_wins() {
+    let text = lumen::stored_solution(&C1, 0).unwrap();
+    let mut state = GameState::new(&C1, SaveData::default());
+    state.handle(InputEvent::Paste(text));
+    assert!(state.is_won());
+    assert_eq!(lumen::stored_solution(&C1, 50), None);
+}

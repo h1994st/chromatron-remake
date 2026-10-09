@@ -74,11 +74,18 @@ bench:
 run game:
     cargo run --release --bin chromatron{{game}}
 
-# Write a game's first presented frame, text included, to a PNG, then quit (game: 1-4)
-snapshot game png:
+# Write a game's first presented frame, text included, to a PNG, then quit (game: 1-4; level: strip number 1-50; solution: `stored` or copied text such as 3-17-hODwhH, pasted before the frame)
+snapshot game png level="1" solution="":
     cargo build --release --quiet --bin chromatron{{game}}
-    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
+    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
+
+# Regenerate the README screenshots in assets/screenshots/: one solved level per game
+screenshots: \
+    (snapshot "1" (justfile_directory() / "assets/screenshots/chromatron1.png") "46" "stored") \
+    (snapshot "2" (justfile_directory() / "assets/screenshots/chromatron2.png") "22" "stored") \
+    (snapshot "3" (justfile_directory() / "assets/screenshots/chromatron3.png") "41" "stored") \
+    (snapshot "4" (justfile_directory() / "assets/screenshots/chromatron4.png") "21" "stored")
 
 # Build the four apps in dist/ (Chromatron.app, Chromatron 2.app, …): Info.plist and icon from each original, ad-hoc signed
 bundle: (_bundle "1") (_bundle "2") (_bundle "3") (_bundle "4")

@@ -2,11 +2,11 @@
 
 use std::{env, path::Path, process::ExitCode};
 
+use lumen::layout::STRIP_SLOTS;
 use lumen::{
-    Board, FRAME_HEIGHT, FRAME_WIDTH, GameState, InputEvent, Redraw, SaveData, encode_solution,
-    render,
+    FRAME_HEIGHT, FRAME_WIDTH, GameState, InputEvent, Redraw, SaveData, render, stored_solution,
 };
-use spectrograph::{Game, GameData, decode, write_rgb_png};
+use spectrograph::{Game, decode, write_rgb_png};
 
 const USAGE: &str =
     "usage: lumen shot <game 1-4> <level 1-50> <out.png> [stored | <copied solution>]";
@@ -36,7 +36,7 @@ fn run(args: &[String]) -> Result<(), String> {
     state.goto_slot(slot);
     if let Some(solution) = solution.first() {
         let text = if solution == "stored" {
-            stored_solution(&data, slot)?
+            stored_solution(&data, slot).ok_or("no stored solution to copy for that level")?
         } else {
             solution.clone()
         };
@@ -68,15 +68,11 @@ fn run(args: &[String]) -> Result<(), String> {
 /// A strip number 1–50, as a 0-based slot.
 fn parse_level(arg: &str) -> Result<usize, String> {
     match arg.parse::<usize>() {
-        Ok(n @ 1..=50) => Ok(n - 1),
-        _ => Err(format!("unknown level {arg:?}; expected 1 to 50")),
+        Ok(n @ 1..=STRIP_SLOTS) => Ok(n - 1),
+        _ => Err(format!(
+            "unknown level {arg:?}; expected 1 to {STRIP_SLOTS}"
+        )),
     }
-}
-
-/// The level's stored placement (data.md D3) as clipboard text.
-fn stored_solution(data: &GameData, slot: usize) -> Result<String, String> {
-    let level = data.slot_level(slot).ok_or("no such level")?;
-    encode_solution(&Board::from_level(level), slot).ok_or_else(|| "too many pieces to copy".into())
 }
 
 #[cfg(test)]
