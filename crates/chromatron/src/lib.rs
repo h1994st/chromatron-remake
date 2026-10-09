@@ -13,9 +13,9 @@ pub mod pointer_keys;
 pub mod progress_file;
 pub mod snapshot;
 pub mod typeset;
+pub mod user_defaults;
 pub mod viewport;
 pub mod wheel;
-pub mod wheel_pref;
 
 mod game_window;
 

@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use lumen::layout::STRIP_SLOTS;
 use lumen::{FRAME_HEIGHT, FRAME_WIDTH, GameState, InputEvent, Rect};
 use muda::MenuEvent;
 use softbuffer::{Context, Surface};
@@ -31,9 +32,9 @@ use crate::pointer_keys::{Button, ButtonLatch, Held, key_byte, typed_text};
 use crate::progress_file::ProgressFile;
 use crate::snapshot;
 use crate::typeset::TypesetCache;
+use crate::user_defaults::Preferences;
 use crate::viewport::{DeviceRect, Viewport, window_size};
 use crate::wheel::{ScrollDelta, WheelGate};
-use crate::wheel_pref::Preferences;
 
 /// The whole frame, as a damage rect.
 const FULL_FRAME: Rect = Rect::new(0, 0, FRAME_WIDTH as i32, FRAME_HEIGHT as i32);
@@ -143,9 +144,17 @@ impl App {
         profiler: Profiler,
     ) -> App {
         let prefs = Preferences::open(spec.bundle_id);
+        let mut state = GameState::new(spec.data, save);
+        // Deliberate modern touch (the originals always opened on slot 0). Snapshots ignore it.
+        if snapshot.is_none() {
+            let stored = prefs.last_level_slot().and_then(|s| i64::try_from(s).ok());
+            if let Some(slot) = resume_slot(stored, STRIP_SLOTS, |s| state.is_unlocked(s)) {
+                state.goto_slot(slot);
+            }
+        }
         App {
             spec,
-            state: GameState::new(spec.data, save),
+            state,
             progress,
             wheel_on: prefs.wheel_changes_level(),
             prefs,
@@ -229,8 +238,12 @@ impl App {
     /// Hands one event to the game and carries out what it asks for.
     fn send(&mut self, event: InputEvent) {
         let started = Instant::now();
+        let slot = self.state.slot();
         let effects = self.state.handle(event);
         self.handle_time += started.elapsed();
+        if self.state.slot() != slot {
+            self.remember_slot();
+        }
         self.damage.add(effects.redraw);
         if effects.write_save {
             self.write_save();
@@ -242,6 +255,13 @@ impl App {
             && let Some(window) = &self.window
         {
             window.request_redraw();
+        }
+    }
+
+    /// Stores the current level for the next launch (never in snapshot mode).
+    fn remember_slot(&self) {
+        if self.snapshot.is_none() {
+            self.prefs.set_last_level_slot(self.state.slot());
         }
     }
 
@@ -507,12 +527,44 @@ impl ApplicationHandler<UserEvent> for App {
         if effects.write_save {
             self.write_save();
         }
+        self.remember_slot();
     }
+}
+
+/// The slot to reopen on: the stored one if it is on the strip, not slot 0 (where the game
+/// starts anyway) and unlocked.
+fn resume_slot(
+    stored: Option<i64>,
+    strip_slots: usize,
+    unlocked: impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let slot = usize::try_from(stored?).ok()?;
+    (slot != 0 && slot < strip_slots && unlocked(slot)).then_some(slot)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::view_update;
+    use super::{resume_slot, view_update};
+
+    #[test]
+    fn resume_needs_a_stored_unlocked_slot_other_than_the_first() {
+        let open = |slot: usize| slot <= 7;
+        assert_eq!(resume_slot(None, 50, open), None);
+        assert_eq!(resume_slot(Some(0), 50, open), None);
+        assert_eq!(resume_slot(Some(7), 50, open), Some(7));
+        assert_eq!(resume_slot(Some(8), 50, open), None);
+        assert_eq!(resume_slot(Some(-3), 50, open), None);
+        assert_eq!(resume_slot(Some(50), 50, |_| true), None);
+        assert_eq!(resume_slot(Some(49), 50, |_| true), Some(49));
+        // Range is checked before `unlocked`, which indexes the strip.
+        assert_eq!(
+            resume_slot(Some(60), 50, |s| {
+                assert!(s < 50, "unlocked called for {s}");
+                true
+            }),
+            None
+        );
+    }
 
     #[test]
     fn the_view_menu_is_updated_only_when_its_state_changed() {
