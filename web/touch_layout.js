@@ -9,9 +9,7 @@ export const TOUCH_SLOP = 8;
 export const LIFT = 40;
 /** A frame point every hit test misses; a piece dragged there is drawn wholly off the frame. */
 export const OFF_FRAME = Object.freeze([-100, -100]);
-/** Portrait: CSS pixels the texts keep at least (three lines); longer texts scroll in their box. */
-export const TEXT_ROOM = 72;
-/** Portrait: the smallest toolbox scale (36 px slots); below it the board shrinks instead. */
+/** Portrait: the smallest toolbox scale (36 px slots); when the screen is shorter, the page scrolls. */
 export const TOOLBOX_MIN = 1.4;
 /** No view ever gets a smaller scale, so the game never vanishes. */
 export const MIN_SCALE = 0.25;
@@ -49,19 +47,17 @@ const spanX = (rect) => rect.right - rect.left;
 const spanY = (rect) => rect.bottom - rect.top;
 
 /**
- * Portrait: fill scales for the board and the toolbox stacked in `height` CSS px (what the texts
- * leave) and at most `width` wide. The board takes the full width and the toolbox the height left,
- * up to the board's width. When that would leave the toolbox under TOOLBOX_MIN, the board shrinks
- * instead, so the page never has to scroll.
+ * Portrait: fill scales for the board and the toolbox stacked in `height` CSS px (the small
+ * viewport below the toolbar, less the gaps) and `width` wide. The board takes the full width,
+ * whatever the height. The toolbox takes the height left, up to the board's width, and at least
+ * TOOLBOX_MIN (unless the board is narrower than that): on a screen too short for it, the page
+ * scrolls further.
  */
 export function portraitScales({ width, height, ratio, board, toolbox }) {
-  let boardFit = width / spanX(board);
-  if ((height - boardFit * spanY(board)) / spanY(toolbox) < TOOLBOX_MIN) {
-    boardFit = Math.max(MIN_SCALE, (height - TOOLBOX_MIN * spanY(toolbox)) / spanY(board));
-  }
-  const boardScale = fillScale(boardFit, ratio);
-  const toolboxFit = Math.min((spanX(board) * boardScale) / spanX(toolbox), (height - boardScale * spanY(board)) / spanY(toolbox));
-  const exact = Math.max(MIN_SCALE, toolboxFit);
+  const boardScale = fillScale(Math.max(MIN_SCALE, width / spanX(board)), ratio);
+  const widthFit = (spanX(board) * boardScale) / spanX(toolbox);
+  const heightFit = (height - boardScale * spanY(board)) / spanY(toolbox);
+  const exact = Math.max(MIN_SCALE, Math.min(widthFit, Math.max(TOOLBOX_MIN, heightFit)));
   const sharp = fillScale(exact, ratio);
   // A snap never takes the toolbox under TOOLBOX_MIN; then the exact fit stays.
   return { board: boardScale, toolbox: sharp >= TOOLBOX_MIN ? sharp : exact };
@@ -131,6 +127,20 @@ export function movePoint(press, x, y, dragging) {
     press.moved = true;
   }
   return press.pointerType === "touch" && dragging ? [x, y - LIFT] : [x, y];
+}
+
+/** Portrait: ms after a press during which page scrolls are ignored (a fling still settling). */
+export const SCROLL_GRACE = 150;
+/** Portrait: CSS px the page may scroll from where it was at a press before the press ends. */
+export const SCROLL_SLOP = 8;
+
+/**
+ * Whether a page scroll to `scrollY` at time `now` (ms) ends `press`, which went down at `start`
+ * ({scrollY, time}). Only a touch or pen press ends, after SCROLL_GRACE, and only once the page has
+ * moved more than SCROLL_SLOP from where it was at the press. A mouse press never ends this way.
+ */
+export function scrollEndsPress(press, start, scrollY, now) {
+  return press.held && now - start.time >= SCROLL_GRACE && Math.abs(scrollY - start.scrollY) > SCROLL_SLOP;
 }
 
 /** The client point to send for the release: a tap releases where it went down, a drag where its moves went. */

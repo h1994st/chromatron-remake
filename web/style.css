@@ -152,12 +152,9 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
 }
 .touch #stage { flex: none; }
 .touch #stage #message { position: fixed; top: auto; bottom: 0; z-index: 3; padding: 8px 16px; background: var(--panel); }
-/* Portrait fits one screen of the small viewport (Safari's bars shown): the page never scrolls, so
-   the bars never collapse, and long texts scroll inside their own box. */
-[data-layout="portrait"] body { height: 100vh; height: 100svh; overflow: hidden; }
+/* Portrait scrolls as a page under the sticky toolbar: the board and the toolbox fill the small
+   viewport (main.js), and the texts, the Next level button and the credits follow below them. */
 [data-layout="portrait"] #stage {
-  flex: 1 1 0;
-  min-height: 0;
   flex-direction: column;
   justify-content: flex-start;
   gap: 12px;
@@ -167,9 +164,6 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
 [data-layout="portrait"] .part:not([hidden]) { display: block; }
 [data-layout="portrait"] #texts {
   display: block;
-  flex: 1 1 0;
-  min-height: 0;
-  overflow-y: auto;
   width: 100%;
   max-width: 40em;
   padding: 0 16px;
@@ -199,6 +193,25 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
   touch-action: manipulation;
 }
 #next-level[hidden] { display: none; }
+/* Portrait: the toolbar's ▶ while the level is won, visible with the texts scrolled out of view. */
+.toolbar button.won,
+.toolbar button.won:hover {
+  color: var(--page);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+/* The small viewport's height (Safari's bars shown), which main.js reads: the bars collapsing as
+   the page scrolls changes nothing. */
+#small-viewport {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 100vh;
+  height: 100svh;
+  visibility: hidden;
+  pointer-events: none;
+}
 #texts p:last-child { margin-bottom: 0; }
 #texts footer { padding: 16px 0 0; }
 /* Landscape: the toolbar runs down the left side, so the frame gets the whole height. */

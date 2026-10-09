@@ -2,7 +2,8 @@
 // a desktop (1400 × 1000 at 1×); a phone in landscape (844 × 390) and in portrait, both full height
 // (390 × 844) and with Safari's bars shown (390 × 664), at devicePixelRatio 3 with touch emulation,
 // so `(pointer: coarse)` matches; and a mouse at 390 × 844 with `?layout=touch`. For each view it
-// writes <name>.png and <name>.json (the page's layout facts) into <dir> and checks them.
+// writes <name>.png and <name>.json (the page's layout facts) into <dir> and checks them; the
+// portrait views also take <name>-scrolled.png, scrolled to the end.
 // A local development aid, not run in CI: it needs Google Chrome ($CHROME overrides the path). The
 // pictures show the games' sprites: inside the repo they may only go under re/out/, dist/ or
 // target/, which git ignores. Every way out (the end, an error, Ctrl-C, SIGTERM, the 90 s limit)
@@ -90,7 +91,7 @@ assert.ok(CLICK_NEXT.length > 0, "the game has a click_next text");
 const TOUCH_PORTRAIT = "Tap Next level or pick a level from Levels.";
 const TOUCH_LANDSCAPE = "Tap a level number or ▶ for the next level.";
 const rgba = new Uint8Array(wasm.memory.buffer, reference.rgba_ptr(), 640 * 480 * 4).slice();
-const { LIFT, TEXT_ROOM, TOOLBOX_MIN, fillScale, portraitScales, rectOf } = await import(pathToFileURL(join(webDir, "touch_layout.js")).href);
+const { LIFT, TOOLBOX_MIN, fillScale, portraitScales, rectOf } = await import(pathToFileURL(join(webDir, "touch_layout.js")).href);
 const expected = { frame: fnvRect(rgba, [0, 0, 640, 480]), board: fnvRect(rgba, BOARD), toolbox: fnvRect(rgba, TOOLBOX) };
 // Where today's page (Task 4's run, Chrome 154 on macOS) shows the desktop game at 1400 × 1000.
 const DESKTOP_GAME = { left: 380, top: 255, width: 640, height: 480 };
@@ -235,6 +236,7 @@ const FACTS = `(() => {
   const stage = document.getElementById("stage");
   const style = getComputedStyle(stage);
   const px = (value) => parseFloat(value) || 0;
+  const next = document.querySelector('.toolbar [data-command="next"]');
   return {
     layout: root.dataset.layout ?? "",
     width: innerWidth,
@@ -243,12 +245,20 @@ const FACTS = `(() => {
     ratio: devicePixelRatio,
     overflowX: root.scrollWidth - root.clientWidth,
     overflowY: root.scrollHeight - root.clientHeight,
+    scrollY,
+    // Whether the page may scroll at all, and whether its overscroll (pull-to-refresh) is off.
+    scrollable: [root, document.body].every((element) => !["hidden", "clip"].includes(getComputedStyle(element).overflowY)),
+    overscroll: getComputedStyle(root).overscrollBehaviorY,
+    partTouch: ["#board-part", "#toolbox-part"].map((selector) => getComputedStyle(document.querySelector(selector)).touchAction),
+    // The room for the board and the toolbox: the viewport (no browser bars here) below the
+    // toolbar, less the stage's top padding and two gaps (web/main.js).
+    portraitRoom: innerHeight - (document.querySelector("header")?.getBoundingClientRect().height ?? 0) - px(style.paddingTop) - 2 * px(style.rowGap),
+    nextWon: { highlighted: next.classList.contains("won"), background: getComputedStyle(next).backgroundColor, label: next.getAttribute("aria-label") },
     toolbarRows: new Set(tools.map((element) => Math.round(element.getBoundingClientRect().top))).size,
     toolbarRight: Math.max(0, ...tools.map((element) => element.getBoundingClientRect().right)),
     toolbarColumns: new Set(tools.map((element) => Math.round(element.getBoundingClientRect().left))).size,
     toolbarBottom: Math.max(0, ...tools.map((element) => element.getBoundingClientRect().bottom)),
     tools: tools.map((element) => element.id || element.dataset.command || element.localName),
-    stageRoom: stage.clientHeight - px(style.paddingTop) - px(style.paddingBottom) - 2 * px(style.rowGap),
     header: box("header"),
     game: box("#game"),
     board: box("#board-part"),
@@ -332,30 +342,89 @@ function assertNear(actual, wanted, what, tolerance = 0.5) {
   assert.ok(Math.abs(actual - wanted) <= tolerance, `${what}: ${actual}, expected ${wanted}`);
 }
 
-// A portrait page: one screen that never scrolls, with the board, the toolbox and the texts in
-// that order, sized as touch_layout.js's portraitScales says for the room the stage leaves.
+// A portrait page at scroll-top: a page that scrolls under a sticky toolbar, with the board (full
+// width), the toolbox and the texts in that order, the board and the toolbox sized as
+// touch_layout.js's portraitScales says for the room the viewport leaves and both on screen.
 function checkPortrait(facts) {
   assert.equal(facts.layout, "portrait");
-  assert.ok(facts.overflowX <= 0 && facts.overflowY <= 0, `the page does not scroll: ${facts.overflowX}, ${facts.overflowY}`);
+  assert.ok(facts.overflowX <= 0, `no horizontal scroll: ${facts.overflowX}`);
+  assert.ok(facts.scrollable, "the page may scroll vertically");
+  assert.ok(facts.overflowY > 0, `the texts run below the screen, so the page scrolls: ${facts.overflowY}`);
+  assert.equal(facts.overscroll, "none", "no pull-to-refresh mid-drag");
+  assert.deepEqual(facts.partTouch, ["none", "none"], "a touch on the board or the toolbox never scrolls the page");
+  assert.equal(facts.scrollY, 0, "at scroll-top");
   assert.equal(facts.toolbarRows, 1, "one toolbar row");
   assert.ok(facts.toolbarRight <= facts.clientWidth, "the toolbar fits the width");
   assert.deepEqual(facts.tools, ["game-select", "previous", "next", "actions", "levels-open", "clockwise", "fullscreen", "help-open"]);
   assert.equal(facts.game, null, "the whole frame is hidden");
   const scales = portraitScales({
     width: facts.clientWidth,
-    height: facts.stageRoom - TEXT_ROOM,
+    height: facts.portraitRoom,
     ratio: facts.ratio,
     board: rectOf(BOARD),
     toolbox: rectOf(TOOLBOX),
   });
   assertNear(facts.board.width, (BOARD[2] - BOARD[0]) * scales.board, "the board's scale");
   assertNear(facts.toolbox.width, (TOOLBOX[2] - TOOLBOX[0]) * scales.toolbox, "the toolbox's scale");
+  assertNear(facts.board.width, facts.clientWidth, "the board fills the width", 1);
+  assert.ok(facts.toolbox.width / (TOOLBOX[2] - TOOLBOX[0]) >= TOOLBOX_MIN - 0.01, "the toolbox slots stay finger-sized");
+  assert.ok(facts.header.bottom <= facts.board.top, "the board below the toolbar");
   assert.ok(facts.board.bottom <= facts.toolbox.top && facts.toolbox.bottom <= facts.texts.top, "board, toolbox, then texts");
-  assert.ok(facts.texts.bottom <= facts.height + 0.5 && facts.texts.height >= TEXT_ROOM - 0.5, "the texts fit below");
+  assert.ok(facts.toolbox.bottom <= facts.height + 0.5, `the board and the toolbox on screen at scroll-top: ${facts.toolbox.bottom}`);
   assert.ok(facts.textCount >= 1, "the texts are HTML");
+  assert.equal(facts.nextWon.highlighted, false, "the toolbar's ▶ is plain on an unsolved level");
   assert.equal(facts.boardPixels, expected.board, "the board part shows the engine's board");
   assert.equal(facts.toolboxPixels, expected.toolbox, "the toolbox part shows the engine's toolbox");
 }
+
+// Scrolled to the end, the toolbar stays at the top and the texts (with the credits) come into
+// view; the layout is the one at scroll-top. Takes <name>-scrolled.png, then scrolls back.
+async function checkPortraitScroll(name, facts) {
+  await evaluate("window.scrollTo(0, 9999)");
+  await evaluate(SETTLE);
+  const scrolled = await evaluate(FACTS);
+  await shoot(`${name}-scrolled`);
+  assertNear(scrolled.scrollY, facts.overflowY, "scrolled to the end", 1);
+  assert.ok(scrolled.scrollY > 0, "the page scrolled");
+  assertNear(scrolled.header.top, 0, "the toolbar stays at the top");
+  assert.ok(scrolled.texts.top >= scrolled.header.bottom && scrolled.texts.bottom <= scrolled.height + 0.5, `the texts in view: ${JSON.stringify(scrolled.texts)}`);
+  assert.equal(await evaluate(`document.elementFromPoint(innerWidth / 2, 2)?.closest("header") !== null`), true, "the toolbar is on top of the page");
+  assert.deepEqual([scrolled.board.width, scrolled.toolbox.width], [facts.board.width, facts.toolbox.width], "scrolling changed no sizes");
+  await evaluate("window.scrollTo(0, 0)");
+  await evaluate(SETTLE);
+}
+
+// Scrolls the Next level button into view and returns where it is, checking that it is on screen
+// below the toolbar and not covered.
+async function revealNextButton() {
+  return evaluate(`new Promise((resolve) => {
+    const button = document.getElementById("next-level");
+    button.scrollIntoView({ block: "nearest" });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const rect = button.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      resolve({
+        x,
+        y,
+        top: rect.top,
+        bottom: rect.bottom,
+        header: document.querySelector("header").getBoundingClientRect().bottom,
+        hit: document.elementFromPoint(x, y) === button,
+        scrollY,
+      });
+    }));
+  })`);
+}
+
+// The toolbar's ▶: whether it is highlighted (FACTS's nextWon), and where it is.
+const TOOLBAR_NEXT = `(() => {
+  const next = document.querySelector('.toolbar [data-command="next"]');
+  const rect = next.getBoundingClientRect();
+  return { highlighted: next.classList.contains("won"), background: getComputedStyle(next).backgroundColor, label: next.getAttribute("aria-label"), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+})()`;
+// --accent in web/style.css.
+const ACCENT = "rgb(138, 180, 255)";
 
 // What each view must show.
 const CHECKS = {
@@ -387,18 +456,129 @@ const CHECKS = {
   },
   "portrait-bars"(facts) {
     checkPortrait(facts);
-    assert.ok(facts.board.width >= 0.85 * facts.clientWidth, `the board keeps most of the width: ${facts.board.width}`);
-    assert.ok(facts.toolbox.width / (TOOLBOX[2] - TOOLBOX[0]) >= TOOLBOX_MIN - 0.01, "the toolbox slots stay finger-sized");
+    assert.ok(facts.texts.top >= facts.height - 1, `the texts start below the screen, for the page to scroll to: ${facts.texts.top}`);
   },
   portrait(facts) {
     checkPortrait(facts);
-    assertNear(facts.board.width, facts.clientWidth, "the board fills the width", 1);
   },
 };
 
 // Steps after a view's first picture, which may take more pictures.
 const ACTIONS = {
+  async "portrait-bars"(facts) {
+    await checkPortraitScroll("portrait-bars", facts);
+    // Scrolled part way, a touch drag from toolbox slot 0 still lands on board cell (8, 7): the
+    // views are measured at each event. The drag itself does not scroll the page.
+    const by = Math.min(120, facts.overflowY);
+    await evaluate(`window.scrollTo(0, ${by})`);
+    await evaluate(SETTLE);
+    const moved = await evaluate(FACTS);
+    let results;
+    try {
+      const slot = clientPoint(moved.toolbox, TOOLBOX, [460, 20]);
+      const cell = clientPoint(moved.board, BOARD, [252, 198]);
+      const start = await evaluate(CELLS);
+      await touch("touchStart", ...slot);
+      for (let step = 1; step <= 12; step += 1) {
+        const t = step / 12;
+        await touch("touchMove", slot[0] + (cell[0] - slot[0]) * t, slot[1] + (cell[1] + LIFT - slot[1]) * t);
+      }
+      await touch("touchEnd");
+      await evaluate(SETTLE);
+      const dropped = await evaluate(CELLS);
+      const afterDrag = (await evaluate(FACTS)).scrollY;
+      await shoot("portrait-bars-scrolled-drop");
+      // A scroll while a drag is live (another finger on the texts) ends the drag: the piece stays
+      // on its cell, and the finger's later moves and release reach nothing.
+      await touch("touchStart", ...cell);
+      for (let step = 1; step <= 4; step += 1) await touch("touchMove", cell[0], cell[1] - 15 * step);
+      await evaluate(SETTLE);
+      const lifted = await evaluate(CELLS);
+      // Past the press's grace for a settling fling (touch_layout.js SCROLL_GRACE).
+      await delay(200);
+      await evaluate("window.scrollBy(0, -60)");
+      await evaluate(SETTLE);
+      const ended = await evaluate(CELLS);
+      const back = await evaluate(FACTS);
+      const beside = clientPoint(back.board, BOARD, [276, 198]);
+      for (let step = 1; step <= 4; step += 1) {
+        await touch("touchMove", cell[0] + (beside[0] - cell[0]) * (step / 4), cell[1] - 60 + (beside[1] + LIFT - cell[1] + 60) * (step / 4));
+      }
+      await touch("touchEnd");
+      await evaluate(SETTLE);
+      const released = await evaluate(CELLS);
+      // A scroll event right after the press (a fling settling, the page unmoved) and a 3 px
+      // scroll later leave the drag alone: it carries the piece from cell (8, 7) to (9, 7).
+      const near = await evaluate(FACTS);
+      const from = clientPoint(near.board, BOARD, [252, 198]);
+      await touch("touchStart", ...from);
+      await evaluate(`window.dispatchEvent(new Event("scroll"))`);
+      for (let step = 1; step <= 3; step += 1) await touch("touchMove", from[0], from[1] - 15 * step);
+      await delay(200);
+      await evaluate("window.scrollBy(0, 3)");
+      await evaluate(SETTLE);
+      const nudged = await evaluate(FACTS);
+      const to = clientPoint(nudged.board, BOARD, [276, 198]);
+      const finger = [from[0], from[1] - 45];
+      for (let step = 1; step <= 4; step += 1) {
+        await touch("touchMove", finger[0] + (to[0] - finger[0]) * (step / 4), finger[1] + (to[1] + LIFT - finger[1]) * (step / 4));
+      }
+      await touch("touchEnd");
+      await evaluate(SETTLE);
+      const kept = await evaluate(CELLS);
+      results = { cell, start, dropped, afterDrag, lifted, ended, back, released, nudge: nudged.scrollY - near.scrollY, kept };
+    } finally {
+      // Reset, so the later views start from the fresh level whatever happened.
+      await evaluate(`document.querySelector("#actions-menu [data-command=reset]").click()`);
+      await evaluate("window.scrollTo(0, 0)");
+      await evaluate(SETTLE);
+    }
+    const { cell, start, dropped, afterDrag, lifted, ended, back, released, nudge, kept } = results;
+    assertNear(moved.scrollY, by, "scrolled part way", 1);
+    assertNear(moved.board.top, facts.board.top - by, "the board moved up with the page", 1);
+    assert.ok(cell[1] > moved.header.bottom, "the drop cell is on screen below the toolbar");
+    assert.ok(dropped.slot !== start.slot && dropped.cell !== start.cell, "the scrolled drag moved the piece from toolbox slot 0 to board cell (8, 7)");
+    assertNear(afterDrag, by, "a drag on the parts did not scroll the page", 0);
+    assert.notEqual(lifted.cell, dropped.cell, "the piece is lifted off its cell before the scroll");
+    assertNear(back.scrollY, by - 60, "the page scrolled mid-drag", 1);
+    assert.equal(ended.cell, dropped.cell, "the scroll ended the drag: the piece is back on its cell");
+    assert.deepEqual({ cell: released.cell, beside: released.beside }, { cell: dropped.cell, beside: dropped.beside }, "and the release after it moved nothing");
+    assertNear(nudge, 3, "the page moved 3 px mid-drag", 0.5);
+    assert.ok(kept.cell !== released.cell && kept.beside !== released.beside, "a settling fling and a tiny scroll left the drag alone: the piece moved to cell (9, 7)");
+    const reset = await evaluate(FACTS);
+    assert.deepEqual([reset.boardPixels, reset.toolboxPixels], [expected.board, expected.toolbox], "Reset put the piece back");
+    // Win, scroll to the end, and tap Next level there: level 2 shows from the top of the page.
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    await evaluate("window.scrollTo(0, 9999)");
+    await evaluate(SETTLE);
+    const atEnd = await evaluate(`(() => {
+      const rect = document.getElementById("next-level").getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return { x, y, scrollY, hit: document.elementFromPoint(x, y)?.id === "next-level" };
+    })()`);
+    let level2;
+    try {
+      await touch("touchStart", atEnd.x, atEnd.y);
+      await touch("touchEnd");
+      await evaluate(SETTLE);
+      level2 = { facts: await evaluate(FACTS), win: await evaluate(WIN_FACTS) };
+    } finally {
+      // Level 1's win and the move to level 2 stay out of the next view's storage.
+      await evaluate(`(() => {
+        Storage.prototype.setItem = () => {};
+        localStorage.removeItem("chromatron1.save");
+        localStorage.removeItem("chromatron1.lastLevelSlot");
+      })()`);
+    }
+    assert.ok(atEnd.scrollY > 0 && atEnd.hit, `the Next level button on screen at the end of the page: ${JSON.stringify(atEnd)}`);
+    assert.equal(level2.facts.scrollY, 0, "the next level scrolled the page back to the top");
+    assert.ok(level2.facts.boardPixels !== expected.board && level2.win.button === null, "level 2's board shows");
+    assert.ok(level2.win.listed.length > 0 && !level2.win.listed.some((line) => /win/i.test(line)), `level 2 is not won: ${JSON.stringify(level2.win.listed)}`);
+  },
   async portrait(facts) {
+    await checkPortraitScroll("portrait", facts);
     const slot = clientPoint(facts.toolbox, TOOLBOX, [460, 20]);
     const cell = clientPoint(facts.board, BOARD, [252, 198]);
     const start = await evaluate(CELLS);
@@ -567,13 +747,34 @@ const ACTIONS = {
     assert.equal(buttonIndex, 1, "the button is right under the win text");
     await assertNoSelection("#texts", "#board-part", "#toolbox-part", "header", "#stage");
     assert.notEqual((await userSelect("#help p"))[0][1], "none", "the help keeps text selection");
-    // Tapping it is the toolbar's Next: level 2, and the button is gone.
-    await touch("touchStart", won.button.x, won.button.y);
+    // The win shows in the toolbar too: its ▶ is highlighted like the Next level button.
+    const wonNext = await evaluate(TOOLBAR_NEXT);
+    assert.ok(wonNext.highlighted && wonNext.background === ACCENT, `the toolbar's ▶ is highlighted after a win: ${JSON.stringify(wonNext)}`);
+    assert.equal(wonNext.label, "Next level: this one is solved");
+    // Tapping the button, scrolled into view, is the toolbar's Next: level 2, and the button and
+    // the highlight are gone.
+    const shown = await revealNextButton();
+    await shoot("portrait-next-level-scrolled");
+    assert.ok(shown.hit && shown.top >= shown.header - 0.5 && shown.bottom <= facts.height + 0.5, `the Next level button is reachable by scrolling: ${JSON.stringify(shown)}`);
+    await touch("touchStart", shown.x, shown.y);
     await touch("touchEnd");
     await evaluate(SETTLE);
     const onLevel2 = await evaluate(WIN_FACTS);
     assert.equal(onLevel2.button, null, "the button is hidden on the next level");
     assert.ok(onLevel2.listed.length > 0 && !onLevel2.listed.some((line) => /win/i.test(line)), `level 2 is not won: ${JSON.stringify(onLevel2.listed)}`);
+    const plainNext = await evaluate(TOOLBAR_NEXT);
+    assert.ok(!plainNext.highlighted && plainNext.background !== ACCENT && plainNext.label === null, `the toolbar's ▶ is plain on level 2: ${JSON.stringify(plainNext)}`);
+    // Back on the solved level 1 the ▶ is highlighted again, and a tap on it is level 2, plain.
+    await evaluate(`document.querySelector('.toolbar [data-command="previous"]').click()`);
+    await evaluate(SETTLE);
+    const again = await evaluate(TOOLBAR_NEXT);
+    assert.ok(again.highlighted, "the solved level 1 highlights the ▶ again");
+    await touch("touchStart", again.x, again.y);
+    await touch("touchEnd");
+    await evaluate(SETTLE);
+    const pressed = await evaluate(TOOLBAR_NEXT);
+    assert.ok(!pressed.highlighted && pressed.background !== ACCENT, `a tap on the ▶ went to level 2, plain: ${JSON.stringify(pressed)}`);
+    assert.ok(!(await evaluate(WIN_FACTS)).listed.some((line) => /win/i.test(line)), "level 2 is not won");
     await evaluate(`document.getElementById("levels-open").click()`);
     await evaluate(SETTLE);
     await shoot("portrait-levels-solved");

@@ -28,6 +28,10 @@ const header = document.querySelector("header");
 const footer = document.querySelector("footer");
 const boardPart = $("board-part");
 const toolboxPart = $("toolbox-part");
+const smallViewport = $("small-viewport");
+const toolbarNext = document.querySelector('.toolbar [data-command="next"]');
+// The ▶'s own aria-label (none: its hidden "Next" names it), put back when its highlight goes.
+const toolbarNextLabel = toolbarNext.getAttribute("aria-label");
 
 // localStorage that never throws: reads say whether storage answered at all.
 const storage = {
@@ -243,6 +247,20 @@ function paint() {
     else drawText();
   }
   updateNextButton();
+  showNewLevel();
+}
+
+// The game and level the last paint showed; 0 and -1 before the first.
+let shownGame = 0;
+let shownSlot = -1;
+// Portrait: another level or game (by any path) scrolls the page back to the top, so its board is
+// fully in view.
+function showNewLevel() {
+  const slot = session.slot();
+  if (game === shownGame && slot === shownSlot) return;
+  shownGame = game;
+  shownSlot = slot;
+  if (mode === "portrait" && window.scrollY > 0) window.scrollTo({ top: 0 });
 }
 
 // A text box's string as this layout shows it: the game's click_next, matched by equality, is
@@ -253,7 +271,7 @@ function shownText(string) {
 }
 
 // Portrait: the frame's text boxes as HTML paragraphs, in the engine's order (the win text, the
-// level name, the hint, the notices). New texts (another level or game, a win) show from the top.
+// level name, the hint, the notices).
 function listText() {
   $("text-list").replaceChildren(
     ...textBoxes.map((box) => {
@@ -262,17 +280,23 @@ function listText() {
       return paragraph;
     }),
   );
-  $("texts").scrollTop = 0;
   updateNextButton();
 }
 
 // The Next level button shows in portrait while the level is won and the next one is open (on the
 // last level the toolbar's Next does nothing, so there is no button). It sits after the first text,
-// "You win!"; listText rebuilds the list, so this puts it back.
+// "You win!"; listText rebuilds the list, so this puts it back. The toolbar's ▶ is highlighted
+// meanwhile, so the win shows even with the texts scrolled below the screen.
 function updateNextButton() {
   const list = $("text-list");
   const show = mode === "portrait" && session.won() && session.slot_state(session.slot() + 1) !== LevelState.Locked;
   if (nextButton.hidden !== !show) nextButton.hidden = !show;
+  if (toolbarNext.classList.contains("won") !== show) {
+    toolbarNext.classList.toggle("won", show);
+    if (show) toolbarNext.setAttribute("aria-label", "Next level: this one is solved");
+    else if (toolbarNextLabel === null) toolbarNext.removeAttribute("aria-label");
+    else toolbarNext.setAttribute("aria-label", toolbarNextLabel);
+  }
   if (!show) {
     nextButton.remove();
   } else if (nextButton.parentElement !== list) {
@@ -374,8 +398,8 @@ function setMode(next) {
   }
   document.body.style.paddingLeft = "";
   views = mode === "portrait" ? [boardView, toolboxView] : [frameView];
-  // The touch layouts fit one screen: the credits scroll with the texts in portrait, and sit at
-  // the end of the help in landscape, instead of below the page.
+  // The credits follow the texts in portrait, and sit at the end of the help in landscape, which
+  // fits one screen, instead of below the page.
   if (mode === "portrait") $("texts").append(footer);
   else if (mode === "landscape") helpDialog.querySelector(".sheet").append(footer);
   else if (footer.parentElement !== document.body) document.body.append(footer);
@@ -390,13 +414,15 @@ function layout() {
   setMode(touchLayout.layoutMode({ forced: forcedLayout, coarse: coarsePointer.matches, width, height }));
   const ratio = window.devicePixelRatio || 1;
   if (mode === "portrait") {
-    // The board, the toolbox and at least TEXT_ROOM of texts share the stage, which CSS sizes to
-    // the small viewport (100svh): Safari's bars collapsing changes nothing.
+    // The board and the toolbox fill the small viewport (100svh) below the toolbar, with a gap
+    // above, between and below them; the texts follow further down the page. Safari's bars
+    // collapsing as the page scrolls changes nothing.
     const style = getComputedStyle(stage);
-    const gaps = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 2 * parseFloat(style.rowGap);
+    const gaps = parseFloat(style.paddingTop) + 2 * parseFloat(style.rowGap);
+    const room = smallViewport.getBoundingClientRect().height - header.getBoundingClientRect().height - gaps;
     const scales = touchLayout.portraitScales({
       width: document.documentElement.clientWidth,
-      height: stage.clientHeight - gaps - touchLayout.TEXT_ROOM,
+      height: room,
       ratio,
       board: boardView.frame,
       toolbox: toolboxView.frame,
@@ -443,7 +469,8 @@ function watchPixelRatio() {
   );
 }
 
-// A client point in frame pixels (fractional; Rust floors) through the views on screen.
+// A client point in frame pixels (fractional; Rust floors) through the views on screen, measured
+// at each event, so it holds wherever the page is scrolled.
 function framePoint(clientX, clientY) {
   const live = views.map((view) => ({ frame: view.frame, box: view.canvas.getBoundingClientRect() }));
   return touchLayout.framePointAt(live, clientX, clientY);
@@ -610,6 +637,8 @@ let dialogOpener = null;
 let capturedPointer = null;
 // The primary pointer's press (touchLayout.startPress) until its release; null when none.
 let press = null;
+// Where the page was scrolled when `press` went down, and when ({scrollY, time}).
+let pressStart = { scrollY: 0, time: 0 };
 
 function dialogOpen() {
   return helpDialog.open || levelsDialog.open;
@@ -780,6 +809,7 @@ function wire() {
     // A touch or pen press waits for TOUCH_SLOP before it drags; the press itself is the real
     // point, so it picks up what is under the finger.
     press = touchLayout.startPress(event.pointerType, event.clientX, event.clientY);
+    pressStart = { scrollY: window.scrollY, time: performance.now() };
     const [x, y] = framePoint(event.clientX, event.clientY);
     apply(session.pointer_down(x, y, pressButton(event), event.shiftKey, event.altKey, event.ctrlKey));
   });
@@ -824,6 +854,19 @@ function wire() {
     press = null;
     if (!dialogOpen()) apply(session.pointer_cancel());
   });
+  // Portrait: a touch on the parts never scrolls the page (touch-action: none), but another finger
+  // on the texts or the toolbar can. A real scroll under a live touch or pen press ends the drag as
+  // on focus loss (the piece stays put), and that press's later moves and release reach nothing.
+  // A fling still settling just after the press, and a scroll of a few pixels, leave it alone
+  // (touchLayout.scrollEndsPress); the parts are measured at each event, so the drag stays true.
+  window.addEventListener(
+    "scroll",
+    () => {
+      if (press === null || mode !== "portrait") return;
+      if (touchLayout.scrollEndsPress(press, pressStart, window.scrollY, performance.now())) endDrag();
+    },
+    { passive: true },
+  );
   stage.addEventListener("contextmenu", (event) => {
     if (isView(event.target)) event.preventDefault();
   });

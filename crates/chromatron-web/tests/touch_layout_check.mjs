@@ -43,21 +43,30 @@ for (const broken of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
 // Portrait scales (lumen's BOARD_RECT and TOOLBOX_RECT).
 const board = t.rectOf([48, 18, 408, 378]);
 const toolbox = t.rectOf([446, 6, 604, 112]);
-assert.equal(t.TEXT_ROOM, 72);
+assert.equal(t.TEXT_ROOM, undefined, "the texts no longer take a share of the screen");
 assert.equal(t.TOOLBOX_MIN, 1.4);
-// A 390 × 844 phone: 671 px for the board and the toolbox.
-const phone = t.portraitScales({ width: 390, height: 671, ratio: 3, board, toolbox });
+// A 390 × 844 phone: 763 px below a 45 px toolbar and 36 px of gaps.
+const phone = t.portraitScales({ width: 390, height: 763, ratio: 3, board, toolbox });
 near(phone.board, 390 / 360, "the board fills a 390 px phone: 26 px cells");
 near(phone.toolbox, 390 / 158, "the toolbox as wide as the board");
-// The same phone in Safari with its bars shown: 491 px.
-const safari = t.portraitScales({ width: 390, height: 491, ratio: 3, board, toolbox });
-near(safari.board, (491 - 1.4 * 106) / 360, "the board shrinks so the toolbox keeps 1.4x");
-near(safari.toolbox, 1.4, "36 px toolbox slots");
+// The same phone with its browser bars shown: 583 px.
+const bars = t.portraitScales({ width: 390, height: 583, ratio: 3, board, toolbox });
+near(bars.board, 390 / 360, "the board still fills the width");
+near(bars.toolbox, (583 - 390) / 106, "the toolbox fills the height left (1.82x; the 5/3 step would lose 8 %)");
+// Too short for a 1.4x toolbox below the full-width board: the toolbox keeps 1.4x, the page scrolls.
+const short = t.portraitScales({ width: 390, height: 500, ratio: 3, board, toolbox });
+near(short.board, 390 / 360, "a short screen's board still fills the width");
+near(short.toolbox, 1.4, "36 px toolbox slots");
 const tablet = t.portraitScales({ width: 820, height: 900, ratio: 2, board, toolbox });
-near(tablet.board, (900 - 1.4 * 106) / 360, "a tablet's board takes what the toolbox leaves");
-near(tablet.toolbox, 1.4, "its toolbox keeps 1.4x");
+near(tablet.board, 820 / 360, "a tablet's board fills its width");
+near(tablet.toolbox, 1.4, "its toolbox keeps 1.4x below it");
+const roomy = t.portraitScales({ width: 820, height: 1099, ratio: 2, board, toolbox });
+near(roomy.toolbox, (1099 - 820) / 106, "a tall tablet's toolbox fills the height left");
 const tiny = t.portraitScales({ width: 390, height: 60, ratio: 3, board, toolbox });
-assert.deepEqual(tiny, { board: t.MIN_SCALE, toolbox: t.MIN_SCALE }, "no room at all: still visible");
+assert.deepEqual(tiny, short, "no height at all: the same as a short screen");
+const narrow = t.portraitScales({ width: 60, height: 60, ratio: 3, board, toolbox });
+near(narrow.board, t.MIN_SCALE, "a board too narrow for the screen: still visible");
+near(narrow.toolbox, (360 * t.MIN_SCALE) / 158, "and the toolbox no wider than it");
 
 // A snap never takes the toolbox under TOOLBOX_MIN (13 px per CSS px: 18/13 = 1.385 would snap from 1.42).
 {
@@ -155,5 +164,17 @@ assert.equal(t.isSwipe(edge, false), true);
 const pen = t.startPress("pen", 10, 10);
 assert.equal(t.movePoint(pen, 14, 10, false), null, "a pen waits for the slop too");
 assert.deepEqual(t.movePoint(pen, 30, 10, true), [30, 10], "but is not lifted");
+
+// A page scroll mid-press (portrait).
+assert.equal(t.SCROLL_GRACE, 150);
+assert.equal(t.SCROLL_SLOP, 8);
+const pressed = t.startPress("touch", 0, 0);
+const at = { scrollY: 100, time: 1000 };
+assert.equal(t.scrollEndsPress(pressed, at, 160, 1100), false, "a fling settling right after the press is ignored");
+assert.equal(t.scrollEndsPress(pressed, at, 160, 1150), true, "after the grace, a real scroll ends the press");
+assert.equal(t.scrollEndsPress(pressed, at, 108, 2000), false, "a scroll within the slop does not");
+assert.equal(t.scrollEndsPress(pressed, at, 91, 2000), true, "the slop holds both ways");
+assert.equal(t.scrollEndsPress(t.startPress("pen", 0, 0), at, 160, 2000), true, "a pen press ends too");
+assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), false, "a mouse press never does");
 
 console.log("ok: touch layout rules");
