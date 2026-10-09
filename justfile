@@ -115,6 +115,42 @@ web-check: web
 web-shots dir="re/out/web-shots": web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"
 
+# Render our own artwork in assets/social/ (nothing from the games) to web/og.png (1200 × 630) and web/apple-touch-icon.png (180 × 180) in headless Google Chrome; local only
+social-images:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    chrome="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
+    [[ -x "$chrome" ]] || { echo "error: no Google Chrome at $chrome; set CHROME to its executable" >&2; exit 1; }
+    profile="$(mktemp -d "${TMPDIR:-/tmp}/chromatron-social.XXXXXX")"
+    pid=""
+    trap '[[ -z "$pid" ]] || { kill "$pid" 2> /dev/null; wait "$pid" 2> /dev/null; }; rm -rf "$profile"' EXIT
+    # <svg> <png> <width> <height> <bits per channel> <max bytes>: the PNG is rounded to that many bits per channel and recompressed
+    render() {
+        local svg="{{justfile_directory()}}/assets/social/$1" png="{{justfile_directory()}}/web/$2"
+        rm -f "$png" "$profile/chrome.log"
+        perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "$chrome" --headless=new --disable-gpu --hide-scrollbars \
+            --force-device-scale-factor=1 --no-first-run --no-default-browser-check --user-data-dir="$profile/data" \
+            --window-size="$3,$4" --screenshot="$png" "file://$svg" > "$profile/chrome.log" 2>&1 &
+        pid=$!
+        # Chrome can linger after writing the screenshot: wait for its "written" line (or its exit, or the 60 s alarm), then stop it.
+        until grep -q "bytes written to file" "$profile/chrome.log"; do
+            kill -0 "$pid" 2> /dev/null || break
+            sleep 0.2
+        done
+        kill "$pid" 2> /dev/null || true
+        wait "$pid" 2> /dev/null || true
+        pid=""
+        [[ -f "$png" ]] || { echo "error: Chrome wrote no $2" >&2; exit 1; }
+        node "{{justfile_directory()}}/crates/chromatron-web/tests/png_squeeze.mjs" "$png" "$5"
+        size="$(sips -g pixelWidth -g pixelHeight "$png" | awk '/pixel/ { printf "%s ", $2 }')"
+        [[ "$size" == "$3 $4 " ]] || { echo "error: $2 is ${size}pixels, not $3 × $4" >&2; exit 1; }
+        bytes="$(wc -c < "$png" | tr -d ' ')"
+        (( bytes <= $6 )) || { echo "error: $2 is $bytes bytes, over $6" >&2; exit 1; }
+        printf '%8d bytes  %s (%s × %s)\n' "$bytes" "$2" "$3" "$4"
+    }
+    render og.svg og.png 1200 630 6 300000
+    render icon.svg apple-touch-icon.png 180 180 8 50000
+
 # Run a game's app (game: 1-4)
 run game:
     cargo run --release --bin chromatron{{game}}

@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">
+  <!-- Our own artwork for the site's touch icon (no game data): `just social-images` renders it to web/apple-touch-icon.png. -->
+  <defs>
+    <radialGradient id="sky" cx="90" cy="90" r="130" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#231c55"/>
+      <stop offset="0.5" stop-color="#0f0e2a"/>
+      <stop offset="1" stop-color="#05050d"/>
+    </radialGradient>
+    <pattern id="tiles" width="30" height="30" patternUnits="userSpaceOnUse">
+      <rect x="2" y="2" width="26" height="26" rx="4" fill="#b8c0ff" fill-opacity="0.03" stroke="#b8c0ff" stroke-opacity="0.09"/>
+    </pattern>
+    <filter id="halo" filterUnits="userSpaceOnUse" x="-200" y="-200" width="400" height="400"><feGaussianBlur stdDeviation="6"/></filter>
+    <filter id="soft" filterUnits="userSpaceOnUse" x="-200" y="-200" width="400" height="400"><feGaussianBlur stdDeviation="1.8"/></filter>
+    <radialGradient id="bloom">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.95"/>
+      <stop offset="0.25" stop-color="#e9ecff" stop-opacity="0.4"/>
+      <stop offset="1" stop-color="#8f8cff" stop-opacity="0"/>
+    </radialGradient>
+    <path id="beam" d="M-140 0H140"/>
+  </defs>
+
+  <rect width="180" height="180" fill="url(#sky)"/>
+  <rect width="180" height="180" fill="url(#tiles)"/>
+
+  <!-- Red, green and blue beams cross at the target and add up to white. -->
+  <g transform="translate(90 90)" fill="none">
+    <g style="mix-blend-mode: screen" transform="rotate(0)">
+      <use href="#beam" stroke="#ff2945" stroke-width="24" stroke-opacity="0.75" filter="url(#halo)"/>
+      <use href="#beam" stroke="#ff2945" stroke-width="9" filter="url(#soft)"/>
+      <use href="#beam" stroke="#ffd6dc" stroke-width="3.5"/>
+    </g>
+    <g style="mix-blend-mode: screen" transform="rotate(60)">
+      <use href="#beam" stroke="#1fff7c" stroke-width="24" stroke-opacity="0.75" filter="url(#halo)"/>
+      <use href="#beam" stroke="#1fff7c" stroke-width="9" filter="url(#soft)"/>
+      <use href="#beam" stroke="#e0ffec" stroke-width="3.5"/>
+    </g>
+    <g style="mix-blend-mode: screen" transform="rotate(120)">
+      <use href="#beam" stroke="#2456ff" stroke-width="24" stroke-opacity="0.85" filter="url(#halo)"/>
+      <use href="#beam" stroke="#3567ff" stroke-width="9" filter="url(#soft)"/>
+      <use href="#beam" stroke="#d6e0ff" stroke-width="3.5"/>
+    </g>
+    <circle r="64" fill="url(#bloom)" style="mix-blend-mode: screen"/>
+    <circle r="21" fill="none" stroke="#ffffff" stroke-width="2.5" filter="url(#soft)"/>
+    <circle r="21" fill="none" stroke="#ffffff" stroke-width="2"/>
+    <circle r="14" fill="#0a0a1e" fill-opacity="0.6"/>
+    <circle r="9" fill="#ffffff" filter="url(#soft)"/>
+    <circle r="7.5" fill="#ffffff"/>
+  </g>
+</svg>

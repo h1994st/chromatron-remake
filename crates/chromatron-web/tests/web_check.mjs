@@ -1,5 +1,6 @@
 // `just web-check`: loads the built site's wasm in Node and plays every game through the same
 // Session API the page uses, then checks the size budgets and that every page URL is relative.
+// It also checks the social preview tags, the JSON-LD and the two PNGs that go with them.
 // Usage: node web_check.mjs <dist/web> <tests/solutions>
 
 import assert from "node:assert/strict";
@@ -22,26 +23,89 @@ const CHEATS = { 1: ["L", false], 2: ["z", false], 3: ["^", false], 4: ["o", tru
 
 // The only absolute URLs the page may carry: its links to the originals and to the source.
 const EXTERNAL_HOSTS = ["silverspaceship.com", "github.com"];
+// The site's own address, which only the canonical link and the OG and Twitter tags spell out.
+const SITE = "https://shengtuo.me/chromatron-remake/";
+// The OG and Twitter tags the page must carry, with their exact values where they matter.
+const METAS = {
+  "og:type": "website",
+  "og:site_name": undefined,
+  "og:title": undefined,
+  "og:description": undefined,
+  "og:url": SITE,
+  "og:image": `${SITE}og.png`,
+  "og:image:width": "1200",
+  "og:image:height": "630",
+  "og:image:alt": undefined,
+  "og:locale": "en_US",
+  "twitter:card": "summary_large_image",
+  "twitter:title": undefined,
+  "twitter:description": undefined,
+  "twitter:image": `${SITE}og.png`,
+  "twitter:image:alt": undefined,
+};
+// The social preview image and the touch icon (made by `just social-images`): their sizes and byte caps.
+const IMAGES = {
+  "og.png": { width: 1200, height: 630, maxBytes: 300_000 },
+  "apple-touch-icon.png": { width: 180, height: 180, maxBytes: 50_000 },
+};
 
 // The files, their sizes and their URLs.
 const files = readdirSync(webDir).sort();
-for (const required of ["index.html", "style.css", "main.js", "touch_layout.js", "chromatron_web.js", "chromatron_web_bg.wasm"]) {
+for (const required of ["index.html", "style.css", "main.js", "touch_layout.js", "chromatron_web.js", "chromatron_web_bg.wasm", ...Object.keys(IMAGES)]) {
   assert.ok(files.includes(required), `${required} is in ${webDir}`);
 }
 const wasmBytes = readFileSync(join(webDir, "chromatron_web_bg.wasm"));
 assert.ok(wasmBytes.length < MAX_WASM_BYTES, `wasm is ${wasmBytes.length} bytes, over ${MAX_WASM_BYTES}`);
+// The page never loads the social preview image or the touch icon, so they have their own caps.
 let gzipped = 0;
-for (const file of files) gzipped += gzipSync(readFileSync(join(webDir, file)), { level: 9 }).length;
-assert.ok(gzipped < MAX_PAGE_GZIP_BYTES, `the page is ${gzipped} bytes gzip, over ${MAX_PAGE_GZIP_BYTES}`);
-const html = readFileSync(join(webDir, "index.html"), "utf8");
-for (const [, url] of html.matchAll(/\b(?:src|href)="([^"]*)"/g)) {
-  if (/^(?:data:|#)/.test(url)) continue;
-  if (url.startsWith("https://")) {
-    assert.ok(EXTERNAL_HOSTS.includes(new URL(url).hostname), `${url} in index.html is a known external link`);
-    continue;
-  }
-  assert.ok(!url.startsWith("/") && !url.includes("://"), `${url} in index.html is relative`);
+for (const file of files) {
+  if (file in IMAGES) continue;
+  gzipped += gzipSync(readFileSync(join(webDir, file)), { level: 9 }).length;
 }
+assert.ok(gzipped < MAX_PAGE_GZIP_BYTES, `the page is ${gzipped} bytes gzip, over ${MAX_PAGE_GZIP_BYTES}`);
+for (const [file, { width, height, maxBytes }] of Object.entries(IMAGES)) {
+  const png = readFileSync(join(webDir, file));
+  assert.ok(png.length <= maxBytes, `${file} is ${png.length} bytes, over ${maxBytes}`);
+  // The PNG signature, then the IHDR chunk: length, type, width, height.
+  assert.ok(png.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])), `${file} is a PNG`);
+  assert.equal(png.toString("latin1", 12, 16), "IHDR", `${file} starts with IHDR`);
+  assert.deepEqual([png.readUInt32BE(16), png.readUInt32BE(20)], [width, height], `${file} is ${width} × ${height}`);
+}
+const html = readFileSync(join(webDir, "index.html"), "utf8");
+const attributes = (tag) => Object.fromEntries([...tag.matchAll(/([\w:-]+)="([^"]*)"/g)].map(([, name, value]) => [name, value]));
+const metas = {};
+let canonical;
+for (const [tag, element] of html.matchAll(/<([a-z]+)\b[^>]*>/g)) {
+  const attrs = attributes(tag);
+  if (element === "meta" && (attrs.property || attrs.name)) metas[attrs.property || attrs.name] = attrs.content;
+  if (element === "link" && attrs.rel === "canonical") canonical = attrs.href;
+  // Crawlers need the site's own absolute URLs, but only in the canonical link and the OG and Twitter tags.
+  if (element === "meta" && /^[a-z][a-z\d+.-]*:\/\//i.test(attrs.content ?? "")) {
+    const key = attrs.property || attrs.name || "";
+    assert.ok(/^(?:og|twitter):/.test(key) && attrs.content.startsWith(SITE), `${key} is an OG or Twitter tag with a URL on ${SITE}`);
+  }
+  for (const url of [attrs.src, attrs.href]) {
+    if (url === undefined || /^(?:data:|#)/.test(url)) continue;
+    if (url.startsWith(SITE) && element === "link" && attrs.rel === "canonical") continue;
+    if (url.startsWith("https://")) {
+      assert.ok(EXTERNAL_HOSTS.includes(new URL(url).hostname), `${url} in index.html is a known external link`);
+      continue;
+    }
+    assert.ok(!url.startsWith("/") && !url.includes("://"), `${url} in index.html is relative`);
+  }
+}
+// The social preview: absolute and unstamped, for crawlers.
+assert.equal(canonical, SITE, "the canonical link");
+for (const [key, value] of Object.entries(METAS)) {
+  assert.ok(metas[key], `index.html has ${key}`);
+  if (value !== undefined) assert.equal(metas[key], value, key);
+}
+assert.match(html, /<link rel="apple-touch-icon" href="apple-touch-icon\.png">/);
+const jsonLd = [...html.matchAll(/<script type="application\/ld\+json">([^]*?)<\/script>/g)];
+assert.equal(jsonLd.length, 1, "index.html has one JSON-LD block");
+const game = JSON.parse(jsonLd[0][1]);
+assert.equal(game.url, SITE, "the JSON-LD url");
+assert.equal(game.image, `${SITE}og.png`, "the JSON-LD image");
 // `just web` stamps every page URL with a hash of the shipped files (as templates), so one deploy's files load together.
 const main = readFileSync(join(webDir, "main.js"), "utf8");
 const build = /const BUILD = "([0-9a-f]{12})";/.exec(main)?.[1];
