@@ -74,7 +74,7 @@ button[hidden] { display: none; }
 
 #fatal { max-width: 32em; padding: 0 16px; text-align: center; }
 
-#message, .help, footer {
+#message, footer {
   margin: 0;
   padding: 4px 16px;
   text-align: center;
@@ -85,6 +85,74 @@ button[hidden] { display: none; }
 #stage #message { position: absolute; left: 0; right: 0; top: 100%; z-index: 1; background: var(--page); pointer-events: none; }
 #stage:fullscreen #message { top: auto; bottom: 0; background: transparent; }
 #message:empty { display: none; }
-.help { padding-top: 28px; }
-footer { padding-bottom: 10px; }
+footer { padding-top: 28px; padding-bottom: 10px; }
 a { color: var(--accent); }
+
+/* The "How to play" dialog. */
+#help {
+  width: calc(100% - 32px);
+  max-width: 880px;
+  max-height: calc(100% - 32px);
+  margin: auto;
+  padding: 0;
+  overflow: hidden;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: 15px;
+  line-height: 1.5;
+}
+#help::backdrop { background: rgba(0, 0, 0, 0.65); }
+#help[open] { display: flex; }
+/* The sheet scrolls, not the dialog, so a click on a scrollbar is not a click on the backdrop. */
+#help .sheet { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 24px; }
+#help .sheet-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 0 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+#help h2 { margin: 0; font-size: 22px; font-weight: 600; }
+#help h3 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+#help p { margin: 0; }
+#help .sheet-body { display: grid; gap: 22px 32px; padding-top: 18px; }
+#help section { min-width: 0; }
+#help .rows { margin: 0; padding: 0; list-style: none; }
+#help .rows li { display: flex; align-items: center; gap: 12px; padding: 5px 0; }
+#help .rows.plain li { padding: 3px 0; }
+#help .icon { flex: none; width: 40px; height: 32px; color: var(--muted); }
+#help b { font-weight: 600; }
+#help kbd {
+  display: inline-block;
+  min-width: 1.7em;
+  padding: 0 6px;
+  font: 600 13px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-align: center;
+  color: var(--ink);
+  background: var(--page);
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+}
+#help kbd.mod { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 14px; }
+@media (min-width: 720px) {
+  #help .sheet-body { grid-template-columns: 1fr 1fr; }
+  #help .wide { grid-column: 1 / -1; }
+}
+@media (max-width: 480px) {
+  #help .sheet { padding: 0 16px 20px; }
+}

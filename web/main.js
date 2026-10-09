@@ -350,6 +350,69 @@ function clipboardShortcut(event) {
   return true;
 }
 
+const helpDialog = $("help");
+// What had the focus when the help opened; only a text field gets it back on close.
+let helpOpener = null;
+let backdropPress = false;
+// The pointer the canvas has captured, so the help can let go of it.
+let capturedPointer = null;
+
+function helpOpen() {
+  return helpDialog.open;
+}
+
+function openHelp() {
+  if (helpDialog.open) return;
+  apply(session.pointer_cancel());
+  helpOpener = document.activeElement;
+  if (capturedPointer !== null) {
+    try {
+      pixels.releasePointerCapture(capturedPointer);
+    } catch {
+      // The capture is already gone.
+    }
+    capturedPointer = null;
+  }
+  helpDialog.showModal();
+}
+
+// The ⌘ key on Apple platforms, Ctrl elsewhere.
+function showPlatformKeys() {
+  const platform = navigator.userAgentData?.platform || navigator.platform || "";
+  if (/mac|iphone|ipad|ipod/i.test(platform)) return;
+  for (const key of helpDialog.querySelectorAll("kbd.mod")) key.textContent = "Ctrl";
+}
+
+function wireHelp() {
+  showPlatformKeys();
+  $("help-open").addEventListener("click", () => openHelp());
+  $("help-close").addEventListener("click", () => helpDialog.close());
+  // The dialog has no padding of its own, so a click on it itself is a click on the backdrop.
+  // Closes only when the press and the click both landed on the dialog itself, so a text
+  // selection dragged from the sheet onto the backdrop does not.
+  helpDialog.addEventListener("pointerdown", (event) => {
+    backdropPress = event.target === helpDialog;
+  });
+  helpDialog.addEventListener("click", (event) => {
+    const press = backdropPress;
+    backdropPress = false;
+    if (press && event.target === helpDialog) helpDialog.close();
+  });
+  helpDialog.addEventListener("close", () => {
+    const opener = helpOpener;
+    helpOpener = null;
+    // Keys go back to the game: only a text field gets its focus back.
+    if (opener instanceof HTMLElement && opener.isConnected && isTextField(opener)) opener.focus();
+    else if (isControl(document.activeElement)) document.activeElement.blur();
+  });
+}
+
+// First visit only: shows the help once, if storage can say it has not been shown before.
+function showHelpOnFirstVisit() {
+  const seen = storage.read("chromatron.helpSeen");
+  if (seen.ok && seen.value === null && storage.write("chromatron.helpSeen", "1")) openHelp();
+}
+
 function saveAll() {
   for (const n of [...changed]) flush(n);
   rememberSlot();
@@ -363,28 +426,31 @@ function wire() {
     window.getSelection()?.removeAllRanges();
     if (isControl(document.activeElement)) document.activeElement.blur();
     pixels.setPointerCapture(event.pointerId);
+    capturedPointer = event.pointerId;
     const [x, y] = framePoint(event);
     apply(session.pointer_down(x, y, pressButton(event), event.shiftKey, event.altKey, event.ctrlKey));
   });
   pixels.addEventListener("pointermove", (event) => {
-    if (!event.isPrimary || event.buttons === 0) return;
+    if (helpOpen() || !event.isPrimary || event.buttons === 0) return;
     const [x, y] = framePoint(event);
     apply(session.pointer_move(x, y));
   });
   pixels.addEventListener("pointerup", (event) => {
-    if (!event.isPrimary) return;
+    capturedPointer = null;
+    if (helpOpen() || !event.isPrimary) return;
     const [x, y] = framePoint(event);
     apply(session.pointer_up(x, y, releaseButton(event, x, y)));
   });
   pixels.addEventListener("pointercancel", (event) => {
-    if (event.isPrimary) apply(session.pointer_cancel());
+    capturedPointer = null;
+    if (!helpOpen() && event.isPrimary) apply(session.pointer_cancel());
   });
   pixels.addEventListener("contextmenu", (event) => event.preventDefault());
   pixels.addEventListener(
     "wheel",
     (event) => {
       // Ctrl+wheel (and trackpad pinch) stays the browser's zoom.
-      if (!wheelOn || event.ctrlKey) return;
+      if (!wheelOn || event.ctrlKey || helpOpen()) return;
       event.preventDefault();
       const inPixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
       apply(session.wheel(event.deltaX, event.deltaY, inPixels, event.timeStamp));
@@ -393,7 +459,13 @@ function wire() {
   );
 
   document.addEventListener("keydown", (event) => {
-    if (event.isComposing || clipboardShortcut(event) || isControl(event.target)) return;
+    if (helpOpen() || event.isComposing) return;
+    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isControl(event.target)) {
+      event.preventDefault();
+      openHelp();
+      return;
+    }
+    if (clipboardShortcut(event) || isControl(event.target)) return;
     const altGraph = event.getModifierState("AltGraph");
     if (event.altKey && !altGraph) return;
     const ctrl = event.ctrlKey && !altGraph;
@@ -403,7 +475,7 @@ function wire() {
   });
   document.addEventListener("copy", (event) => {
     copyPending = false;
-    if (isTextField(document.activeElement) || hasSelection()) return;
+    if (helpOpen() || isTextField(document.activeElement) || hasSelection()) return;
     const solution = session.copy();
     if (solution === undefined || !event.clipboardData) return;
     event.clipboardData.setData("text/plain", solution);
@@ -412,7 +484,7 @@ function wire() {
   });
   document.addEventListener("paste", (event) => {
     pastePending = false;
-    if (isTextField(document.activeElement) || !event.clipboardData) return;
+    if (helpOpen() || isTextField(document.activeElement) || !event.clipboardData) return;
     event.preventDefault();
     pasteSolution(event.clipboardData.getData("text/plain"));
   });
@@ -430,6 +502,7 @@ function wire() {
   });
   $("copy").addEventListener("click", copyWithClipboardApi);
   $("paste").addEventListener("click", pasteWithClipboardApi);
+  wireHelp();
   const wheelButton = $("wheel");
   wheelButton.setAttribute("aria-pressed", String(wheelOn));
   wheelButton.addEventListener("click", () => {
@@ -494,6 +567,7 @@ async function start() {
     const stored = Number(storage.read("chromatron.game").value);
     selectGame(gameFromHash() ?? (GAMES.includes(stored) ? stored : 1));
     layout();
+    showHelpOnFirstVisit();
   } catch (error) {
     showFatal(error);
     return;

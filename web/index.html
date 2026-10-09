@@ -26,6 +26,7 @@
       <button type="button" id="wheel" aria-pressed="true" title="Scrolling over the game changes level">Mouse wheel changes level</button>
       <button type="button" id="clockwise" aria-pressed="false" title="Taps turn pieces clockwise" hidden>Turn clockwise</button>
       <button type="button" id="fullscreen" hidden>Full screen</button>
+      <button type="button" id="help-open" aria-haspopup="dialog" title="How to play (?)">? Help</button>
     </div>
   </header>
   <main id="stage">
@@ -36,7 +37,82 @@
     <p id="message" role="status" aria-live="polite"></p>
     <p id="fatal" hidden>Chromatron could not start. It needs a current browser with WebAssembly and JavaScript enabled, such as Safari, Chrome or Firefox.</p>
   </main>
-  <p class="help">Drag pieces from the toolbox onto the board. Click a piece to turn it anticlockwise; right-click, or Shift-, Option- or Control-click, to turn it clockwise (on a touch screen, tap, and switch on “Turn clockwise” for the other way). Space or = next level, - previous level, r reset. ⌘C / ⌘V (Ctrl+C / Ctrl+V) copy and paste a solution.</p>
+  <dialog id="help" aria-labelledby="help-title">
+    <div class="sheet">
+      <div class="sheet-head">
+        <h2 id="help-title">How to play</h2>
+        <button type="button" id="help-close">Close</button>
+      </div>
+      <div class="sheet-body">
+        <section class="wide">
+          <h3>Goal</h3>
+          <p>Light up every target with a beam of its colour. Drag pieces from the toolbox onto the board to bend, split and filter the lasers. Each level’s hint text, beside the board, introduces new pieces. Solving a level unlocks more, and the numbers in the level strip change colour as you go.</p>
+        </section>
+        <section>
+          <h3>Mouse</h3>
+          <ul class="rows">
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><rect x="2" y="9" width="12" height="12" rx="2" fill="currentColor" opacity=".35"/><path d="M18 15h18m-6-6 6 6-6 6" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span><b>Drag</b> a piece between the toolbox and the board.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><path d="M12 2A10 10 0 0 0 2 12v2h10z" fill="var(--accent)"/><rect x="2" y="2" width="20" height="28" rx="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2 14h20M12 2v12" stroke="currentColor" stroke-width="1.6"/><path d="M33 9a7 7 0 1 0 1 8m0 0 3-4m-3 4-4-2" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span><b>Click</b> a piece to turn it anticlockwise.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><path d="M12 2a10 10 0 0 1 10 10v2H12z" fill="var(--accent)"/><rect x="2" y="2" width="20" height="28" rx="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2 14h20M12 2v12" stroke="currentColor" stroke-width="1.6"/><path d="M27 9a7 7 0 1 1-1 8m0 0-3-4m3 4 4-2" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span><b>Right-click</b> (or <kbd>Shift</kbd>, <kbd>Option</kbd> or <kbd>Control</kbd> and click) to turn it clockwise.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="9" width="8" height="14" rx="2"/><rect x="14" y="9" width="8" height="14" rx="2"/><rect x="25" y="9" width="8" height="14" rx="2" stroke="var(--accent)" stroke-width="2.4"/></g></svg>
+              <span><b>Click a number</b> in the level strip to go to that level.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><rect x="12" y="2" width="16" height="28" rx="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M20 7v6" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><path d="M6 12l4-4 4 4M6 20l4 4 4-4M34 12l-4-4-4 4M34 20l-4 4-4-4" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span><b>Scroll</b> over the game to change level (switch it off with the toolbar button).</span>
+            </li>
+          </ul>
+        </section>
+        <section>
+          <h3>Touch</h3>
+          <ul class="rows">
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="5" y="14" width="9" height="14" rx="4.5"/><path d="M9.5 14V6a2.2 2.2 0 0 1 4.4 0v8"/></g><path d="M20 17h16m-5-5 5 5-5 5" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span><b>Drag</b> to move a piece.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><rect x="14" y="14" width="9" height="14" rx="4.5"/><path d="M18.5 14V6a2.2 2.2 0 0 1 4.4 0v8"/></g><path d="M9 6a12 12 0 0 0-3 8M31 6a12 12 0 0 1 3 8" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/></svg>
+              <span><b>Tap</b> a piece to turn it anticlockwise.</span>
+            </li>
+            <li>
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><rect x="3" y="9" width="34" height="14" rx="7" fill="var(--accent)"/><circle cx="29" cy="16" r="4.5" fill="var(--panel)"/></svg>
+              <span>Switch on <b>Turn clockwise</b> in the toolbar and taps turn clockwise.</span>
+            </li>
+          </ul>
+        </section>
+        <section>
+          <h3>Keys</h3>
+          <ul class="rows plain">
+            <li><span><kbd>Space</kbd> <kbd>=</kbd> next level</span></li>
+            <li><span><kbd>-</kbd> previous level</span></li>
+            <li><span><kbd>R</kbd> reset the level</span></li>
+            <li><span><kbd>?</kbd> this help</span></li>
+          </ul>
+        </section>
+        <section>
+          <h3>Solutions</h3>
+          <ul class="rows plain">
+            <li><span><kbd class="mod">⌘</kbd><kbd>C</kbd> and <kbd class="mod">⌘</kbd><kbd>V</kbd>, or the toolbar buttons, copy a level’s solution as text and paste one back.</span></li>
+            <li><span>The text works in the Mac apps too.</span></li>
+          </ul>
+        </section>
+        <section class="wide">
+          <h3>Progress</h3>
+          <p>Saved in this browser. Each game reopens on your last level.</p>
+        </section>
+      </div>
+    </div>
+  </dialog>
   <footer>Chromatron 1–4 by Sean Barrett / <a href="https://silverspaceship.com/chromatron/">Silver Spaceship Software</a>. This is an independent port, not affiliated with or endorsed by the author. <a href="https://github.com/h1994st/chromatron-remake">Source on GitHub</a>.</footer>
   <script nomodule>document.getElementById("fatal").hidden = false;</script>
 </body>
