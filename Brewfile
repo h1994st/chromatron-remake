@@ -4,3 +4,5 @@ brew "ghidra"
 brew "just"
 # Reverse engineering framework
 brew "radare2"
+# Command-line unarchiving tools supporting multiple formats
+brew "unar"

@@ -1,14 +1,45 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 originals := env("CHROMATRON_ORIGINALS", justfile_directory() / "chromatron_mac")
+originals_url := "https://silverspaceship.com/chromatron/chromatron_mac.zip"
+originals_sha256 := "cda82f278f74b025e50982dc064fce4c50e7a91c645203daa02f3b8551ee675c"
 
 # List recipes
 default:
     @just --list
 
+# First-time setup: install the Homebrew dependencies and download the original games
+init: setup fetch-originals
+
 # Install Homebrew dependencies from the Brewfile
 setup:
     brew bundle
+
+# Download the original Mac games from silverspaceship.com and unpack them into chromatron_mac/
+fetch-originals:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dest="{{originals}}"
+    missing=0
+    for app in "Chromatron" "Chromatron 2" "Chromatron 3" "Chromatron 4"; do
+        [[ -d "$dest/$app.app" ]] || missing=1
+    done
+    if [[ "$missing" == 0 ]]; then
+        echo "the original apps are already in $dest"
+        exit 0
+    fi
+    command -v unar > /dev/null || { echo "error: unar not found — run just setup" >&2; exit 1; }
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL --retry 3 -o "$tmp/chromatron_mac.zip" "{{originals_url}}"
+    echo "{{originals_sha256}}  $tmp/chromatron_mac.zip" | shasum -a 256 -c -s \
+        || { echo "error: chromatron_mac.zip does not match the expected SHA-256" >&2; exit 1; }
+    ditto -x -k "$tmp/chromatron_mac.zip" "$tmp/archives"
+    mkdir -p "$dest"
+    for archive in "$tmp"/archives/*.sit; do
+        unar -q -f -o "$dest" "$archive" > /dev/null
+    done
+    echo "unpacked the four original apps into $dest"
 
 # Check formatting and lints
 lint:

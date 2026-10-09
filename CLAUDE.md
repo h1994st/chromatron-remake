@@ -29,7 +29,9 @@ Status: Plan 5 done: all four games are decoded, played by their own `RuleSet` a
 
 | Recipe | Action |
 |---|---|
-| `just setup` | `brew bundle` (ghidra, just, radare2) |
+| `just init` | first-time setup: `setup` then `fetch-originals` |
+| `just setup` | `brew bundle` (ghidra, just, radare2, unar) |
+| `just fetch-originals` | download `chromatron_mac.zip` from silverspaceship.com, check its SHA-256, unpack the `.sit` archives with `unar` into `chromatron_mac/` (or `$CHROMATRON_ORIGINALS`); no-op if all four apps are there |
 | `just decompile <game>` | Ghidra headless (`re/ghidra/` scripts) → `re/out/chromatron<game>/` |
 | `just dump <game>` | `spectrograph` CLI: print a game's sections, strings and levels with names and hints as ASCII grids; write `re/out/chromatron<game>/sprites.png` |
 | `just run <game>` | `cargo run --release --bin chromatron<game>` (game 1–4); `CHROMATRON_PROFILE=1` logs frame timings |
