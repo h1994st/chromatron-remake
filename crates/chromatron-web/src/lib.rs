@@ -9,5 +9,5 @@ pub mod save_text;
 pub mod session;
 pub mod stage;
 
-pub use session::{Flag, Session};
+pub use session::{Flag, LevelState, Session};
 pub use stage::display_scale;

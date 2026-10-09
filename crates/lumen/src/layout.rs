@@ -51,6 +51,21 @@ pub const SITE_URL_RECT: Rect = Rect::new(470, 450, 640, 480);
 /// Chromatron 2 on (re/notes/chromatron2/platform.md P3), in play (`game_mode == 2`).
 pub const LEVEL_NAME_RECT: Rect = Rect::new(50, 385, 300, 420);
 pub const THANK_YOU_RECT: Rect = Rect::new(0, 450, 400, 480);
+/// The 15 × 15 board: every pixel in it hits a board cell, and no pixel outside it does.
+pub const BOARD_RECT: Rect = Rect::new(
+    BOARD_LEFT,
+    BOARD_TOP,
+    BOARD_LEFT + CELL * SIDE as i32,
+    BOARD_TOP + CELL * SIDE as i32,
+);
+/// The visible toolbox: its 6 × 4 slots on their 26 px pitch, with the 2 px gap on every side.
+/// Every toolbox hit lies inside it.
+pub const TOOLBOX_RECT: Rect = Rect::new(
+    TOOLBOX_LEFT - (TOOLBOX_PITCH - CELL),
+    TOOLBOX_TOP - (TOOLBOX_PITCH - CELL),
+    TOOLBOX_LEFT + TOOLBOX_PITCH * TOOLBOX_COLUMNS as i32,
+    TOOLBOX_TOP + TOOLBOX_PITCH * (VISIBLE_TOOLBOX_SLOTS / TOOLBOX_COLUMNS) as i32,
+);
 
 /// Top-left pixel of the 24 × 24 sprite of cell `index` (a board cell or a visible toolbox slot).
 pub fn cell_origin(index: usize) -> (i32, i32) {
@@ -146,6 +161,42 @@ mod tests {
         assert_eq!(hit_test(509, 449), Hit::Strip(49));
         assert_eq!(hit_test(9, 420), Hit::Nothing);
         assert_eq!(hit_test(100, 450), Hit::Nothing);
+    }
+
+    #[test]
+    fn the_board_rect_is_exactly_the_board_cells() {
+        assert_eq!(BOARD_RECT, Rect::new(48, 18, 408, 378));
+        for y in 0..FRAME_HEIGHT as i32 {
+            for x in 0..FRAME_WIDTH as i32 {
+                let inside = (BOARD_RECT.left..BOARD_RECT.right).contains(&x)
+                    && (BOARD_RECT.top..BOARD_RECT.bottom).contains(&y);
+                let on_board = matches!(hit_test(x, y), Hit::Cell(i) if i < BOARD_CELLS);
+                assert_eq!(inside, on_board, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn the_toolbox_rect_holds_every_slot_and_every_toolbox_hit() {
+        assert_eq!(TOOLBOX_RECT, Rect::new(446, 6, 604, 112));
+        let inside = |x: i32, y: i32| {
+            (TOOLBOX_RECT.left..TOOLBOX_RECT.right).contains(&x)
+                && (TOOLBOX_RECT.top..TOOLBOX_RECT.bottom).contains(&y)
+        };
+        for slot in 0..VISIBLE_TOOLBOX_SLOTS {
+            let (x, y) = cell_origin(toolbox_index(slot));
+            assert!(
+                inside(x, y) && inside(x + CELL - 1, y + CELL - 1),
+                "slot {slot}"
+            );
+        }
+        for y in 0..FRAME_HEIGHT as i32 {
+            for x in 0..FRAME_WIDTH as i32 {
+                if matches!(hit_test(x, y), Hit::Cell(i) if i >= BOARD_CELLS) {
+                    assert!(inside(x, y), "({x}, {y})");
+                }
+            }
+        }
     }
 
     #[test]

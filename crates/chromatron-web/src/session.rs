@@ -3,10 +3,11 @@
 //! Every input returns `Flag` bits. Buffers are allocated once in `new`: no input or render
 //! allocates, except the strings that cross to JavaScript (copy, save, changed text).
 
-use lumen::layout::{FULL_FRAME, STRIP_SLOTS};
+use lumen::layout::{BOARD_RECT, FULL_FRAME, STRIP_SLOTS, TOOLBOX_RECT};
 use lumen::{
-    ButtonLatch, Damage, FRAME_HEIGHT, FRAME_WIDTH, GameState, Held, InputEvent, MAX_DAMAGE_RECTS,
-    Rect, Redraw, RuleSet, SaveData, ScrollDelta, TextBoxes, WheelGate, decode_save, resume_slot,
+    ButtonLatch, Damage, Effects, FRAME_HEIGHT, FRAME_WIDTH, GameState, Held, InputEvent,
+    MAX_DAMAGE_RECTS, Rect, Redraw, RuleSet, SaveData, ScrollDelta, SlotState, TextBoxes,
+    WheelGate, decode_save, resume_slot,
 };
 use spectrograph::Game;
 use wasm_bindgen::prelude::*;
@@ -37,6 +38,31 @@ impl Flag {
     /// Whether `flags` has this bit.
     pub fn is_in(self, flags: u32) -> bool {
         flags & self as u32 != 0
+    }
+}
+
+/// How the strip shows a level (`lumen::SlotState`), for the page's Levels picker.
+#[wasm_bindgen]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LevelState {
+    /// The level being played.
+    Current = 0,
+    /// Solved before.
+    Completed = 1,
+    /// Open, not solved yet.
+    Unlocked = 2,
+    /// Not open yet.
+    Locked = 3,
+}
+
+impl From<SlotState> for LevelState {
+    fn from(state: SlotState) -> LevelState {
+        match state {
+            SlotState::Current => LevelState::Current,
+            SlotState::Completed => LevelState::Completed,
+            SlotState::Unlocked => LevelState::Unlocked,
+            SlotState::Locked => LevelState::Locked,
+        }
     }
 }
 
@@ -311,6 +337,51 @@ impl Session {
         })
     }
 
+    /// Strip slot `slot`'s state (0-based), as the strip colours its number. `Locked` before any
+    /// `select` and past the strip.
+    pub fn slot_state(&self, slot: u32) -> LevelState {
+        let slot = slot as usize;
+        match self.state() {
+            Some(state) if slot < STRIP_SLOTS => state.slot_state(slot).into(),
+            _ => LevelState::Locked,
+        }
+    }
+
+    /// Opens strip slot `slot` (0-based) as a tap on its number does: only an unlocked slot opens,
+    /// and the current one starts again from its saved board. Ends any drag first. Returns 0 for a
+    /// locked slot, a slot past the strip, or before any `select`.
+    pub fn open_slot(&mut self, slot: u32) -> u32 {
+        let slot = slot as usize;
+        let open = slot < STRIP_SLOTS && self.state().is_some_and(|state| state.is_unlocked(slot));
+        if !open {
+            return 0;
+        }
+        self.pointer_cancel() | self.act(|state| state.goto_slot(slot))
+    }
+
+    /// The board in frame pixels, `[left, top, right, bottom]` (`lumen::layout::BOARD_RECT`): the
+    /// page's portrait board view.
+    pub fn board_rect(&self) -> Vec<i32> {
+        rect_vec(BOARD_RECT)
+    }
+
+    /// The visible toolbox in frame pixels, `[left, top, right, bottom]`
+    /// (`lumen::layout::TOOLBOX_RECT`): the page's portrait toolbox view.
+    pub fn toolbox_rect(&self) -> Vec<i32> {
+        rect_vec(TOOLBOX_RECT)
+    }
+
+    /// Where the strip draws slot `slot`'s number (0-based), `[left, top, right, bottom]` in frame
+    /// pixels (`lumen::strip_number_rect`); empty past the strip.
+    pub fn strip_number_rect(&self, slot: u32) -> Vec<i32> {
+        let slot = slot as usize;
+        if slot < STRIP_SLOTS {
+            rect_vec(lumen::strip_number_rect(slot))
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Draws the frame if anything changed and converts only the damaged rects to RGBA. Returns
     /// how many rects `dirty_ptr` now holds (0: nothing to draw). Also decides `text_changed`.
     pub fn render(&mut self) -> usize {
@@ -374,9 +445,10 @@ impl Session {
 
     /// Text box `i`'s rect in frame pixels, `[left, top, right, bottom]` (empty out of range).
     pub fn text_rect(&self, i: usize) -> Vec<i32> {
-        self.text.as_slice().get(i).map_or_else(Vec::new, |b| {
-            vec![b.rect.left, b.rect.top, b.rect.right, b.rect.bottom]
-        })
+        self.text
+            .as_slice()
+            .get(i)
+            .map_or_else(Vec::new, |b| rect_vec(b.rect))
     }
 }
 
@@ -400,6 +472,11 @@ impl Session {
 
     /// Hands one event to the current game and turns its effects into flags.
     fn send(&mut self, event: InputEvent) -> u32 {
+        self.act(|state| state.handle(event))
+    }
+
+    /// Runs `action` on the current game and turns its effects into flags.
+    fn act(&mut self, action: impl FnOnce(&mut GameState<'static>) -> Effects) -> u32 {
         let Some(index) = self.current else {
             return 0;
         };
@@ -407,7 +484,7 @@ impl Session {
             return 0;
         };
         let slot = state.slot();
-        let effects = state.handle(event);
+        let effects = action(state);
         let mut flags = 0;
         if state.slot() != slot {
             flags |= Flag::Slot as u32;
@@ -421,6 +498,11 @@ impl Session {
         }
         flags
     }
+}
+
+/// A rect as the page reads it: `[left, top, right, bottom]`.
+fn rect_vec(rect: Rect) -> Vec<i32> {
+    vec![rect.left, rect.top, rect.right, rect.bottom]
 }
 
 /// A stored save text as `SaveData`; `None` when it is not base64 or not a valid save.

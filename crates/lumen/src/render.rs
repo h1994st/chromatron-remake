@@ -25,6 +25,8 @@ const HALF: i32 = SPRITE / 2;
 /// Digits '0'–'9' are the top-left 12 × 12 of sprites 118–127.
 const DIGIT_SPRITE: usize = 118;
 const DIGIT_SIZE: i32 = 12;
+/// A strip number's second digit starts this far right of its first (`draw_digit_string`'s `x += 8`).
+const DIGIT_ADVANCE: i32 = 8;
 /// A beam half-segment runs from the cell centre 13 px towards a side, both ends drawn.
 const BEAM_REACH: i32 = 13;
 pub const MAX_TEXT_BOXES: usize = 5;
@@ -330,6 +332,14 @@ fn draw_cell_beams(
     drew
 }
 
+/// Where the strip draws slot `slot`'s number: from `strip_origin`, two 12 × 12 digit glyphs
+/// `DIGIT_ADVANCE` apart (1–9 are a 4 px space and one glyph), so 20 × 12. The web page copies
+/// it out of the frame for its Levels picker.
+pub fn strip_number_rect(slot: usize) -> Rect {
+    let (x, y) = strip_origin(slot);
+    Rect::new(x, y, x + DIGIT_ADVANCE + DIGIT_SIZE, y + DIGIT_SIZE)
+}
+
 /// The strip number for `slot` (1–50, a leading 0 becomes a 4 px space), tinted by its state.
 fn draw_strip_number(frame: &mut [u32], data: &GameData, slot: usize, state: SlotState) {
     let offset = match state {
@@ -355,9 +365,9 @@ fn draw_strip_number(frame: &mut [u32], data: &GameData, slot: usize, state: Slo
                     ON_TOP,
                     offset,
                 );
-                x += 8;
+                x += DIGIT_ADVANCE;
             }
-            None => x += 4,
+            None => x += DIGIT_ADVANCE / 2,
         }
     }
 }
@@ -688,6 +698,34 @@ mod tests {
                 .iter()
                 .all(|(t, _)| *t != "first" && *t != "thanks")
         );
+    }
+
+    #[test]
+    fn strip_numbers_lie_in_their_rects() {
+        let data = tiny_game();
+        let state = GameState::new(&data, SaveData::default());
+        let frame = rendered(&state);
+        let rects: Vec<Rect> = (0..STRIP_SLOTS).map(strip_number_rect).collect();
+        assert_eq!(rects[0], Rect::new(10, 410, 30, 422));
+        assert_eq!(rects[49], Rect::new(490, 430, 510, 442));
+        for y in 390..FRAME_HEIGHT as i32 {
+            for x in 0..FRAME_WIDTH as i32 {
+                let inside = rects
+                    .iter()
+                    .any(|r| (r.left..r.right).contains(&x) && (r.top..r.bottom).contains(&y));
+                if pixel(&frame, x, y) != BACKGROUND {
+                    assert!(inside, "({x}, {y})");
+                }
+            }
+        }
+        for r in &rects[9..] {
+            assert_ne!(pixel(&frame, r.left, r.top), BACKGROUND, "{r:?}");
+            assert_ne!(
+                pixel(&frame, r.right - 1, r.bottom - 1),
+                BACKGROUND,
+                "{r:?}"
+            );
+        }
     }
 
     #[test]

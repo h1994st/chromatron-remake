@@ -22,18 +22,16 @@ body {
 
 header {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px 16px;
-  align-items: center;
   justify-content: center;
   padding: 8px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
 
-.games, .toolbar { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.toolbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: center; }
+.toolbar .spacer { width: 10px; }
 
-button {
+button, select {
   font: inherit;
   color: var(--ink);
   background: transparent;
@@ -42,14 +40,56 @@ button {
   padding: 4px 10px;
   cursor: pointer;
 }
-button:hover { border-color: var(--muted); }
-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-button[aria-pressed="true"], button[aria-current="true"] {
+button { display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
+select {
+  appearance: none;
+  padding-right: 26px;
+  background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='%239da1a8' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 8px center / 12px;
+}
+select option { color: var(--ink); background: var(--panel); }
+button:hover, select:hover { border-color: var(--muted); }
+button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.glyph {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* The Actions menu: a popover that main.js places under its button. */
+.menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 4px;
+  min-width: 11em;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.menu button {
+  display: flex;
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  border-radius: 5px;
+  padding: 8px 12px;
+}
+.menu button:hover, .menu button:focus-visible { background: var(--line); outline: none; }
+button[aria-pressed="true"] {
   background: var(--ink);
   color: var(--page);
   border-color: var(--ink);
 }
 button[hidden] { display: none; }
+/* Quick taps on buttons never double-tap zoom; panning and pinch-zoom stay the browser's. */
+header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: manipulation; }
 
 #stage {
   flex: 1 1 0;
@@ -72,6 +112,88 @@ button[hidden] { display: none; }
 #pixels { image-rendering: pixelated; touch-action: none; }
 #text { pointer-events: none; }
 
+/* The touch layouts: main.js sets html.touch, and data-layout to "portrait" or "landscape". */
+.part, #texts { display: none; }
+.part {
+  flex: none;
+  image-rendering: pixelated;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+.touch body { height: auto; min-height: 100%; }
+/* No pull-to-refresh or rubber-banding mid-drag. */
+.touch, .touch body { overscroll-behavior: none; }
+.touch header { position: sticky; top: 0; z-index: 2; padding: 4px 8px; }
+.touch .toolbar {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+  justify-content: flex-start;
+  gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.touch .toolbar::-webkit-scrollbar { display: none; }
+.touch .toolbar > * { flex: none; }
+.touch .toolbar .spacer { flex: 1 1 0; width: auto; }
+.touch .toolbar button, .touch .toolbar select { height: 36px; }
+.touch .toolbar button { position: relative; min-width: 32px; padding: 0 7px; }
+.touch .toolbar select { padding: 0 22px 0 8px; background-position: right 6px center; }
+/* Icons only; the words stay for screen readers. */
+.touch .toolbar .label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.touch #stage { flex: none; }
+.touch #stage #message { position: fixed; top: auto; bottom: 0; z-index: 3; padding: 8px 16px; background: var(--panel); }
+/* Portrait fits one screen of the small viewport (Safari's bars shown): the page never scrolls, so
+   the bars never collapse, and long texts scroll inside their own box. */
+[data-layout="portrait"] body { height: 100vh; height: 100svh; overflow: hidden; }
+[data-layout="portrait"] #stage {
+  flex: 1 1 0;
+  min-height: 0;
+  flex-direction: column;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 12px 0 20px;
+}
+[data-layout="portrait"] #game { display: none; }
+[data-layout="portrait"] .part:not([hidden]) { display: block; }
+[data-layout="portrait"] #texts {
+  display: block;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  max-width: 40em;
+  padding: 0 16px;
+  font-size: 16px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+#texts p { margin: 0 0 10px; }
+#texts p:last-child { margin-bottom: 0; }
+#texts footer { padding: 16px 0 0; }
+/* Landscape: the toolbar runs down the left side, so the frame gets the whole height. */
+[data-layout="landscape"] header {
+  position: fixed;
+  inset: 0 auto 0 0;
+  flex-direction: column;
+  padding: 6px 4px;
+  border-bottom: 0;
+  border-right: 1px solid var(--line);
+}
+[data-layout="landscape"] .toolbar { flex-direction: column; align-items: stretch; overflow: hidden auto; }
+[data-layout="landscape"] body { height: 100vh; height: 100svh; overflow: hidden; }
+[data-layout="landscape"] #stage { height: 100vh; height: 100svh; }
+#help footer { padding: 20px 0 0; }
+
 #fatal { max-width: 32em; padding: 0 16px; text-align: center; }
 
 #message, footer {
@@ -88,8 +210,8 @@ button[hidden] { display: none; }
 footer { padding-top: 28px; padding-bottom: 10px; }
 a { color: var(--accent); }
 
-/* The "How to play" dialog. */
-#help {
+/* The "How to play" and Levels dialogs. */
+.sheet-dialog {
   width: calc(100% - 32px);
   max-width: 880px;
   max-height: calc(100% - 32px);
@@ -103,11 +225,11 @@ a { color: var(--accent); }
   font-size: 15px;
   line-height: 1.5;
 }
-#help::backdrop { background: rgba(0, 0, 0, 0.65); }
-#help[open] { display: flex; }
+.sheet-dialog::backdrop { background: rgba(0, 0, 0, 0.65); }
+.sheet-dialog[open] { display: flex; }
 /* The sheet scrolls, not the dialog, so a click on a scrollbar is not a click on the backdrop. */
-#help .sheet { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 24px; }
-#help .sheet-head {
+.sheet-dialog .sheet { flex: 1; min-height: 0; overflow: auto; padding: 0 24px 24px; }
+.sheet-dialog .sheet-head {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -119,7 +241,7 @@ a { color: var(--accent); }
   background: var(--panel);
   border-bottom: 1px solid var(--line);
 }
-#help h2 { margin: 0; font-size: 22px; font-weight: 600; }
+.sheet-dialog h2 { margin: 0; font-size: 22px; font-weight: 600; }
 #help h3 {
   margin: 0 0 8px;
   color: var(--muted);
@@ -154,5 +276,30 @@ a { color: var(--accent); }
   #help .wide { grid-column: 1 / -1; }
 }
 @media (max-width: 480px) {
-  #help .sheet { padding: 0 16px 20px; }
+  .sheet-dialog .sheet { padding: 0 16px 20px; }
 }
+
+/* The Levels picker: each level's number as the strip draws it, copied from the frame. */
+#levels { max-width: 480px; }
+#levels .level-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; padding-top: 16px; }
+#levels .level-grid button { position: relative; padding: 10px 0; border-radius: 8px; }
+/* Solved levels carry a tick, so solved and open do not differ by colour alone. */
+#levels .level-grid button[data-state="solved"]::after {
+  content: "\2713";
+  position: absolute;
+  top: 1px;
+  right: 5px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+#levels .level-grid canvas { width: 40px; height: 24px; image-rendering: pixelated; }
+#levels .level-grid button[aria-current="true"] {
+  color: var(--ink);
+  background: transparent;
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+#levels .level-grid button:disabled { opacity: 0.45; cursor: default; }

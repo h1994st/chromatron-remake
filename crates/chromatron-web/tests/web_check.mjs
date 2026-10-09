@@ -25,7 +25,7 @@ const EXTERNAL_HOSTS = ["silverspaceship.com", "github.com"];
 
 // The files, their sizes and their URLs.
 const files = readdirSync(webDir).sort();
-for (const required of ["index.html", "style.css", "main.js", "chromatron_web.js", "chromatron_web_bg.wasm"]) {
+for (const required of ["index.html", "style.css", "main.js", "touch_layout.js", "chromatron_web.js", "chromatron_web_bg.wasm"]) {
   assert.ok(files.includes(required), `${required} is in ${webDir}`);
 }
 const wasmBytes = readFileSync(join(webDir, "chromatron_web_bg.wasm"));
@@ -51,6 +51,7 @@ const expected = createHash("sha256")
   .update(wasmBytes)
   .update(readFileSync(join(webDir, "chromatron_web.js")))
   .update(unstamp(main))
+  .update(readFileSync(join(webDir, "touch_layout.js")))
   .update(readFileSync(join(webDir, "style.css")))
   .update(unstamp(html))
   .digest("hex")
@@ -60,16 +61,35 @@ assert.ok(!html.includes("__BUILD__") && !main.includes("__BUILD__"), "the build
 assert.ok(html.includes(`main.js?v=${build}`) && html.includes(`style.css?v=${build}`), "index.html");
 assert.ok(main.includes(`const BUILD = "${build}";`), "main.js carries the build hash");
 assert.match(main, /import\(`\.\/chromatron_web\.js\?v=\$\{BUILD\}`\)/);
+assert.match(main, /import\(`\.\/touch_layout\.js\?v=\$\{BUILD\}`\)/);
 assert.match(main, /new URL\(`chromatron_web_bg\.wasm\?v=\$\{BUILD\}`, import\.meta\.url\)/);
-execFileSync(process.execPath, ["--check", join(webDir, "main.js")], { stdio: "inherit" });
+for (const script of ["main.js", "touch_layout.js"]) {
+  execFileSync(process.execPath, ["--check", join(webDir, script)], { stdio: "inherit" });
+}
 
 // Play.
 const glue = await import(pathToFileURL(join(webDir, "chromatron_web.js")).href);
 const wasm = glue.initSync({ module: wasmBytes });
-const { Flag, Session, display_scale: displayScale } = glue;
+const { Flag, LevelState, Session, display_scale: displayScale } = glue;
 const has = (flags, flag) => (flags & flag) !== 0;
 assert.equal(displayScale(1280, 960), 2);
 assert.equal(displayScale(320, 480), 0.5);
+
+// The Levels picker and the portrait views.
+{
+  const session = new Session();
+  session.select(2, undefined, undefined);
+  assert.equal(session.slot_state(0), LevelState.Current);
+  assert.equal(session.slot_state(4), LevelState.Unlocked);
+  assert.equal(session.slot_state(5), LevelState.Locked);
+  assert.equal(session.open_slot(5), 0, "a locked level stays shut");
+  assert.ok(has(session.open_slot(3), Flag.Slot) && session.slot() === 3, "an open level opens");
+  assert.deepEqual([...session.board_rect()], [48, 18, 408, 378]);
+  assert.deepEqual([...session.toolbox_rect()], [446, 6, 604, 112]);
+  assert.deepEqual([...session.strip_number_rect(0)], [10, 410, 30, 422]);
+  assert.equal(session.strip_number_rect(50).length, 0);
+  session.free();
+}
 
 let solved = 0;
 for (const game of [1, 2, 3, 4]) {

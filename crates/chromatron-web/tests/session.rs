@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use chromatron_web::save_text::{from_save_text, to_save_text};
-use chromatron_web::{Flag, Session};
+use chromatron_web::{Flag, LevelState, Session};
 
 /// Each game's cheat key as the browser reports it, and whether Control is held (Chromatron 4's
 /// Control-O).
@@ -436,4 +436,117 @@ fn a_forgotten_drag_ignores_the_stray_release() {
     assert!(!session.dragging());
     session.select(1, None, None);
     assert_eq!(session.copy().as_deref(), started(1).copy().as_deref());
+}
+
+#[test]
+fn the_levels_picker_sees_the_strip_states() {
+    assert_eq!(
+        Session::new().slot_state(0),
+        LevelState::Locked,
+        "no game yet"
+    );
+    let mut session = started(2);
+    assert_eq!(session.slot_state(0), LevelState::Current);
+    assert_eq!(
+        session.slot_state(4),
+        LevelState::Unlocked,
+        "a fresh Chromatron 2 opens slots 0-4"
+    );
+    assert_eq!(session.slot_state(5), LevelState::Locked);
+    assert_eq!(session.slot_state(50), LevelState::Locked, "past the strip");
+    assert_eq!(session.slot_state(u32::MAX), LevelState::Locked);
+    cheat_to(&mut session, 2, 1);
+    assert_eq!(session.slot_state(0), LevelState::Completed);
+    assert_eq!(session.slot_state(1), LevelState::Current);
+}
+
+#[test]
+fn a_level_opens_from_the_picker_only_when_unlocked() {
+    assert_eq!(Session::new().open_slot(0), 0, "no game yet");
+    let mut session = started(2);
+    assert_eq!(session.open_slot(5), 0, "locked");
+    assert_eq!(session.open_slot(50), 0, "past the strip");
+    assert_eq!(session.slot(), 0);
+    let flags = session.open_slot(3);
+    assert!(Flag::Redraw.is_in(flags) && Flag::Slot.is_in(flags));
+    assert_eq!(session.slot(), 3);
+    let flags = session.open_slot(3);
+    assert!(
+        Flag::Redraw.is_in(flags) && !Flag::Slot.is_in(flags),
+        "the current level starts again from its board"
+    );
+}
+
+#[test]
+fn opening_a_level_ends_a_drag() {
+    let mut session = started(1);
+    session.pointer_down(460.0, 20.0, 0, false, false, false);
+    session.pointer_move(100.0, 100.0);
+    assert!(session.dragging());
+    assert!(Flag::Redraw.is_in(session.open_slot(0)));
+    assert!(!session.dragging());
+    assert_eq!(
+        session.pointer_up(100.0, 100.0, 0),
+        0,
+        "the stray release is dropped"
+    );
+}
+
+#[test]
+fn the_page_regions_come_from_lumen_layout() {
+    let session = Session::new();
+    assert_eq!(session.board_rect(), [48, 18, 408, 378]);
+    assert_eq!(session.toolbox_rect(), [446, 6, 604, 112]);
+    assert_eq!(session.strip_number_rect(0), [10, 410, 30, 422]);
+    assert_eq!(session.strip_number_rect(49), [490, 430, 510, 442]);
+    assert!(session.strip_number_rect(50).is_empty());
+}
+
+#[test]
+fn every_strip_number_lies_in_its_rect() {
+    for game in 1..=4u8 {
+        let mut session = started(game);
+        session.render();
+        let rects: Vec<Vec<i32>> = (0..50)
+            .map(|slot| session.strip_number_rect(slot))
+            .collect();
+        let inside = |x: i32, y: i32| {
+            rects
+                .iter()
+                .any(|r| (r[0]..r[2]).contains(&x) && (r[1]..r[3]).contains(&y))
+        };
+        let drawn = |x: i32, y: i32| {
+            let i = ((y * 640 + x) * 4) as usize;
+            session.rgba()[i..i + 3] != [0xa4; 3]
+        };
+        for y in 390..480 {
+            for x in 0..640 {
+                if drawn(x, y) {
+                    assert!(inside(x, y), "game {game}: ({x}, {y})");
+                }
+            }
+        }
+        for (slot, r) in rects.iter().enumerate() {
+            let any = (r[1]..r[3]).any(|y| (r[0]..r[2]).any(|x| drawn(x, y)));
+            assert!(any, "game {game}: slot {slot}'s number is drawn");
+        }
+    }
+}
+
+#[test]
+fn a_drop_between_the_page_regions_leaves_the_piece() {
+    // Between the portrait views the page sends (-100, -100), a point every hit test misses.
+    let mut session = started(1);
+    let before = session.copy();
+    session.pointer_down(460.0, 20.0, 0, false, false, false);
+    session.pointer_move(252.0, 198.0);
+    assert!(session.dragging());
+    session.pointer_move(-100.0, -100.0);
+    session.pointer_up(-100.0, -100.0, 0);
+    assert!(!session.dragging());
+    assert_eq!(
+        session.copy(),
+        before,
+        "the reflector is back in the toolbox"
+    );
 }

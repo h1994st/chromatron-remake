@@ -12,6 +12,10 @@ const LINE_HEIGHT = 16; // frame pixels
 const BASELINE = 12; // the first baseline below a box's top, frame pixels
 const GUTTER = 8; // CSS pixels kept around the game outside full screen
 const GAMES = [1, 2, 3, 4];
+// `?layout=touch` (or `desktop`) forces a layout whatever the pointer: a debug and test hook
+// (`just web-shots`). It is never stored.
+const forcedLayout = new URLSearchParams(location.search).get("layout");
+const coarsePointer = matchMedia("(pointer: coarse)");
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
@@ -20,6 +24,10 @@ const pixels = $("pixels");
 const text = $("text");
 const pixelContext = pixels.getContext("2d");
 const textContext = text.getContext("2d");
+const header = document.querySelector("header");
+const footer = document.querySelector("footer");
+const boardPart = $("board-part");
+const toolboxPart = $("toolbox-part");
 
 // localStorage that never throws: reads say whether storage answered at all.
 const storage = {
@@ -44,6 +52,20 @@ let wasm;
 let session;
 let Flag;
 let displayScale;
+let LevelState;
+// web/touch_layout.js: the pure layout and touch rules.
+let touchLayout;
+// "desktop", "portrait" or "landscape" (touchLayout.layoutMode); "" before the first layout.
+let mode = "";
+// The canvases that show the frame, each {canvas, context, frame}: the whole frame, or in
+// portrait the board and the toolbox. `views` holds the ones on screen.
+let frameView;
+let boardView;
+let toolboxView;
+let views = [];
+// Whether the RGBA frame in wasm memory holds a rendered frame yet.
+let framed = false;
+let layoutPending = false;
 let game = 0;
 const started = new Set();
 // Games this tab changed since it last stored them: only these are written, so a tab left open
@@ -116,6 +138,9 @@ function gameFromHash() {
 
 function selectGame(n) {
   if (!GAMES.includes(n) || n === game) return;
+  // Any drag in the game left behind ends as every drag ends (the piece stays put), before its
+  // save is stored.
+  endDrag();
   if (game) flush(game);
   const save = storage.read(`chromatron${n}.save`);
   const last = storage.read(`chromatron${n}.lastLevelSlot`);
@@ -140,9 +165,7 @@ function selectGame(n) {
   storage.write("chromatron.game", String(n));
   if (location.hash !== `#${n}`) history.replaceState(null, "", `#${n}`);
   document.title = session.title();
-  for (const button of document.querySelectorAll("[data-game]")) {
-    button.setAttribute("aria-current", String(Number(button.dataset.game) === n));
-  }
+  $("game-select").value = String(n);
   schedule();
 }
 
@@ -160,18 +183,40 @@ function storedElsewhere(event) {
   }
 }
 
+// The engine's RGBA frame in wasm memory as ImageData, without a copy.
+function frameImage() {
+  const rgba = new Uint8ClampedArray(wasm.memory.buffer, session.rgba_ptr(), FRAME_WIDTH * FRAME_HEIGHT * 4);
+  return new ImageData(rgba, FRAME_WIDTH, FRAME_HEIGHT);
+}
+
+// Copies frame rect `rect` into each view on screen that shows part of it.
+function blit(image, rect) {
+  for (const view of views) {
+    const part = touchLayout.intersect(rect, view.frame);
+    if (part !== null) {
+      const { left, top } = view.frame;
+      view.context.putImageData(image, -left, -top, part.left, part.top, part.right - part.left, part.bottom - part.top);
+    }
+  }
+}
+
+// Fills the views on screen from the last frame, after a layout change.
+function blitAll() {
+  if (framed) blit(frameImage(), frameView.frame);
+}
+
 function paint() {
   framePending = false;
   const count = session.render();
   if (count > 0) {
-    const memory = wasm.memory.buffer;
-    const rgba = new Uint8ClampedArray(memory, session.rgba_ptr(), FRAME_WIDTH * FRAME_HEIGHT * 4);
-    const image = new ImageData(rgba, FRAME_WIDTH, FRAME_HEIGHT);
-    const rects = new Int32Array(memory, session.dirty_ptr(), count * 4);
+    framed = true;
+    const image = frameImage();
+    const rects = new Int32Array(wasm.memory.buffer, session.dirty_ptr(), count * 4);
     for (let i = 0; i < count; i += 1) {
       const [left, top, right, bottom] = rects.subarray(i * 4, i * 4 + 4);
-      pixelContext.putImageData(image, 0, 0, left, top, right - left, bottom - top);
+      blit(image, { left, top, right, bottom });
     }
+    if (levelsDialog.open) refreshLevels(image);
   }
   if (session.text_changed()) {
     textBoxes = [];
@@ -179,8 +224,22 @@ function paint() {
       const [left, top, right, bottom] = session.text_rect(i);
       textBoxes.push({ text: session.text(i), left, top, right, bottom });
     }
-    drawText();
+    if (mode === "portrait") listText();
+    else drawText();
   }
+}
+
+// Portrait: the frame's text boxes as HTML paragraphs, in the engine's order (the win text, the
+// level name, the hint, the notices). New texts (another level or game, a win) show from the top.
+function listText() {
+  $("text-list").replaceChildren(
+    ...textBoxes.map((box) => {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = box.text.replace(/\r\n?/g, "\n");
+      return paragraph;
+    }),
+  );
+  $("texts").scrollTop = 0;
 }
 
 // Words that fit `width` frame pixels per line; a word longer than a line breaks between
@@ -239,12 +298,94 @@ function drawText() {
   }
 }
 
+// A canvas showing frame rect `rect` ([left, top, right, bottom]), one backing pixel per frame pixel.
+function partView(canvas, rect) {
+  const frame = touchLayout.rectOf(rect);
+  canvas.width = frame.right - frame.left;
+  canvas.height = frame.bottom - frame.top;
+  return { canvas, context: canvas.getContext("2d"), frame };
+}
+
+function sizeView(view, viewScale) {
+  view.canvas.style.width = `${(view.frame.right - view.frame.left) * viewScale}px`;
+  view.canvas.style.height = `${(view.frame.bottom - view.frame.top) * viewScale}px`;
+}
+
+// Switches to layout `next`. The regions under a finger change, so any drag ends (the piece stays
+// put); the game itself carries on.
+function setMode(next) {
+  if (next === mode) return;
+  if (mode !== "") endDrag();
+  mode = next;
+  const root = document.documentElement;
+  root.dataset.layout = mode;
+  root.classList.toggle("touch", mode !== "desktop");
+  $("wheel").hidden = mode !== "desktop";
+  $("clockwise").hidden = mode === "desktop";
+  $("levels-open").hidden = mode !== "portrait";
+  if (mode !== "portrait" && levelsDialog.open) levelsDialog.close();
+  // A hidden toggle stays off: the desktop's taps (mouse clicks) never turn clockwise by surprise.
+  if (mode === "desktop") {
+    clockwise = false;
+    $("clockwise").setAttribute("aria-pressed", "false");
+  }
+  document.body.style.paddingLeft = "";
+  views = mode === "portrait" ? [boardView, toolboxView] : [frameView];
+  // The touch layouts fit one screen: the credits scroll with the texts in portrait, and sit at
+  // the end of the help in landscape, instead of below the page.
+  if (mode === "portrait") $("texts").append(footer);
+  else if (mode === "landscape") helpDialog.querySelector(".sheet").append(footer);
+  else if (footer.parentElement !== document.body) document.body.append(footer);
+  blitAll();
+  if (mode === "portrait") listText();
+}
+
 function layout() {
-  const gutter = document.fullscreenElement ? 0 : GUTTER;
-  scale = displayScale(stage.clientWidth - 2 * gutter, stage.clientHeight - 2 * gutter);
+  const width = window.innerWidth;
+  const height = window.innerHeight;
+  setMode(touchLayout.layoutMode({ forced: forcedLayout, coarse: coarsePointer.matches, width, height }));
+  const ratio = window.devicePixelRatio || 1;
+  if (mode === "portrait") {
+    // The board, the toolbox and at least TEXT_ROOM of texts share the stage, which CSS sizes to
+    // the small viewport (100svh): Safari's bars collapsing changes nothing.
+    const style = getComputedStyle(stage);
+    const gaps = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom) + 2 * parseFloat(style.rowGap);
+    const scales = touchLayout.portraitScales({
+      width: document.documentElement.clientWidth,
+      height: stage.clientHeight - gaps - touchLayout.TEXT_ROOM,
+      ratio,
+      board: boardView.frame,
+      toolbox: toolboxView.frame,
+    });
+    sizeView(boardView, scales.board);
+    sizeView(toolboxView, scales.toolbox);
+    return;
+  }
+  if (mode === "landscape") {
+    // Edge to edge beside the toolbar, which runs down the left side. CSS sizes the stage to the
+    // small viewport (100svh), so Safari's bars collapsing changes nothing.
+    const rail = header.offsetWidth;
+    document.body.style.paddingLeft = `${rail}px`;
+    const fit = Math.min((document.documentElement.clientWidth - rail) / FRAME_WIDTH, stage.clientHeight / FRAME_HEIGHT);
+    scale = touchLayout.fillScale(fit, ratio);
+  } else {
+    const gutter = document.fullscreenElement ? 0 : GUTTER;
+    scale = displayScale(stage.clientWidth - 2 * gutter, stage.clientHeight - 2 * gutter);
+  }
   board.style.width = `${FRAME_WIDTH * scale}px`;
   board.style.height = `${FRAME_HEIGHT * scale}px`;
   drawText();
+}
+
+// Lays out on the next frame, never inside a ResizeObserver callback: a size change made there
+// is reported as a "ResizeObserver loop" error, which the page would show as a crash.
+function requestLayout() {
+  if (layoutPending) return;
+  layoutPending = true;
+  requestAnimationFrame(() => {
+    layoutPending = false;
+    layout();
+  });
 }
 
 function watchPixelRatio() {
@@ -258,13 +399,14 @@ function watchPixelRatio() {
   );
 }
 
-// The pointer in frame pixels (fractional; Rust floors).
-function framePoint(event) {
-  const r = pixels.getBoundingClientRect();
-  return [
-    ((event.clientX - r.left) * FRAME_WIDTH) / r.width,
-    ((event.clientY - r.top) * FRAME_HEIGHT) / r.height,
-  ];
+// A client point in frame pixels (fractional; Rust floors) through the views on screen.
+function framePoint(clientX, clientY) {
+  const live = views.map((view) => ({ frame: view.frame, box: view.canvas.getBoundingClientRect() }));
+  return touchLayout.framePointAt(live, clientX, clientY);
+}
+
+function isView(target) {
+  return target === pixels || target === boardPart || target === toolboxPart;
 }
 
 // Touch and pen presses are primary. While "Turn clockwise" is on, a touch or pen release that
@@ -272,16 +414,17 @@ function framePoint(event) {
 // a dragged piece still drops (the engine neither starts nor drops a drag on the secondary button).
 // Over the level strip the game ignores the secondary button, so a tap there stays primary.
 function pressButton(event) {
-  return event.pointerType === "mouse" ? event.button : 0;
+  return touchLayout.isHeldPointer(event.pointerType) ? 0 : event.button;
 }
 
 function releaseButton(event, x, y) {
-  if (event.pointerType === "mouse") return event.button;
+  if (!touchLayout.isHeldPointer(event.pointerType)) return event.button;
   return clockwise && !session.dragging() && !session.on_strip(x, y) ? 2 : 0;
 }
 
+// A field that takes typed text. A <select> is not one: ⌘C/⌘V and the game's keys work on the game picker.
 function isTextField(element) {
-  return element instanceof Element && element.closest("input, textarea, select, [contenteditable]") !== null;
+  return element instanceof Element && element.closest("input, textarea, [contenteditable]") !== null;
 }
 
 function isControl(element) {
@@ -350,29 +493,103 @@ function clipboardShortcut(event) {
   return true;
 }
 
-const helpDialog = $("help");
-// What had the focus when the help opened; only a text field gets it back on close.
-let helpOpener = null;
-let backdropPress = false;
-// The pointer the canvas has captured, so the help can let go of it.
-let capturedPointer = null;
+const actionsMenu = $("actions-menu");
+const gameSelect = $("game-select");
 
-function helpOpen() {
-  return helpDialog.open;
+// The keys a focused game picker keeps; every other key is the game's (the keydown listener).
+function pickerKey(key) {
+  return key === "Tab" || key === "Enter" || key === "Escape" || key.startsWith("Arrow");
 }
 
-function openHelp() {
-  if (helpDialog.open) return;
-  apply(session.pointer_cancel());
-  helpOpener = document.activeElement;
+function menuOpen() {
+  return typeof actionsMenu.showPopover === "function" ? actionsMenu.matches(":popover-open") : !actionsMenu.hidden;
+}
+
+// The Actions menu sits under its button, or beside it when the toolbar runs down the side
+// (landscape), always inside the viewport.
+function placeMenu() {
+  const button = $("actions").getBoundingClientRect();
+  const beside = mode === "landscape";
+  const left = beside ? button.right + 4 : button.left;
+  const top = beside ? button.top : button.bottom + 4;
+  const right = document.documentElement.clientWidth - actionsMenu.offsetWidth - 8;
+  const bottom = window.innerHeight - actionsMenu.offsetHeight - 8;
+  actionsMenu.style.left = `${Math.max(8, Math.min(left, right))}px`;
+  actionsMenu.style.top = `${Math.max(8, Math.min(top, bottom))}px`;
+}
+
+function closeMenu() {
+  if (typeof actionsMenu.hidePopover !== "function") actionsMenu.hidden = true;
+  else if (actionsMenu.matches(":popover-open")) actionsMenu.hidePopover();
+}
+
+// A popover opened by its button's popovertarget (light dismiss, Escape); a browser without
+// popovers toggles it as a plain panel with its own outside-click and Escape dismissal.
+// Choosing an item closes it and gives the keys back to the game.
+function wireMenu() {
+  if (typeof actionsMenu.showPopover === "function") {
+    // Placed once shown, when its size can be measured.
+    actionsMenu.addEventListener("toggle", (event) => {
+      if (event.newState === "open") placeMenu();
+    });
+  } else {
+    actionsMenu.hidden = true;
+    $("actions").addEventListener("click", () => {
+      actionsMenu.hidden = !actionsMenu.hidden;
+      if (!actionsMenu.hidden) placeMenu();
+    });
+    document.addEventListener("pointerdown", (event) => {
+      if (!(event.target instanceof Element) || event.target.closest("#actions-menu, #actions")) return;
+      closeMenu();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeMenu();
+    });
+  }
+  // The menu is placed for one window size.
+  window.addEventListener("resize", closeMenu);
+  window.addEventListener("orientationchange", closeMenu);
+  actionsMenu.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element) || !event.target.closest("button")) return;
+    closeMenu();
+    requestAnimationFrame(() => {
+      if (isControl(document.activeElement)) document.activeElement.blur();
+    });
+  });
+}
+
+const helpDialog = $("help");
+const levelsDialog = $("levels");
+// What had the focus when a dialog opened; only a text field gets it back on close.
+let dialogOpener = null;
+// The pointer the stage has captured, so a dialog or a layout change can let go of it.
+let capturedPointer = null;
+// The primary pointer's press (touchLayout.startPress) until its release; null when none.
+let press = null;
+
+function dialogOpen() {
+  return helpDialog.open || levelsDialog.open;
+}
+
+// Ends any drag as the app does on focus loss (the piece stays put) and lets go of the pointer.
+function endDrag() {
+  press = null;
   if (capturedPointer !== null) {
     try {
-      pixels.releasePointerCapture(capturedPointer);
+      stage.releasePointerCapture(capturedPointer);
     } catch {
       // The capture is already gone.
     }
     capturedPointer = null;
   }
+  apply(session.pointer_cancel());
+}
+
+function openHelp() {
+  if (dialogOpen()) return;
+  closeMenu();
+  endDrag();
+  dialogOpener = document.activeElement;
   helpDialog.showModal();
 }
 
@@ -383,28 +600,104 @@ function showPlatformKeys() {
   for (const key of helpDialog.querySelectorAll("kbd.mod")) key.textContent = "Ctrl";
 }
 
-function wireHelp() {
-  showPlatformKeys();
-  $("help-open").addEventListener("click", () => openHelp());
-  $("help-close").addEventListener("click", () => helpDialog.close());
+// Closes `dialog` with `closeButton`, or with a press and a click both on its backdrop.
+function wireDialog(dialog, closeButton) {
+  let backdropPress = false;
+  closeButton.addEventListener("click", () => dialog.close());
   // The dialog has no padding of its own, so a click on it itself is a click on the backdrop.
   // Closes only when the press and the click both landed on the dialog itself, so a text
   // selection dragged from the sheet onto the backdrop does not.
-  helpDialog.addEventListener("pointerdown", (event) => {
-    backdropPress = event.target === helpDialog;
+  dialog.addEventListener("pointerdown", (event) => {
+    backdropPress = event.target === dialog;
   });
-  helpDialog.addEventListener("click", (event) => {
-    const press = backdropPress;
+  dialog.addEventListener("click", (event) => {
+    const fromBackdrop = backdropPress;
     backdropPress = false;
-    if (press && event.target === helpDialog) helpDialog.close();
+    if (fromBackdrop && event.target === dialog) dialog.close();
   });
-  helpDialog.addEventListener("close", () => {
-    const opener = helpOpener;
-    helpOpener = null;
+  dialog.addEventListener("close", () => {
+    const opener = dialogOpener;
+    dialogOpener = null;
     // Keys go back to the game: only a text field gets its focus back.
     if (opener instanceof HTMLElement && opener.isConnected && isTextField(opener)) opener.focus();
     else if (isControl(document.activeElement)) document.activeElement.blur();
   });
+}
+
+function wireHelp() {
+  showPlatformKeys();
+  $("help-open").addEventListener("click", () => openHelp());
+  wireDialog(helpDialog, $("help-close"));
+}
+
+// The Levels picker (portrait): one button per strip slot, showing the slot's number copied from
+// the frame, so it has the strip's own colours. Each is {slot, button, context, frame}.
+const levelButtons = [];
+let levelWords;
+
+function buildLevels() {
+  levelWords = new Map([
+    [LevelState.Current, "current"],
+    [LevelState.Completed, "solved"],
+    [LevelState.Unlocked, "open"],
+    [LevelState.Locked, "locked"],
+  ]);
+  for (let slot = 0; ; slot += 1) {
+    const rect = session.strip_number_rect(slot);
+    if (rect.length === 0) break;
+    const frame = touchLayout.rectOf(rect);
+    const canvas = document.createElement("canvas");
+    canvas.width = frame.right - frame.left;
+    canvas.height = frame.bottom - frame.top;
+    canvas.setAttribute("aria-hidden", "true");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.append(canvas);
+    button.addEventListener("click", () => {
+      // The current level stays as it is: choosing it only closes the picker.
+      if (session.slot_state(slot) !== LevelState.Current) apply(session.open_slot(slot));
+      levelsDialog.close();
+    });
+    $("level-grid").append(button);
+    levelButtons.push({ slot, button, context: canvas.getContext("2d"), frame });
+  }
+}
+
+function setAttributeIfChanged(element, name, value) {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+}
+
+// Each level's state and, from `image` (the frame) when given, its number.
+function refreshLevels(image) {
+  for (const { slot, button, context, frame } of levelButtons) {
+    const state = session.slot_state(slot);
+    const word = levelWords.get(state);
+    const locked = state === LevelState.Locked;
+    if (button.disabled !== locked) button.disabled = locked;
+    setAttributeIfChanged(button, "aria-current", String(state === LevelState.Current));
+    setAttributeIfChanged(button, "aria-label", `Level ${slot + 1}, ${word}`);
+    setAttributeIfChanged(button, "data-state", word);
+    if (image) {
+      const { left, top, right, bottom } = frame;
+      context.putImageData(image, -left, -top, left, top, right - left, bottom - top);
+    }
+  }
+}
+
+function openLevels() {
+  if (dialogOpen()) return;
+  closeMenu();
+  endDrag();
+  dialogOpener = document.activeElement;
+  refreshLevels(framed ? frameImage() : null);
+  levelsDialog.showModal();
+  levelButtons.find(({ button }) => button.getAttribute("aria-current") === "true")?.button.focus();
+}
+
+function wireLevels() {
+  buildLevels();
+  $("levels-open").addEventListener("click", () => openLevels());
+  wireDialog(levelsDialog, $("levels-close"));
 }
 
 // First visit only: shows the help once, if storage can say it has not been shown before.
@@ -419,38 +712,83 @@ function saveAll() {
 }
 
 function wire() {
-  pixels.addEventListener("pointerdown", (event) => {
-    if (!event.isPrimary) return;
+  // A press that closes the Actions menu only closes it: it does not reach the game.
+  let dismissPress = false;
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      const outside = event.target instanceof Node && !actionsMenu.contains(event.target) && !$("actions").contains(event.target);
+      dismissPress = menuOpen() && outside;
+      if (dismissPress) closeMenu();
+    },
+    true,
+  );
+  // Presses start on a view (the frame, or a portrait part); the stage captures the pointer, so a
+  // drag carries on across views and off them.
+  stage.addEventListener("pointerdown", (event) => {
+    if (!event.isPrimary || !isView(event.target) || dismissPress) return;
     event.preventDefault();
     // preventDefault keeps an old selection alive; clear it, or ⌘C would copy it instead.
     window.getSelection()?.removeAllRanges();
     if (isControl(document.activeElement)) document.activeElement.blur();
-    pixels.setPointerCapture(event.pointerId);
+    stage.setPointerCapture(event.pointerId);
     capturedPointer = event.pointerId;
-    const [x, y] = framePoint(event);
+    // A touch or pen press waits for TOUCH_SLOP before it drags; the press itself is the real
+    // point, so it picks up what is under the finger.
+    press = touchLayout.startPress(event.pointerType, event.clientX, event.clientY);
+    const [x, y] = framePoint(event.clientX, event.clientY);
     apply(session.pointer_down(x, y, pressButton(event), event.shiftKey, event.altKey, event.ctrlKey));
   });
-  pixels.addEventListener("pointermove", (event) => {
-    if (helpOpen() || !event.isPrimary || event.buttons === 0) return;
-    const [x, y] = framePoint(event);
+  stage.addEventListener("pointermove", (event) => {
+    if (press === null || dialogOpen() || !event.isPrimary || event.buttons === 0) return;
+    // A touch picks a piece up at the finger, so a piece near a region's top edge still starts a
+    // drag; from then on it sends the point LIFT px above the finger, where the engine draws the piece.
+    const wasDragging = session.dragging();
+    const point = touchLayout.movePoint(press, event.clientX, event.clientY, wasDragging);
+    if (point === null) return;
+    const [x, y] = framePoint(point[0], point[1]);
     apply(session.pointer_move(x, y));
+    if (!wasDragging && session.dragging()) {
+      // This move started the drag: lift the piece above the finger at once.
+      const [liftedX, liftedY] = touchLayout.movePoint(press, event.clientX, event.clientY, true);
+      if (liftedY !== point[1]) {
+        const [fx, fy] = framePoint(liftedX, liftedY);
+        apply(session.pointer_move(fx, fy));
+      }
+    }
   });
-  pixels.addEventListener("pointerup", (event) => {
+  stage.addEventListener("pointerup", (event) => {
+    if (!event.isPrimary) return;
     capturedPointer = null;
-    if (helpOpen() || !event.isPrimary) return;
-    const [x, y] = framePoint(event);
+    const ended = press;
+    press = null;
+    if (ended === null || dialogOpen()) return;
+    // A touch that moved without a piece turns nothing: its release is away from its press.
+    const dragging = session.dragging();
+    if (touchLayout.isSwipe(ended, dragging)) {
+      apply(session.pointer_cancel());
+      return;
+    }
+    // A drag drops under the lifted point, where the piece is drawn.
+    const [releaseX, releaseY] = touchLayout.releasePoint(ended, event.clientX, event.clientY, dragging);
+    const [x, y] = framePoint(releaseX, releaseY);
     apply(session.pointer_up(x, y, releaseButton(event, x, y)));
   });
-  pixels.addEventListener("pointercancel", (event) => {
+  stage.addEventListener("pointercancel", (event) => {
+    if (!event.isPrimary) return;
     capturedPointer = null;
-    if (!helpOpen() && event.isPrimary) apply(session.pointer_cancel());
+    press = null;
+    if (!dialogOpen()) apply(session.pointer_cancel());
   });
-  pixels.addEventListener("contextmenu", (event) => event.preventDefault());
+  stage.addEventListener("contextmenu", (event) => {
+    if (isView(event.target)) event.preventDefault();
+  });
   pixels.addEventListener(
     "wheel",
     (event) => {
       // Ctrl+wheel (and trackpad pinch) stays the browser's zoom.
-      if (!wheelOn || event.ctrlKey || helpOpen()) return;
+      // Only the desktop layout has the wheel toggle; a touch layout never changes level by scrolling.
+      if (mode !== "desktop" || !wheelOn || event.ctrlKey || dialogOpen()) return;
       event.preventDefault();
       const inPixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
       apply(session.wheel(event.deltaX, event.deltaY, inPixels, event.timeStamp));
@@ -459,13 +797,17 @@ function wire() {
   );
 
   document.addEventListener("keydown", (event) => {
-    if (helpOpen() || event.isComposing) return;
-    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !isControl(event.target)) {
+    if (dialogOpen() || event.isComposing) return;
+    // A focused game picker keeps only its own keys (pickerKey), so it never swallows Space, r, = or -.
+    const control = isControl(event.target) && !(event.target === gameSelect && !pickerKey(event.key));
+    if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !control) {
       event.preventDefault();
       openHelp();
       return;
     }
-    if (clipboardShortcut(event) || isControl(event.target)) return;
+    if (clipboardShortcut(event) || control) return;
+    // No type-ahead: a typed letter on the picker would switch games.
+    if (event.target === gameSelect && event.key.length === 1 && !event.ctrlKey && !event.metaKey) event.preventDefault();
     const altGraph = event.getModifierState("AltGraph");
     if (event.altKey && !altGraph) return;
     const ctrl = event.ctrlKey && !altGraph;
@@ -475,7 +817,7 @@ function wire() {
   });
   document.addEventListener("copy", (event) => {
     copyPending = false;
-    if (helpOpen() || isTextField(document.activeElement) || hasSelection()) return;
+    if (dialogOpen() || isTextField(document.activeElement) || hasSelection()) return;
     const solution = session.copy();
     if (solution === undefined || !event.clipboardData) return;
     event.clipboardData.setData("text/plain", solution);
@@ -484,14 +826,30 @@ function wire() {
   });
   document.addEventListener("paste", (event) => {
     pastePending = false;
-    if (helpOpen() || isTextField(document.activeElement) || !event.clipboardData) return;
+    if (dialogOpen() || isTextField(document.activeElement) || !event.clipboardData) return;
     event.preventDefault();
     pasteSolution(event.clipboardData.getData("text/plain"));
   });
 
-  for (const button of document.querySelectorAll("[data-game]")) {
-    button.addEventListener("click", () => selectGame(Number(button.dataset.game)));
-  }
+  // The game picker gives the keys back to the game once it closes, chosen or not. Arrow keys
+  // only open it: on a closed picker they would switch games at once on Windows and Linux.
+  const releasePicker = () => requestAnimationFrame(() => gameSelect.blur());
+  gameSelect.addEventListener("change", () => {
+    selectGame(Number(gameSelect.value));
+    releasePicker();
+  });
+  gameSelect.addEventListener("keyup", (event) => {
+    if (event.key === "Enter" || event.key === "Escape") releasePicker();
+  });
+  gameSelect.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    try {
+      gameSelect.showPicker();
+    } catch {
+      // No showPicker here, or no user activation: the arrow does nothing.
+    }
+  });
   for (const button of document.querySelectorAll("[data-command]")) {
     button.addEventListener("click", () => apply(session.command(button.dataset.command)));
   }
@@ -502,7 +860,9 @@ function wire() {
   });
   $("copy").addEventListener("click", copyWithClipboardApi);
   $("paste").addEventListener("click", pasteWithClipboardApi);
+  wireMenu();
   wireHelp();
+  wireLevels();
   const wheelButton = $("wheel");
   wheelButton.setAttribute("aria-pressed", String(wheelOn));
   wheelButton.addEventListener("click", () => {
@@ -511,9 +871,6 @@ function wire() {
     wheelButton.setAttribute("aria-pressed", String(wheelOn));
   });
   const clockwiseButton = $("clockwise");
-  if (navigator.maxTouchPoints > 0 || matchMedia("(pointer: coarse)").matches) {
-    clockwiseButton.hidden = false;
-  }
   clockwiseButton.addEventListener("click", () => {
     clockwise = !clockwise;
     clockwiseButton.setAttribute("aria-pressed", String(clockwise));
@@ -522,11 +879,15 @@ function wire() {
   if (document.fullscreenEnabled) fullscreenButton.hidden = false;
   fullscreenButton.addEventListener("click", () => {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else stage.requestFullscreen().catch(() => say("Full screen is not available here."));
+    else {
+      // The desktop shows the game alone; a touch layout keeps its toolbar and parts.
+      const target = mode === "desktop" ? stage : document.documentElement;
+      target.requestFullscreen().catch(() => say("Full screen is not available here."));
+    }
   });
 
   window.addEventListener("blur", () => {
-    apply(session.pointer_cancel());
+    endDrag();
     saveAll();
   });
   window.addEventListener("pageshow", (event) => {
@@ -536,7 +897,7 @@ function wire() {
   window.addEventListener("storage", storedElsewhere);
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
-      apply(session.pointer_cancel());
+      endDrag();
       saveAll();
     }
   });
@@ -544,23 +905,31 @@ function wire() {
     const n = gameFromHash();
     if (n !== undefined) selectGame(n);
   });
-  new ResizeObserver(layout).observe(stage);
+  frameView = { canvas: pixels, context: pixelContext, frame: touchLayout.rectOf([0, 0, FRAME_WIDTH, FRAME_HEIGHT]) };
+  boardView = partView(boardPart, session.board_rect());
+  toolboxView = partView(toolboxPart, session.toolbox_rect());
+  new ResizeObserver(requestLayout).observe(stage);
+  window.addEventListener("resize", requestLayout);
+  coarsePointer.addEventListener("change", requestLayout);
+  document.addEventListener("fullscreenchange", requestLayout);
   watchPixelRatio();
 }
 
 function showFatal(error) {
   console.error(error);
-  board.hidden = true;
+  for (const element of [board, boardPart, toolboxPart]) element.hidden = true;
   $("fatal").hidden = false;
 }
 
 async function start() {
   try {
     const glue = await import(`./chromatron_web.js?v=${BUILD}`);
+    touchLayout = await import(`./touch_layout.js?v=${BUILD}`);
     wasm = await glue.default({
       module_or_path: new URL(`chromatron_web_bg.wasm?v=${BUILD}`, import.meta.url),
     });
     Flag = glue.Flag;
+    LevelState = glue.LevelState;
     displayScale = glue.display_scale;
     session = new glue.Session();
     wire();

@@ -39,7 +39,9 @@ pub use piece::{BLUE, Colour, DX, DY, Dir, GREEN, Piece, RED, WHITE, turn};
 pub use progress::{
     PROGRESS_SLOTS, resume_slot, update_unlocked, update_unlocked_by_count, update_unlocked_fixed,
 };
-pub use render::{BACKGROUND, TextBox, TextBoxes, cell_sprite, render, text_boxes};
+pub use render::{
+    BACKGROUND, TextBox, TextBoxes, cell_sprite, render, strip_number_rect, text_boxes,
+};
 pub use rule_set::{Passes, RuleSet, Splitter, TextBoxSet, Unlock};
 pub use save::{SaveData, SaveError, decode_save, encode_save};
 pub use solution::{apply_solution, encode_solution, stored_solution};

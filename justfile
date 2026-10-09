@@ -95,8 +95,8 @@ web: _require-originals
     wasm-bindgen --target web --no-typescript --out-dir "$out" \
         "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-unknown-unknown/web-release/chromatron_web.wasm"
     cp "{{justfile_directory()}}"/web/* "$out/"
-    # Every page URL carries a hash of all shipped files (wasm, glue, main.js, style.css, index.html template), so a browser never mixes files of two deploys.
-    build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js style.css index.html | shasum -a 256 | cut -c 1-12)"
+    # Every page URL carries a hash of all shipped files (wasm, glue, main.js, touch_layout.js, style.css, index.html template), so a browser never mixes files of two deploys.
+    build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js touch_layout.js style.css index.html | shasum -a 256 | cut -c 1-12)"
     perl -pi -e "s/__BUILD__/$build/g" "$out/index.html" "$out/main.js"
     for file in "$out"/*; do
         printf '%8d bytes %8d gzip  %s\n' "$(wc -c < "$file")" "$(gzip -9 -c "$file" | wc -c)" "$(basename "$file")"
@@ -106,9 +106,14 @@ web: _require-originals
 web-serve port="8000": web
     cd "{{justfile_directory()}}/dist/web" && python3 -m http.server {{port}} --bind 127.0.0.1
 
-# Build dist/web/ and smoke-test it in Node: every game starts, every tests/solutions/ fixture wins and reloads, size budgets hold
+# Build dist/web/ and smoke-test it in Node: every game starts, every tests/solutions/ fixture wins and reloads, size budgets hold, the touch layout rules hold
 web-check: web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_check.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/touch_layout_check.mjs" "{{justfile_directory()}}/dist/web"
+
+# Build dist/web/ and photograph it in headless Google Chrome (phone portrait and landscape, desktop) into <dir> (relative to the repo; default re/out/web-shots, git-ignored), checking each view; local only, needs Chrome
+web-shots dir="re/out/web-shots": web
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"
 
 # Run a game's app (game: 1-4)
 run game:
