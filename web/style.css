@@ -177,7 +177,28 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
   line-height: 1.45;
   white-space: pre-line;
 }
+/* No long-press selection or callout on the game, its texts and the toolbar (the help keeps its own). */
+#stage, header {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 #texts p { margin: 0 0 10px; }
+#next-level {
+  display: flex;
+  width: 100%;
+  min-height: 48px;
+  margin: 0 0 10px;
+  padding: 10px 16px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--page);
+  background: var(--accent);
+  border-color: var(--accent);
+  border-radius: 10px;
+  touch-action: manipulation;
+}
+#next-level[hidden] { display: none; }
 #texts p:last-child { margin-bottom: 0; }
 #texts footer { padding: 16px 0 0; }
 /* Landscape: the toolbar runs down the left side, so the frame gets the whole height. */

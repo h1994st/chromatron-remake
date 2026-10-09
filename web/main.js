@@ -81,6 +81,20 @@ let scale = 1;
 let framePending = false;
 let textBoxes = [];
 let messageTimer = 0;
+// The game's own "click for the next level" text (Session.click_next), read once per game select.
+let clickNext = "";
+// What a touch layout says instead of it: there is no spacebar, but there are a Next level button
+// (portrait) and the level numbers and ▶ (landscape).
+const TOUCH_NEXT = {
+  portrait: "Tap Next level or pick a level from Levels.",
+  landscape: "Tap a level number or ▶ for the next level.",
+};
+// Portrait: shown right under "You win!" while the level is won and a next level is open.
+const nextButton = document.createElement("button");
+nextButton.type = "button";
+nextButton.id = "next-level";
+nextButton.hidden = true;
+nextButton.textContent = "Next level ▶";
 // A ⌘/Ctrl+C or V whose copy or paste event has not fired yet (see clipboardShortcut).
 let copyPending = false;
 let pastePending = false;
@@ -165,6 +179,7 @@ function selectGame(n) {
   storage.write("chromatron.game", String(n));
   if (location.hash !== `#${n}`) history.replaceState(null, "", `#${n}`);
   document.title = session.title();
+  clickNext = session.click_next();
   $("game-select").value = String(n);
   schedule();
 }
@@ -227,6 +242,14 @@ function paint() {
     if (mode === "portrait") listText();
     else drawText();
   }
+  updateNextButton();
+}
+
+// A text box's string as this layout shows it: the game's click_next, matched by equality, is
+// reworded on the touch layouts and stays the game's own on the desktop.
+function shownText(string) {
+  const touchText = TOUCH_NEXT[mode];
+  return touchText !== undefined && clickNext !== "" && string === clickNext ? touchText : string;
 }
 
 // Portrait: the frame's text boxes as HTML paragraphs, in the engine's order (the win text, the
@@ -235,11 +258,28 @@ function listText() {
   $("text-list").replaceChildren(
     ...textBoxes.map((box) => {
       const paragraph = document.createElement("p");
-      paragraph.textContent = box.text.replace(/\r\n?/g, "\n");
+      paragraph.textContent = shownText(box.text).replace(/\r\n?/g, "\n");
       return paragraph;
     }),
   );
   $("texts").scrollTop = 0;
+  updateNextButton();
+}
+
+// The Next level button shows in portrait while the level is won and the next one is open (on the
+// last level the toolbar's Next does nothing, so there is no button). It sits after the first text,
+// "You win!"; listText rebuilds the list, so this puts it back.
+function updateNextButton() {
+  const list = $("text-list");
+  const show = mode === "portrait" && session.won() && session.slot_state(session.slot() + 1) !== LevelState.Locked;
+  if (nextButton.hidden !== !show) nextButton.hidden = !show;
+  if (!show) {
+    nextButton.remove();
+  } else if (nextButton.parentElement !== list) {
+    const first = list.firstElementChild;
+    if (first) first.after(nextButton);
+    else list.append(nextButton);
+  }
 }
 
 // Words that fit `width` frame pixels per line; a word longer than a line breaks between
@@ -285,8 +325,11 @@ function drawText() {
   context.fillStyle = "#000";
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
-  for (const box of textBoxes) {
-    const lines = wrapLines(context, box.text, box.right - box.left);
+  const drawn = textBoxes.map((box) => shownText(box.text));
+  // The canvas can't be read back as text: the strings it draws are exposed for the page checks.
+  text.dataset.drawn = JSON.stringify(drawn);
+  for (const [index, box] of textBoxes.entries()) {
+    const lines = wrapLines(context, drawn[index], box.right - box.left);
     context.save();
     context.beginPath();
     context.rect(box.left, box.top, box.right - box.left, box.bottom - box.top);
@@ -338,6 +381,7 @@ function setMode(next) {
   else if (footer.parentElement !== document.body) document.body.append(footer);
   blitAll();
   if (mode === "portrait") listText();
+  else updateNextButton();
 }
 
 function layout() {
@@ -857,6 +901,11 @@ function wire() {
   document.querySelector("header").addEventListener("click", (event) => {
     const button = event.target instanceof Element ? event.target.closest("button") : null;
     if (button && event.detail > 0) button.blur();
+  });
+  // The same command as the toolbar's Next.
+  nextButton.addEventListener("click", (event) => {
+    apply(session.command("next"));
+    if (event.detail > 0) nextButton.blur();
   });
   $("copy").addEventListener("click", copyWithClipboardApi);
   $("paste").addEventListener("click", pasteWithClipboardApi);

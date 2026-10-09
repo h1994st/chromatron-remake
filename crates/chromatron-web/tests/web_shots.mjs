@@ -84,6 +84,11 @@ reference.select(1, undefined, undefined);
 reference.render();
 const BOARD = [...reference.board_rect()];
 const TOOLBOX = [...reference.toolbox_rect()];
+const CLICK_NEXT = reference.click_next();
+assert.ok(CLICK_NEXT.length > 0, "the game has a click_next text");
+// What the touch layouts say instead (web/main.js TOUCH_NEXT).
+const TOUCH_PORTRAIT = "Tap Next level or pick a level from Levels.";
+const TOUCH_LANDSCAPE = "Tap a level number or ▶ for the next level.";
 const rgba = new Uint8Array(wasm.memory.buffer, reference.rgba_ptr(), 640 * 480 * 4).slice();
 const { LIFT, TEXT_ROOM, TOOLBOX_MIN, fillScale, portraitScales, rectOf } = await import(pathToFileURL(join(webDir, "touch_layout.js")).href);
 const expected = { frame: fnvRect(rgba, [0, 0, 640, 480]), board: fnvRect(rgba, BOARD), toolbox: fnvRect(rgba, TOOLBOX) };
@@ -156,6 +161,48 @@ async function evaluate(expression) {
   const { result, exceptionDetails } = await send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
   if (exceptionDetails) throw new Error(exceptionDetails.exception?.description ?? exceptionDetails.text);
   return result.value;
+}
+
+// Level 1 of Chromatron 1 solved by pasting its stored solution (tests/solutions/game1/level-01.txt).
+const PASTE_WIN = `(() => {
+  const clipboardData = new DataTransfer();
+  clipboardData.setData("text/plain", "1-01-hI");
+  document.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
+})()`;
+
+// Ends a view that won level 1 without leaving the win in the browser's storage for the next view:
+// the page stores its progress when it goes away, so every later write is dropped first.
+async function forgetWin() {
+  await evaluate(`(() => {
+    Storage.prototype.setItem = () => {};
+    localStorage.removeItem("chromatron1.save");
+  })()`);
+}
+
+// What the page says in the hint box after a win: the strings drawn on the text canvas (landscape,
+// desktop) or listed as HTML (portrait), and whether the Next level button shows.
+const WIN_FACTS = `(() => {
+  const button = document.getElementById("next-level");
+  const rect = button?.getBoundingClientRect();
+  return {
+    drawn: JSON.parse(document.getElementById("text").dataset.drawn ?? "[]"),
+    listed: [...document.querySelectorAll("#text-list p")].map((p) => p.textContent),
+    button: button && rect.width > 0 && rect.height > 0 ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height, text: button.textContent } : null,
+    inList: button?.parentElement?.id ?? null,
+  };
+})()`;
+
+// The computed user-select of the first element matching each selector.
+function userSelect(...selectors) {
+  return evaluate(`${JSON.stringify(selectors)}.map((selector) => {
+    const style = getComputedStyle(document.querySelector(selector));
+    return [selector, style.userSelect];
+  })`);
+}
+
+async function assertNoSelection(...selectors) {
+  // -webkit-touch-callout is iOS Safari's: Chrome does not compute it, so only user-select is read.
+  for (const [selector, select] of await userSelect(...selectors)) assert.equal(select, "none", `${selector} has user-select: none`);
 }
 
 // Four animation frames: the page has laid out (a layout waits for the next frame) and painted.
@@ -505,8 +552,28 @@ const ACTIONS = {
       clipboardData.setData("text/plain", "1-01-hI");
       document.dispatchEvent(new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }));
     })()`);
-    await evaluate(`document.querySelector("[data-command=next]").click()`);
     await evaluate(SETTLE);
+    // Won: the Next level button sits under "You win!", and the hint is worded for touch.
+    const won = await evaluate(WIN_FACTS);
+    await shoot("portrait-next-level");
+    assert.ok(won.button !== null, "the Next level button shows after a win");
+    assert.equal(won.button.text, "Next level ▶");
+    assert.equal(won.inList, "text-list");
+    assert.ok(won.button.height >= 44 && won.button.width >= 0.8 * facts.clientWidth, `a comfortable target: ${JSON.stringify(won.button)}`);
+    assert.ok(won.listed.includes(TOUCH_PORTRAIT), `the touch wording shows: ${JSON.stringify(won.listed)}`);
+    assert.ok(!won.listed.includes(CLICK_NEXT), "the original click_next text does not");
+    assert.ok(/win/i.test(won.listed[0]), "the button follows the win text");
+    const buttonIndex = await evaluate(`[...document.getElementById("text-list").children].indexOf(document.getElementById("next-level"))`);
+    assert.equal(buttonIndex, 1, "the button is right under the win text");
+    await assertNoSelection("#texts", "#board-part", "#toolbox-part", "header", "#stage");
+    assert.notEqual((await userSelect("#help p"))[0][1], "none", "the help keeps text selection");
+    // Tapping it is the toolbar's Next: level 2, and the button is gone.
+    await touch("touchStart", won.button.x, won.button.y);
+    await touch("touchEnd");
+    await evaluate(SETTLE);
+    const onLevel2 = await evaluate(WIN_FACTS);
+    assert.equal(onLevel2.button, null, "the button is hidden on the next level");
+    assert.ok(onLevel2.listed.length > 0 && !onLevel2.listed.some((line) => /win/i.test(line)), `level 2 is not won: ${JSON.stringify(onLevel2.listed)}`);
     await evaluate(`document.getElementById("levels-open").click()`);
     await evaluate(SETTLE);
     await shoot("portrait-levels-solved");
@@ -601,6 +668,16 @@ const ACTIONS = {
     await evaluate(`document.getElementById("game-select").focus()`);
     await typeKey("ArrowDown", "ArrowDown");
     assert.equal(await evaluate(`document.getElementById("game-select").value`), "1", "an arrow opens the picker, not the next game");
+    // After a win the game's own click_next text stays, and there is no button.
+    await evaluate(`document.getElementById("game-select").blur()`);
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    const won = await evaluate(WIN_FACTS);
+    await forgetWin();
+    assert.ok(won.drawn.includes(CLICK_NEXT), `the original text stays on the desktop: ${JSON.stringify(won.drawn)}`);
+    assert.ok(!won.drawn.includes(TOUCH_PORTRAIT) && !won.drawn.includes(TOUCH_LANDSCAPE), "and no touch wording");
+    assert.equal(won.button, null, "no Next level button on the desktop");
+    assert.equal(await evaluate(`getComputedStyle(document.getElementById("game")).userSelect`), "none");
   },
   async landscape(facts) {
     // With the toolbar down the side, the Actions menu opens beside its button.
@@ -638,6 +715,15 @@ const ACTIONS = {
     assert.ok(picked, "a drag straight left picked the piece up from toolbox slot 0");
     assert.ok(dropped.frameSlot !== start.frameSlot && dropped.frameAside !== start.frameAside, "and dropped it on board cell (5, 10)");
     assert.equal((await evaluate(FACTS)).framePixels, expected.frame, "Reset put the piece back");
+    // After a win the text canvas draws the landscape wording, not the game's click_next.
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    const won = await evaluate(WIN_FACTS);
+    await forgetWin();
+    assert.ok(won.drawn.includes(TOUCH_LANDSCAPE), `the landscape wording is drawn: ${JSON.stringify(won.drawn)}`);
+    assert.ok(!won.drawn.includes(CLICK_NEXT), "the original click_next text is not");
+    assert.equal(won.button, null, "no Next level button in landscape");
+    await assertNoSelection("#game", "header");
   },
 };
 

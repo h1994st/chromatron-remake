@@ -337,6 +337,13 @@ impl Session {
         })
     }
 
+    /// The game's "click for the next level" text, shown in the hint box once a level is won
+    /// (the page words it differently on a touch screen). "" before any `select`.
+    pub fn click_next(&self) -> String {
+        self.state()
+            .map_or_else(String::new, |state| state.data().ui.click_next.to_string())
+    }
+
     /// Strip slot `slot`'s state (0-based), as the strip colours its number. `Locked` before any
     /// `select` and past the strip.
     pub fn slot_state(&self, slot: u32) -> LevelState {

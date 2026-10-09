@@ -100,6 +100,22 @@ fn every_game_opens_on_a_full_frame_with_its_text() {
 }
 
 #[test]
+fn the_win_hint_is_the_games_click_next_text() {
+    assert_eq!(Session::new().click_next(), "", "nothing before a select");
+    for game in 1..=4u8 {
+        let mut session = started(game);
+        let click_next = session.click_next();
+        assert!(!click_next.is_empty(), "game {game}");
+        let (cheat, ctrl) = CHEATS[usize::from(game - 1)];
+        session.key(cheat, ctrl, false, false);
+        assert!(session.won());
+        session.render();
+        let shown: Vec<String> = (0..session.text_count()).map(|i| session.text(i)).collect();
+        assert!(shown.contains(&click_next), "game {game}: {shown:?}");
+    }
+}
+
+#[test]
 fn the_stored_solutions_win_in_every_game() {
     for game in 1..=4u8 {
         for (level, solution) in solutions(game) {
