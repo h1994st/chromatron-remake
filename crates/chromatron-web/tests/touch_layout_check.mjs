@@ -45,10 +45,13 @@ const board = t.rectOf([48, 18, 408, 378]);
 const toolbox = t.rectOf([446, 6, 604, 112]);
 assert.equal(t.TEXT_ROOM, undefined, "the texts no longer take a share of the screen");
 assert.equal(t.TOOLBOX_MIN, 1.4);
+assert.equal(t.TOOLBOX_MAX, 2);
 // A 390 × 844 phone: 763 px below a 45 px toolbar and 36 px of gaps.
 const phone = t.portraitScales({ width: 390, height: 763, ratio: 3, board, toolbox });
 near(phone.board, 390 / 360, "the board fills a 390 px phone: 26 px cells");
-near(phone.toolbox, 390 / 158, "the toolbox as wide as the board");
+near(phone.toolbox, t.TOOLBOX_MAX, "the toolbox capped at 2x, not as wide as the board");
+near(158 * phone.toolbox, 316, "316 px wide");
+assert.ok((390 - 158 * phone.toolbox) / 2 >= 30, "gutters of 30 px or more each side");
 // The same phone with its browser bars shown: 583 px.
 const bars = t.portraitScales({ width: 390, height: 583, ratio: 3, board, toolbox });
 near(bars.board, 390 / 360, "the board still fills the width");
@@ -61,12 +64,19 @@ const tablet = t.portraitScales({ width: 820, height: 900, ratio: 2, board, tool
 near(tablet.board, 820 / 360, "a tablet's board fills its width");
 near(tablet.toolbox, 1.4, "its toolbox keeps 1.4x below it");
 const roomy = t.portraitScales({ width: 820, height: 1099, ratio: 2, board, toolbox });
-near(roomy.toolbox, (1099 - 820) / 106, "a tall tablet's toolbox fills the height left");
+near(roomy.toolbox, t.TOOLBOX_MAX, "a tall tablet's toolbox is capped at 2x");
 const tiny = t.portraitScales({ width: 390, height: 60, ratio: 3, board, toolbox });
 assert.deepEqual(tiny, short, "no height at all: the same as a short screen");
 const narrow = t.portraitScales({ width: 60, height: 60, ratio: 3, board, toolbox });
 near(narrow.board, t.MIN_SCALE, "a board too narrow for the screen: still visible");
 near(narrow.toolbox, (360 * t.MIN_SCALE) / 158, "and the toolbox no wider than it");
+
+// The cap holds for every ratio and height, and a snap never goes over it.
+for (const ratio of [1, 2, 3, 13])
+  for (let height = 0; height <= 1500; height += 7) {
+    const r = t.portraitScales({ width: 390, height, ratio, board, toolbox });
+    assert.ok(r.toolbox <= t.TOOLBOX_MAX + 1e-9 && r.toolbox >= t.TOOLBOX_MIN - 1e-9, `${ratio}x ${height}: ${r.toolbox}`);
+  }
 
 // A snap never takes the toolbox under TOOLBOX_MIN (13 px per CSS px: 18/13 = 1.385 would snap from 1.42).
 {

@@ -1,6 +1,6 @@
-// `just web-shots [dir]`: serves dist/web/ and photographs it in headless Google Chrome in five views:
+// `just web-shots [dir]`: serves dist/web/ and photographs it in headless Google Chrome in six views:
 // a desktop (1400 × 1000 at 1×); a phone in landscape (844 × 390) and in portrait, both full height
-// (390 × 844) and with Safari's bars shown (390 × 664), at devicePixelRatio 3 with touch emulation,
+// (390 × 844), with Safari's bars shown (390 × 664) and with WeChat's slim top bar (390 × 780), at devicePixelRatio 3 with touch emulation,
 // so `(pointer: coarse)` matches; and a mouse at 390 × 844 with `?layout=touch`. For each view it
 // writes <name>.png and <name>.json (the page's layout facts) into <dir> and checks them; the
 // portrait views also take <name>-scrolled.png, scrolled to the end.
@@ -91,7 +91,7 @@ assert.ok(CLICK_NEXT.length > 0, "the game has a click_next text");
 const TOUCH_PORTRAIT = "Tap Next level or pick a level from Levels.";
 const TOUCH_LANDSCAPE = "Tap a level number or ▶ for the next level.";
 const rgba = new Uint8Array(wasm.memory.buffer, reference.rgba_ptr(), 640 * 480 * 4).slice();
-const { LIFT, TOOLBOX_MIN, fillScale, portraitScales, rectOf } = await import(pathToFileURL(join(webDir, "touch_layout.js")).href);
+const { LIFT, TOOLBOX_MAX, TOOLBOX_MIN, fillScale, portraitScales, rectOf } = await import(pathToFileURL(join(webDir, "touch_layout.js")).href);
 const expected = { frame: fnvRect(rgba, [0, 0, 640, 480]), board: fnvRect(rgba, BOARD), toolbox: fnvRect(rgba, TOOLBOX) };
 // Where today's page (Task 4's run, Chrome 154 on macOS) shows the desktop game at 1400 × 1000.
 const DESKTOP_GAME = { left: 380, top: 255, width: 640, height: 480 };
@@ -343,6 +343,8 @@ const SCENARIOS = [
   { name: "forced-touch", width: 390, height: 844, ratio: 1, touch: false, query: "&layout=touch" },
   // iOS Safari's usable portrait height on a 390 × 844 phone, with its bars shown.
   { name: "portrait-bars", width: 390, height: 664, ratio: 3, touch: true },
+  // An iPhone in WeChat's in-app browser: a slim top bar, so more height than Safari's bars leave.
+  { name: "portrait-wechat", width: 390, height: 780, ratio: 3, touch: true },
   // The full-height phone portrait.
   { name: "portrait", width: 390, height: 844, ratio: 3, touch: true },
 ];
@@ -378,6 +380,10 @@ function checkPortrait(facts) {
   assertNear(facts.toolbox.width, (TOOLBOX[2] - TOOLBOX[0]) * scales.toolbox, "the toolbox's scale");
   assertNear(facts.board.width, facts.clientWidth, "the board fills the width", 1);
   assert.ok(facts.toolbox.width / (TOOLBOX[2] - TOOLBOX[0]) >= TOOLBOX_MIN - 0.01, "the toolbox slots stay finger-sized");
+  assert.ok(facts.toolbox.width / ((TOOLBOX[2] - TOOLBOX[0])) <= TOOLBOX_MAX + 0.01, "the toolbox is at most TOOLBOX_MAX");
+  const gutter = (facts.clientWidth - facts.toolbox.width) / 2;
+  assertNear(facts.toolbox.left, gutter, "the toolbox is centred", 1);
+  if (facts.clientWidth <= 400) assert.ok(gutter >= 30, `gutters of 30 px or more beside the toolbox to swipe on: ${gutter}`);
   assert.ok(facts.header.bottom <= facts.board.top, "the board below the toolbar");
   assert.ok(facts.board.bottom <= facts.toolbox.top && facts.toolbox.bottom <= facts.texts.top, "board, toolbox, then texts");
   assert.ok(facts.toolbox.bottom <= facts.height + 0.5, `the board and the toolbox on screen at scroll-top: ${facts.toolbox.bottom}`);
@@ -470,6 +476,13 @@ const CHECKS = {
   },
   portrait(facts) {
     checkPortrait(facts);
+  },
+  "portrait-wechat"(facts) {
+    checkPortrait(facts);
+    // The tall WeChat view would have filled the width with the toolbox: 2x (316 px) it stays.
+    assertNear(facts.toolbox.width, 316, "the toolbox capped at 2x");
+    assertNear(facts.toolbox.left, 37, "and centred", 1);
+    assertNear(facts.clientWidth - facts.toolbox.right, 37, "with equal gutters", 1);
   },
 };
 

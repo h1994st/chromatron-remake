@@ -11,6 +11,8 @@ export const LIFT = 40;
 export const OFF_FRAME = Object.freeze([-100, -100]);
 /** Portrait: the smallest toolbox scale (36 px slots); when the screen is shorter, the page scrolls. */
 export const TOOLBOX_MIN = 1.4;
+/** Portrait: the largest toolbox scale (2x the original), so a tall screen keeps gutters beside it to swipe on. */
+export const TOOLBOX_MAX = 2;
 /** No view ever gets a smaller scale, so the game never vanishes. */
 export const MIN_SCALE = 0.25;
 
@@ -50,17 +52,17 @@ const spanY = (rect) => rect.bottom - rect.top;
  * Portrait: fill scales for the board and the toolbox stacked in `height` CSS px (the small
  * viewport below the toolbar, less the gaps) and `width` wide. The board takes the full width,
  * whatever the height. The toolbox takes the height left, up to the board's width, and at least
- * TOOLBOX_MIN (unless the board is narrower than that): on a screen too short for it, the page
- * scrolls further.
+ * TOOLBOX_MIN (unless the board is narrower than that), and at most TOOLBOX_MAX: on a screen too
+ * short for it, the page scrolls further, and on a wide one the toolbox stays centred with gutters.
  */
 export function portraitScales({ width, height, ratio, board, toolbox }) {
   const boardScale = fillScale(Math.max(MIN_SCALE, width / spanX(board)), ratio);
   const widthFit = (spanX(board) * boardScale) / spanX(toolbox);
   const heightFit = (height - boardScale * spanY(board)) / spanY(toolbox);
-  const exact = Math.max(MIN_SCALE, Math.min(widthFit, Math.max(TOOLBOX_MIN, heightFit)));
+  const exact = Math.max(MIN_SCALE, Math.min(widthFit, Math.max(TOOLBOX_MIN, heightFit), TOOLBOX_MAX));
   const sharp = fillScale(exact, ratio);
-  // A snap never takes the toolbox under TOOLBOX_MIN; then the exact fit stays.
-  return { board: boardScale, toolbox: sharp >= TOOLBOX_MIN ? sharp : exact };
+  // A snap never takes the toolbox under TOOLBOX_MIN or over TOOLBOX_MAX; then the exact fit stays.
+  return { board: boardScale, toolbox: sharp >= TOOLBOX_MIN && sharp <= TOOLBOX_MAX ? sharp : exact };
 }
 
 /** `[left, top, right, bottom]`, as Session returns rects, as a rect. */
