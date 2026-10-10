@@ -95,8 +95,8 @@ web: _require-originals
     wasm-bindgen --target web --no-typescript --out-dir "$out" \
         "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-unknown-unknown/web-release/chromatron_web.wasm"
     cp "{{justfile_directory()}}"/web/* "$out/"
-    # Every page URL carries a hash of all shipped files (wasm, glue, main.js, touch_layout.js, style.css, index.html template), so a browser never mixes files of two deploys.
-    build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js touch_layout.js style.css index.html | shasum -a 256 | cut -c 1-12)"
+    # Every page URL carries a hash of all shipped files (wasm, glue, main.js, touch_layout.js, analytics.js, style.css, index.html template), so a browser never mixes files of two deploys.
+    build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js touch_layout.js analytics.js style.css index.html | shasum -a 256 | cut -c 1-12)"
     perl -pi -e "s/__BUILD__/$build/g" "$out/index.html" "$out/main.js"
     for file in "$out"/*; do
         printf '%8d bytes %8d gzip  %s\n' "$(wc -c < "$file")" "$(gzip -9 -c "$file" | wc -c)" "$(basename "$file")"

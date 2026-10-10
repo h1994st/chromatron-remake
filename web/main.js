@@ -104,6 +104,59 @@ nextButton.textContent = "Next level ▶";
 // A ⌘/Ctrl+C or V whose copy or paste event has not fired yet (see clipboardShortcut).
 let copyPending = false;
 let pastePending = false;
+// web/analytics.js, loaded after the first paint (loadAnalytics); the few events before it wait in
+// `earlyEvents`.
+let analytics;
+const earlyEvents = [];
+// A level shown after a user action is sent this long after the last change, so scrolling through
+// levels sends only the one landed on.
+const LEVEL_START_DELAY = 1000;
+let levelStartTimer = 0;
+// The level the win check saw last, and whether it was won then (noteWin).
+let winGame = 0;
+let winSlot = -1;
+let winWon = false;
+
+// Sends a game event, with the game and the layout, to analytics (a no-op off the site).
+function track(name, params) {
+  const event = { game, layout: mode, ...params };
+  if (analytics) analytics.track(name, event);
+  else if (earlyEvents.length < 16) earlyEvents.push([name, event]);
+}
+
+// The current level as the events name it.
+function levelParams() {
+  const level = session.slot() + 1;
+  return { game, level, level_name: `C${game}-L${String(level).padStart(2, "0")}` };
+}
+
+// The level changed by a user action: level_start once it has stayed for LEVEL_START_DELAY.
+function levelChanged() {
+  clearTimeout(levelStartTimer);
+  levelStartTimer = setTimeout(() => track("level_start", levelParams()), LEVEL_START_DELAY);
+}
+
+// level_end once per change into the won state on the level shown; a level that comes up already
+// won (another level, another game, a reload) is not a new win.
+function noteWin() {
+  const slot = session.slot();
+  const won = session.won();
+  if (won && !winWon && game === winGame && slot === winSlot) track("level_end", { ...levelParams(), success: true });
+  winGame = game;
+  winSlot = slot;
+  winWon = won;
+}
+
+async function loadAnalytics() {
+  try {
+    const module = await import(`./analytics.js?v=${BUILD}`);
+    module.start(location);
+    analytics = module;
+    for (const [name, event] of earlyEvents.splice(0)) analytics.track(name, event);
+  } catch {
+    // Analytics never stops the game.
+  }
+}
 
 function say(message) {
   const element = $("message");
@@ -146,7 +199,10 @@ function rememberSlot() {
 function apply(flags) {
   if (flags & (Flag.Redraw | Flag.Save | Flag.Slot)) changed.add(game);
   if (flags & Flag.Save) persist(game, session.save_text());
-  if (flags & Flag.Slot) rememberSlot();
+  if (flags & Flag.Slot) {
+    rememberSlot();
+    levelChanged();
+  }
   if (flags & Flag.Redraw) schedule();
   return flags;
 }
@@ -181,6 +237,10 @@ function selectGame(n) {
     }
   }
   game = n;
+  clearTimeout(levelStartTimer);
+  winGame = n;
+  winSlot = session.slot();
+  winWon = session.won();
   started.add(n);
   storage.write("chromatron.game", String(n));
   if (location.hash !== `#${n}`) history.replaceState(null, "", `#${n}`);
@@ -250,6 +310,7 @@ function paint() {
   }
   updateNextButton();
   showNewLevel();
+  noteWin();
 }
 
 // The game and level the last paint showed; 0 and -1 before the first.
@@ -509,14 +570,17 @@ function hasSelection() {
 }
 
 function pasteSolution(solution) {
-  if (apply(session.paste(solution)) & Flag.Redraw) say("");
+  const pasted = (apply(session.paste(solution)) & Flag.Redraw) !== 0;
+  if (pasted) say("");
   else say("That is not a solution for this level.");
+  track("paste_solution", { level: levelParams().level, success: pasted });
 }
 
 // The toolbar's Copy, and ⌘/Ctrl+C when the browser fired no copy event.
 async function copyWithClipboardApi() {
   const solution = session.copy();
   if (solution === undefined) return;
+  track("copy_solution", { level: levelParams().level });
   try {
     await navigator.clipboard.writeText(solution);
     say(`Copied ${solution}`);
@@ -659,12 +723,14 @@ function endDrag() {
   apply(session.pointer_cancel());
 }
 
-function openHelp() {
+// Opens the help; `method` ("button", "key" or "first_visit") is how, for analytics.
+function openHelp(method) {
   if (dialogOpen()) return;
   closeMenu();
   endDrag();
   dialogOpener = document.activeElement;
   helpDialog.showModal();
+  track("tutorial_begin", { method });
 }
 
 // The ⌘ key on Apple platforms, Ctrl elsewhere.
@@ -700,7 +766,7 @@ function wireDialog(dialog, closeButton) {
 
 function wireHelp() {
   showPlatformKeys();
-  $("help-open").addEventListener("click", () => openHelp());
+  $("help-open").addEventListener("click", () => openHelp("button"));
   wireDialog(helpDialog, $("help-close"));
 }
 
@@ -766,6 +832,7 @@ function openLevels() {
   refreshLevels(framed ? frameImage() : null);
   levelsDialog.showModal();
   levelButtons.find(({ button }) => button.getAttribute("aria-current") === "true")?.button.focus();
+  track("open_levels", {});
 }
 
 function wireLevels() {
@@ -777,7 +844,7 @@ function wireLevels() {
 // First visit only: shows the help once, if storage can say it has not been shown before.
 function showHelpOnFirstVisit() {
   const seen = storage.read("chromatron.helpSeen");
-  if (seen.ok && seen.value === null && storage.write("chromatron.helpSeen", "1")) openHelp();
+  if (seen.ok && seen.value === null && storage.write("chromatron.helpSeen", "1")) openHelp("first_visit");
 }
 
 function saveAll() {
@@ -894,7 +961,7 @@ function wire() {
     const control = isControl(event.target) && !(event.target === gameSelect && !pickerKey(event.key));
     if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !control) {
       event.preventDefault();
-      openHelp();
+      openHelp("key");
       return;
     }
     if (clipboardShortcut(event) || control) return;
@@ -915,6 +982,7 @@ function wire() {
     event.clipboardData.setData("text/plain", solution);
     event.preventDefault();
     say(`Copied ${solution}`);
+    track("copy_solution", { level: levelParams().level });
   });
   document.addEventListener("paste", (event) => {
     pastePending = false;
@@ -927,7 +995,9 @@ function wire() {
   // only open it: on a closed picker they would switch games at once on Windows and Linux.
   const releasePicker = () => requestAnimationFrame(() => gameSelect.blur());
   gameSelect.addEventListener("change", () => {
+    const before = game;
     selectGame(Number(gameSelect.value));
+    if (game !== before) track("select_game", {});
     releasePicker();
   });
   gameSelect.addEventListener("keyup", (event) => {
@@ -1040,6 +1110,8 @@ async function start() {
     showFatal(error);
     return;
   }
+  // Analytics waits for the first paint: the frame callback runs before it, the timeout after.
+  requestAnimationFrame(() => setTimeout(loadAnalytics, 0));
   // A Rust panic (a wasm trap) or a bug after start: say so instead of silently ignoring input.
   const stopped = () => say("Chromatron stopped working. Reload the page to continue.");
   window.addEventListener("error", stopped);

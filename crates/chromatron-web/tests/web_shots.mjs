@@ -1,9 +1,11 @@
-// `just web-shots [dir]`: serves dist/web/ and photographs it in headless Google Chrome in six views:
+// `just web-shots [dir]`: serves dist/web/ and photographs it in headless Google Chrome in seven views:
 // a desktop (1400 × 1000 at 1×); a phone in landscape (844 × 390) and in portrait, both full height
 // (390 × 844), with Safari's bars shown (390 × 664) and with WeChat's slim top bar (390 × 780), at devicePixelRatio 3 with touch emulation,
-// so `(pointer: coarse)` matches; and a mouse at 390 × 844 with `?layout=touch`. For each view it
+// so `(pointer: coarse)` matches; a mouse at 390 × 844 with `?layout=touch`; and the desktop with
+// `?analytics=debug`, whose game events it reads from `window.dataLayer`. For each view it
 // writes <name>.png and <name>.json (the page's layout facts) into <dir> and checks them; the
-// portrait views also take <name>-scrolled.png, scrolled to the end.
+// portrait views also take <name>-scrolled.png, scrolled to the end. No view sends anything to
+// Google: the page never asks for googletagmanager.com off the site.
 // A local development aid, not run in CI: it needs Google Chrome ($CHROME overrides the path). The
 // pictures show the games' sprites: inside the repo they may only go under re/out/, dist/ or
 // target/, which git ignores. Every way out (the end, an error, Ctrl-C, SIGTERM, the 90 s limit)
@@ -133,13 +135,16 @@ async function connect() {
   socket.addEventListener("message", receive);
 }
 
-// The Chrome DevTools Protocol: calls, and the page's errors.
+// The Chrome DevTools Protocol: calls, the page's errors, and every URL it requested.
 let lastId = 0;
 const calls = new Map();
 const pageErrors = [];
+const requested = [];
 function receive(event) {
   const message = JSON.parse(event.data);
-  if (message.id !== undefined) {
+  if (message.method === "Network.requestWillBeSent") {
+    requested.push(message.params.request.url);
+  } else if (message.id !== undefined) {
     const call = calls.get(message.id);
     calls.delete(message.id);
     if (message.error) call.reject(new Error(`${call.method}: ${message.error.message}`));
@@ -347,7 +352,38 @@ const SCENARIOS = [
   { name: "portrait-wechat", width: 390, height: 780, ratio: 3, touch: true },
   // The full-height phone portrait.
   { name: "portrait", width: 390, height: 844, ratio: 3, touch: true },
+  // The desktop with analytics' debug mode: game events go to window.dataLayer, and no script loads.
+  { name: "analytics", width: 1400, height: 1000, ratio: 1, touch: false, query: "&analytics=debug" },
 ];
+
+// The analytics commands the page has pushed (web/analytics.js), as [command, target, params].
+const DATA_LAYER = `(window.dataLayer ?? []).map((entry) => [entry[0], entry[0] === "js" ? null : entry[1], entry[2] ?? null])`;
+
+// Waits until analytics, loaded after the first paint, has pushed its config; returns the commands.
+async function analyticsStarted() {
+  for (let tries = 0; ; tries += 1) {
+    const layer = await evaluate(DATA_LAYER);
+    if (layer.some(([command]) => command === "config")) return layer;
+    assert.ok(tries < 50, "analytics did not start with ?analytics=debug");
+    await delay(100);
+  }
+}
+
+// The params of each `name` event pushed so far.
+async function eventsNamed(name) {
+  return (await evaluate(DATA_LAYER)).filter(([command, target]) => command === "event" && target === name).map(([, , params]) => params);
+}
+
+// Clears what earlier views stored (the help stays seen unless `firstVisit`), so the page starts on
+// a fresh level 1, and stops this page storing anything when it goes away.
+async function forgetAll(firstVisit = false) {
+  await evaluate(`(() => {
+    const set = Storage.prototype.setItem;
+    Storage.prototype.setItem = () => {};
+    localStorage.clear();
+    if (!${firstVisit}) set.call(localStorage, "chromatron.helpSeen", "1");
+  })()`);
+}
 
 // Whether `actual` is `wanted` to within `tolerance` CSS px.
 function assertNear(actual, wanted, what, tolerance = 0.5) {
@@ -483,6 +519,9 @@ const CHECKS = {
     assertNear(facts.toolbox.width, 316, "the toolbox capped at 2x");
     assertNear(facts.toolbox.left, 37, "and centred", 1);
     assertNear(facts.clientWidth - facts.toolbox.right, 37, "with equal gutters", 1);
+  },
+  analytics(facts) {
+    assert.equal(facts.layout, "desktop");
   },
 };
 
@@ -982,6 +1021,80 @@ const ACTIONS = {
     assert.equal(won.button, null, "no Next level button in landscape");
     await assertNoSelection("#game", "header");
   },
+  async analytics() {
+    const scenario = SCENARIOS.find(({ name }) => name === "analytics");
+    const pageUrl = await evaluate("location.origin + location.pathname");
+    const desktop = { game: 1, layout: "desktop" };
+    const nextLevel = `document.querySelector('.toolbar [data-command="next"]').click()`;
+    // A first visit: the help opens before analytics loads, and its event waits for it.
+    await forgetAll(true);
+    await load({ ...scenario, query: `${scenario.query}&reload=1` }, pageUrl);
+    const layer = await analyticsStarted();
+    assert.deepEqual(
+      layer.map(([command, target]) => [command, target]),
+      [["js", null], ["config", "G-ZMH6NLL7C7"], ["event", "tutorial_begin"]],
+      "the load sent the config and the first visit's help, and no level or game event",
+    );
+    assert.deepEqual(layer[1][2], { content_group: "chromatron" });
+    assert.deepEqual(layer[2][2], { ...desktop, method: "first_visit" });
+    await evaluate(`document.getElementById("help-close").click()`);
+    // Win level 1 by pasting its solution, copy it, and paste it again: one win.
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    await evaluate(`(() => {
+      const clipboardData = new DataTransfer();
+      document.dispatchEvent(new ClipboardEvent("copy", { clipboardData, bubbles: true, cancelable: true }));
+    })()`);
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    const level1 = { ...desktop, level: 1 };
+    assert.deepEqual(await eventsNamed("paste_solution"), [{ ...level1, success: true }, { ...level1, success: true }]);
+    assert.deepEqual(await eventsNamed("level_end"), [{ ...level1, level_name: "C1-L01", success: true }], "one level_end for one win");
+    assert.deepEqual(await eventsNamed("copy_solution"), [level1]);
+    // Next: level_start once level 2 has stayed a second; a quick ◀ ▶ there and back sends one more.
+    await evaluate(nextLevel);
+    await evaluate(SETTLE);
+    assert.deepEqual(await eventsNamed("level_start"), [], "level_start waits for the level to stay");
+    await delay(1300);
+    const level2 = { ...desktop, level: 2, level_name: "C1-L02" };
+    assert.deepEqual(await eventsNamed("level_start"), [level2]);
+    await evaluate(`document.querySelector('.toolbar [data-command="previous"]').click()`);
+    await evaluate(nextLevel);
+    await delay(1300);
+    assert.deepEqual(await eventsNamed("level_start"), [level2, level2], "one level_start for the level landed on");
+    assert.equal((await eventsNamed("level_end")).length, 1, "passing the solved level 1 is no new win");
+    // ? opens the help.
+    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "?", code: "Slash", text: "?" });
+    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "?", code: "Slash" });
+    await evaluate(SETTLE);
+    assert.deepEqual((await eventsNamed("tutorial_begin")).at(-1), { ...desktop, method: "key" });
+    await evaluate(`document.getElementById("help-close").click()`);
+    // The game picker, then a paste the game rejects.
+    await evaluate(`(() => {
+      const select = document.getElementById("game-select");
+      select.value = "2";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`);
+    await evaluate(SETTLE);
+    assert.deepEqual(await eventsNamed("select_game"), [{ game: 2, layout: "desktop" }]);
+    await evaluate(PASTE_WIN);
+    assert.deepEqual((await eventsNamed("paste_solution")).at(-1), { game: 2, layout: "desktop", level: 1, success: false });
+    assert.deepEqual(pageErrors, [], "no errors on the page");
+    // A gtag that throws (a broken or blocked script) changes nothing for the game: level 1 still wins.
+    await forgetAll();
+    await load({ ...scenario, query: `${scenario.query}&reload=2` }, pageUrl);
+    await analyticsStarted();
+    await evaluate(`window.gtag = () => { throw new Error("gtag is broken"); }`);
+    await evaluate(PASTE_WIN);
+    await evaluate(SETTLE);
+    const won = await evaluate(WIN_FACTS);
+    await evaluate(nextLevel);
+    await delay(1300);
+    const after = await evaluate(FACTS);
+    await forgetAll();
+    assert.ok(won.drawn.includes(CLICK_NEXT), `level 1 won with a throwing gtag: ${JSON.stringify(won.drawn)}`);
+    assert.ok(!after.message.includes("stopped working"), after.message);
+  },
 };
 
 let failures = 0;
@@ -990,6 +1103,7 @@ try {
   await connect();
   await send("Runtime.enable");
   await send("Page.enable");
+  await send("Network.enable");
   // The first visit opens the help once; mark it seen so that the pictures show the game.
   await load({ name: "first-visit", width: 1400, height: 1000, ratio: 1, touch: false }, origin);
   assert.deepEqual(pageErrors, [], "no errors on the page at the first visit");
@@ -1006,11 +1120,20 @@ try {
       CHECKS[scenario.name](facts);
       await ACTIONS[scenario.name]?.(facts);
       assert.deepEqual(pageErrors, [], "no errors on the page");
+      if (!(scenario.query ?? "").includes("analytics=debug")) {
+        assert.equal(await evaluate("window.dataLayer === undefined"), true, "no analytics off the site");
+      }
       console.log(`ok: ${scenario.name}`);
     } catch (error) {
       failures += 1;
       console.error(`FAIL ${scenario.name}: ${error.message}`);
     }
+  }
+  // analytics.js loaded, and nothing ever went to Google.
+  const google = requested.filter((url) => /(^|\.)googletagmanager\.com$/.test(new URL(url).hostname));
+  if (google.length > 0 || !requested.some((url) => url.includes("/analytics.js?v="))) {
+    failures += 1;
+    console.error(`FAIL network: analytics.js requested ${requested.filter((url) => url.includes("/analytics.js")).length} times, Google ${JSON.stringify(google)}`);
   }
   console.log(`web-shots: ${SCENARIOS.length - failures} of ${SCENARIOS.length} views as expected; pictures in ${outDir}`);
 } catch (error) {

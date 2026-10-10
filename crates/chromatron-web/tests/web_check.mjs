@@ -23,6 +23,8 @@ const CHEATS = { 1: ["L", false], 2: ["z", false], 3: ["^", false], 4: ["o", tru
 
 // The only absolute URLs the page may carry: its links to the originals and to the source.
 const EXTERNAL_HOSTS = ["silverspaceship.com", "github.com"];
+// The only absolute URL in the page's scripts: Google's gtag.js, which analytics.js injects on the site.
+const SCRIPT_URLS = { "analytics.js": ["https://www.googletagmanager.com/gtag/js"] };
 // The site's own address, which only the canonical link and the OG and Twitter tags spell out.
 const SITE = "https://shengtuo.me/chromatron-remake/";
 // The OG and Twitter tags the page must carry, with their exact values where they matter.
@@ -51,7 +53,7 @@ const IMAGES = {
 
 // The files, their sizes and their URLs.
 const files = readdirSync(webDir).sort();
-for (const required of ["index.html", "style.css", "main.js", "touch_layout.js", "chromatron_web.js", "chromatron_web_bg.wasm", ...Object.keys(IMAGES)]) {
+for (const required of ["index.html", "style.css", "main.js", "touch_layout.js", "analytics.js", "chromatron_web.js", "chromatron_web_bg.wasm", ...Object.keys(IMAGES)]) {
   assert.ok(files.includes(required), `${required} is in ${webDir}`);
 }
 const wasmBytes = readFileSync(join(webDir, "chromatron_web_bg.wasm"));
@@ -116,6 +118,7 @@ const expected = createHash("sha256")
   .update(readFileSync(join(webDir, "chromatron_web.js")))
   .update(unstamp(main))
   .update(readFileSync(join(webDir, "touch_layout.js")))
+  .update(readFileSync(join(webDir, "analytics.js")))
   .update(readFileSync(join(webDir, "style.css")))
   .update(unstamp(html))
   .digest("hex")
@@ -126,9 +129,41 @@ assert.ok(html.includes(`main.js?v=${build}`) && html.includes(`style.css?v=${bu
 assert.ok(main.includes(`const BUILD = "${build}";`), "main.js carries the build hash");
 assert.match(main, /import\(`\.\/chromatron_web\.js\?v=\$\{BUILD\}`\)/);
 assert.match(main, /import\(`\.\/touch_layout\.js\?v=\$\{BUILD\}`\)/);
+assert.match(main, /import\(`\.\/analytics\.js\?v=\$\{BUILD\}`\)/);
 assert.match(main, /new URL\(`chromatron_web_bg\.wasm\?v=\$\{BUILD\}`, import\.meta\.url\)/);
-for (const script of ["main.js", "touch_layout.js"]) {
+for (const script of ["main.js", "touch_layout.js", "analytics.js"]) {
   execFileSync(process.execPath, ["--check", join(webDir, script)], { stdio: "inherit" });
+  // Our scripts load nothing from elsewhere, but for SCRIPT_URLS.
+  const urls = readFileSync(join(webDir, script), "utf8").match(/https?:\/\/[^\s"'`)]+/g) ?? [];
+  assert.deepEqual(urls, SCRIPT_URLS[script] ?? [], `the absolute URLs in ${script}`);
+}
+
+// Analytics: off away from the site, on there or with ?analytics=debug, which never loads Google's script.
+{
+  const analytics = await import(pathToFileURL(join(webDir, "analytics.js")).href);
+  const appended = [];
+  globalThis.window = {};
+  globalThis.document = { createElement: () => ({ addEventListener() {} }), head: { append: (element) => appended.push(element) } };
+  for (const hostname of ["127.0.0.1", "localhost", "example.com"]) {
+    assert.equal(analytics.start({ hostname, search: "" }), false, `no analytics on ${hostname}`);
+  }
+  analytics.track("level_start", { game: 1 });
+  assert.equal(window.dataLayer, undefined, "nothing queued while off");
+  assert.equal(analytics.start({ hostname: "127.0.0.1", search: "?analytics=debug" }), true, "?analytics=debug turns it on");
+  analytics.track("level_end", { game: 1, success: true });
+  const entries = window.dataLayer.map((entry) => [...entry]);
+  assert.deepEqual(entries.map(([command, target]) => [command, command === "js" ? null : target]), [["js", null], ["config", "G-ZMH6NLL7C7"], ["event", "level_end"]]);
+  assert.deepEqual(entries[1][2], { content_group: "chromatron" });
+  assert.equal(appended.length, 0, "the debug mode loads no script");
+  window.gtag = () => {
+    throw new Error("blocked");
+  };
+  analytics.track("level_end", { game: 1 });
+  globalThis.window = {};
+  assert.equal(analytics.start({ hostname: "shengtuo.me", search: "" }), true, "on at the site");
+  assert.deepEqual(appended.map((script) => [script.async, script.src]), [[true, "https://www.googletagmanager.com/gtag/js?id=G-ZMH6NLL7C7"]]);
+  delete globalThis.window;
+  delete globalThis.document;
 }
 
 // Play.

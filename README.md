@@ -20,7 +20,7 @@ The original Mac versions are PowerPC Carbon apps, which no longer run on curren
 
 ## 🌐 Play in your browser
 
-**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. On a phone it switches to a touch layout: held upright, a bigger board and toolbox with a Levels picker; turned sideways, the whole original screen. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
+**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. On a phone it switches to a touch layout: held upright, a bigger board and toolbox with a Levels picker; turned sideways, the whole original screen. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. The hosted page uses Google Analytics to count visits and plays. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
 
 ## 🧰 Requirements
 
