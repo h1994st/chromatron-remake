@@ -740,6 +740,24 @@ const ACTIONS = {
     await touch("touchEnd");
     await evaluate(SETTLE);
     assert.equal((await evaluate(CELLS)).cell, dropped.cell, "a tap with Turn clockwise on turned it clockwise");
+    // The choice is remembered: a reload keeps it on, the desktop layout leaves the saved "1" alone,
+    // and turning it off is remembered too. It ends on, as the steps below found it.
+    const clockwisePressed = () => evaluate(`document.getElementById("clockwise").getAttribute("aria-pressed")`);
+    const scenario = { name: "portrait", width: 390, height: 844, ratio: 3, touch: true };
+    const pageUrl = await evaluate("location.origin + location.pathname");
+    let reloads = 0;
+    await load({ ...scenario, query: `&reload=${++reloads}` }, pageUrl);
+    assert.equal(await clockwisePressed(), "true", "Turn clockwise is still on after a reload");
+    await load({ name: "desktop", width: 1400, height: 1000, ratio: 1, touch: false }, pageUrl);
+    assert.equal(await evaluate(`localStorage.getItem("chromatron.clockwise")`), "1", "the desktop layout kept the saved choice");
+    await load({ ...scenario, query: `&reload=${++reloads}` }, pageUrl);
+    assert.equal(await clockwisePressed(), "true", "and the phone layout still has it on");
+    await evaluate(`document.getElementById("clockwise").click()`);
+    await load({ ...scenario, query: `&reload=${++reloads}` }, pageUrl);
+    assert.equal(await clockwisePressed(), "false", "Turn clockwise stays off after a reload");
+    await evaluate(`document.getElementById("clockwise").click()`);
+    await load({ ...scenario, query: `&reload=${++reloads}` }, pageUrl);
+    assert.equal(await clockwisePressed(), "true", "and on again");
     // Solve level 1 by pasting its solution, move on, and the picker shows it as solved, with a tick.
     const levelFacts = `(() => {
       const buttons = [...document.querySelectorAll("#level-grid button")];

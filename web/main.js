@@ -80,6 +80,8 @@ const changed = new Set();
 // their save is never overwritten (the app's locked ProgressFile).
 const locked = new Set();
 let wheelOn = storage.read("chromatron.wheel").value !== "0";
+// The saved "Turn clockwise" choice; `clockwise` is it in a touch layout and off on the desktop.
+let clockwiseWanted = storage.read("chromatron.clockwise").value === "1";
 let clockwise = false;
 let scale = 1;
 let framePending = false;
@@ -392,10 +394,9 @@ function setMode(next) {
   $("levels-open").hidden = mode !== "portrait";
   if (mode !== "portrait" && levelsDialog.open) levelsDialog.close();
   // A hidden toggle stays off: the desktop's taps (mouse clicks) never turn clockwise by surprise.
-  if (mode === "desktop") {
-    clockwise = false;
-    $("clockwise").setAttribute("aria-pressed", "false");
-  }
+  // A touch layout restores the saved choice; neither case writes it.
+  clockwise = mode !== "desktop" && clockwiseWanted;
+  $("clockwise").setAttribute("aria-pressed", String(clockwise));
   document.body.style.paddingLeft = "";
   views = mode === "portrait" ? [boardView, toolboxView] : [frameView];
   // The credits follow the texts in portrait, and sit at the end of the help in landscape, which
@@ -969,6 +970,8 @@ function wire() {
   const clockwiseButton = $("clockwise");
   clockwiseButton.addEventListener("click", () => {
     clockwise = !clockwise;
+    clockwiseWanted = clockwise;
+    storage.write("chromatron.clockwise", clockwise ? "1" : "0");
     clockwiseButton.setAttribute("aria-pressed", String(clockwise));
   });
   const fullscreenButton = $("fullscreen");
