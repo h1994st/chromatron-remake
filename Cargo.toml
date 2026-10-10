@@ -9,7 +9,7 @@ members = [
 
 [workspace.package]
 edition = "2024"
-version = "1.3.2"
+version = "1.4.0"
 publish = false
 
 [profile.release]
