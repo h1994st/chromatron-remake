@@ -4,66 +4,76 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A faithful native macOS (Apple Silicon) port, in Rust, of Sean Barrett's Chromatron 1–4 laser puzzle games. The originals in `chromatron_mac/` are 32-bit PowerPC Mach-O Carbon apps (C1 v1.15, C2 v1.4, C3 v1.1, C4 v1.0). Everything — game rules, levels, sprites, text — is recovered from our own decompilation of those binaries. The reference look is the **Mac** version (not Win32).
+A faithful, independent Rust port of Sean Barrett's Chromatron 1–4 laser puzzle games:
+- four native macOS (Apple Silicon) apps;
+- one browser page, live at https://shengtuo.me/chromatron-remake/.
 
-Status: Plan 7 done: all four games are decoded, played by their own `RuleSet` and shipped as four apps (`just run 1`…`4`, `just bundle` → `dist/Chromatron.app`, `dist/Chromatron 2.app`, `dist/Chromatron 3.app`, `dist/Chromatron 4.app`) and as one browser page (`just web` → `dist/web/`, deployed on `v*` tags to https://shengtuo.me/chromatron-remake/, with a touch layout for phones). Next: play-testing and polish. The design specs live locally at `docs/superpowers/specs/2026-10-07-chromatron-port-design.md` and `docs/superpowers/specs/2026-10-09-chromatron-web-design.md` (read them before implementing anything).
+The originals in `chromatron_mac/` are PowerPC Carbon apps. Rules, levels, sprites and text all come from our own decompilation of them. The reference look is the Mac version, not Win32.
+
+Design specs and implementation plans live locally in `docs/superpowers/`. Read the relevant spec before changing behaviour.
 
 ## Hard rules
 
-- **No code or data from other ports of Chromatron** (their source, decompiled output, extracted data, scripts). This port is independent. Resolve unclear behavior from our own disassembly.
-- **No copyrighted game data in git.** `chromatron_mac/`, the zip, and `re/out/` (decompiled output) are git-ignored. Levels/sprites/strings are decoded from the local originals at build time and embedded in the binary. The browser build (the `.wasm` and its JS glue in `dist/web/`) embeds the same data and is build output only; the Pages workflow publishes it, git never holds it. Chromatron 2–4 were paid shareware. The one exception: the four README screenshots of our port in `assets/screenshots/` (made by `just screenshots`); commit no other images derived from the games.
-- **`docs/` is local-only** (git-ignored) — never commit specs or plans.
-- **Commands go in the `justfile`**, not shell scripts.
-- **Homebrew deps go in `Brewfile` only via `brew bundle add <name>`** (`--cask` for casks) — never edit the Brewfile by hand. Rust comes from rustup, not Homebrew.
-- **Avoid generic names** for crates/modules (e.g. not `extract`).
-- **Performance is a requirement from day 1**: no allocations in per-frame/trace paths, event-driven redraw, check `just bench` against the budgets in the spec.
-- Bundle IDs: `me.shengtuo.chromatron1` … `me.shengtuo.chromatron4`.
-- Commits and PRs carry no Claude attribution (configured in `.claude/settings.json`).
+- **Independent work.** Take no code or data from other Chromatron ports. Resolve unclear behaviour from our own disassembly (`re/notes/`).
+- **No game data in git.**
+  - The originals, decompiled output (`re/out/`), `insta` snapshots and every build output (`dist/`, `target/`, the `.wasm`) stay out of git. Game data is decoded from the local originals at build time.
+  - The only game-derived files allowed in git are the four README screenshots in `assets/screenshots/`. `assets/social/` is our own artwork.
+- **`docs/` is local-only.** Never commit it.
+- **Tooling.**
+  - Commands go in the `justfile`; there are no shell scripts.
+  - Homebrew deps are added only via `brew bundle add <name>`.
+  - Rust comes from rustup.
+- **Naming.** Avoid generic names for crates and modules (e.g. not `extract`, `utils`).
+- **Performance from day 1.**
+  - No allocation in per-frame or trace paths.
+  - Redraw is event-driven.
+  - `just bench` must stay within the spec's budgets.
+- **Per-game behaviour** comes from that game's own binary. Games 2–4 were reverse-engineered by diffing against game 1. The differences live in `lumen`'s `RuleSet`.
+- **Identifiers.** Bundle IDs are `me.shengtuo.chromatron1` … `4`. Commits and PRs carry no Claude attribution.
 
-## Git conventions
+## Git
 
-- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/) — `type(scope): subject`, e.g. `feat(lumen): trace beams through splitters`, `chore: add Brewfile`. Scopes are crate or area names (`spectrograph`, `lumen`, `chromatron`, `re`, `just`). Leave the body empty in most cases; if really needed, one or two short sentences.
-- **Branches:** [Conventional Branch](https://conventional-branch.github.io/) — `<type>/<short-kebab-description>` with type in `feature`, `bugfix`, `hotfix`, `release`, `chore`, e.g. `feature/c1-level-decoder`.
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/), `type(scope): subject`. Scopes are crate or area names: `spectrograph`, `lumen`, `chromatron`, `chromatron-web`, `web`, `re`, `just`. The body is empty unless really needed.
+- **Branches:** [Conventional Branch](https://conventional-branch.github.io/), `<type>/<kebab-description>`. The type is `feature`, `bugfix`, `hotfix`, `release` or `chore`.
+- **Releases:**
+  - Finished branches are squash-merged into `main`.
+  - A release bumps the workspace version and is tagged `v*`.
+  - Pushing a `v*` tag deploys the web page.
 
-## Commands (justfile)
+## Commands
 
-| Recipe | Action |
+`just` lists every recipe. The common ones:
+
+| Recipe | Purpose |
 |---|---|
-| `just init` | first-time setup: `setup` then `fetch-originals` |
-| `just setup` | `brew bundle` (ghidra, just, node, radare2, unar) |
-| `just fetch-originals` | download `chromatron_mac.zip` from silverspaceship.com, check its SHA-256, unpack the `.sit` archives with `unar` into `chromatron_mac/` (or `$CHROMATRON_ORIGINALS`); no-op if all four apps are there |
-| `just decompile <game>` | Ghidra headless (`re/ghidra/` scripts) → `re/out/chromatron<game>/` |
-| `just dump <game>` | `spectrograph` CLI: print a game's sections, strings and levels with names and hints as ASCII grids; write `re/out/chromatron<game>/sprites.png` |
-| `just run <game>` | `cargo run --release --bin chromatron<game>` (game 1–4); `CHROMATRON_PROFILE=1` logs frame timings |
-| `just snapshot <game> <png> [level] [solution]` | run the app, write its first presented frame (text included) to a PNG and quit; `level` is a strip number 1–50 (default 1), `solution` is `stored` or copied text such as `3-17-hODwhH`; never reads or writes the save file |
-| `just screenshots` | regenerate the README screenshots in `assets/screenshots/` (a solved level of each game, via `snapshot`) |
-| `just shot <game> <level> [solution]` | `lumen shot`: render level 1–50 of game 1–4 to `re/out/shots/`; `solution` is `stored` or copied text such as `1-01-hI` |
-| `just lint` | `cargo fmt --all --check` + `cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings` |
-| `just test` | `cargo test --workspace --features lumen/cli` (needs the originals: `chromatron`'s and `chromatron-web`'s `build.rs` embed them) |
-| `just bench` | criterion benches for `trace` and `render` on real levels of every game; fails when over the spec's budgets |
-| `just bundle` | release builds → `dist/Chromatron.app`, `dist/Chromatron 2.app`, `dist/Chromatron 3.app` and `dist/Chromatron 4.app` (Info.plist, icon and Get Info text from each original), ad-hoc signed |
-| `just wasm-bindgen-version` | print the `wasm-bindgen` version locked in `Cargo.lock`; the CLI must match (`cargo install wasm-bindgen-cli --locked --version <it>`) |
-| `just web` | build `chromatron-web` for `wasm32-unknown-unknown` (`web-release` profile), run `wasm-bindgen --target web` and copy `web/*` into `dist/web/`; refuses a missing or mismatched CLI |
-| `just web-serve [port]` | `just web`, then serve `dist/web/` at `http://127.0.0.1:8000/` (Ctrl-C stops it) |
-| `just web-check` | `just web`, then a Node smoke test (`crates/chromatron-web/tests/web_check.mjs`): every game starts, every `tests/solutions/` fixture wins and reloads from its save, wasm < 600 000 bytes, page < 150 000 bytes gzip, relative URLs only (the site's own absolute URL only in the canonical link and OG/Twitter tags), the OG/Twitter tags, JSON-LD and the social PNGs' sizes; then `touch_layout_check.mjs` tests `web/touch_layout.js`; CI runs it before deploying |
-| `just web-shots [dir]` | `just web`, then `crates/chromatron-web/tests/web_shots.mjs`: headless Google Chrome (`$CHROME` overrides the path) photographs the page at 1400×1000, 844×390, 390×664 and 390×844 (DPR 3, touch emulation) and with `?layout=touch`. It writes `<name>.png`/`.json` into `dir` (default `re/out/web-shots`; inside the repo only `re/out/`, `dist/` or `target/`, all git-ignored, are allowed) and checks layouts, pixels, keys and scripted touches. Chrome and its temporary profile never outlive a run. Local only |
-| `just social-images` | render `assets/social/og.svg` and `icon.svg` in headless Chrome to `web/og.png` (1200×630, ≤ 300 000 bytes) and `web/apple-touch-icon.png` (180×180), squeezed by `png_squeeze.mjs`; `assets/social/` holds our own artwork for the site's social image and icons and contains nothing from the games. Local only |
-| `just smoke [game]` | bundle game 1 (default) to 4, launch, check ~0% idle CPU, quit via Apple Event, check the save file was written (touches the real save folder) |
-| `cargo run -p spectrograph -- path <game>` | print a game's executable path |
+| `just init` | first-time setup: Homebrew deps and the original games |
+| `just lint` / `just test` | rustfmt + clippy / the whole test suite (needs the originals) |
+| `just run <game>` | run a macOS app (game 1–4) |
+| `just bundle` | build the four `.app`s into `dist/` |
+| `just bench` | engine benchmarks against the performance budgets |
+| `just web` / `just web-serve` | build the browser page into `dist/web/` / serve it locally |
+| `just web-check` | Node smoke test of the built page (CI runs it) |
+| `just web-shots` | headless-Chrome screenshots and checks of the page's layouts |
+| `just dump <game>` / `just decompile <game>` | inspect a game's decoded data / Ghidra decompile |
 
-Single test: `cargo test -p <crate> <test_name>`; snapshot review: `cargo insta review`.
+To run a single test, use `cargo test -p <crate> <name>`. Review snapshots with `cargo insta review`.
 
 ## Architecture
 
-Cargo workspace, four crates, strict layering `spectrograph` → `lumen` → shells (`chromatron` for macOS, `chromatron-web` for the browser):
+The Cargo workspace has a strict layering: `spectrograph` → `lumen` → shells.
 
-- **`crates/spectrograph`** — the data types (`GameData`, `Level`, `Record`, `Sprite`, `UiText`, built on `Cow<'static, …>` so a build script can emit them as `static`s) are always compiled; parsing the PPC Mach-O (`object` crate, big-endian) sits behind the `decode` feature; the default is `cli` (implies `decode`, adds PNG output), and library consumers (lumen, the app) depend with `default-features = false`. It decodes levels, hints, palette-indexed 24×24 sprites, the palette and beam colours (as `0x00RRGGBB`) and UI strings via a per-game table of data locations (`DataMap` in `data_map.rs`; `c1.rs` … `c4.rs`). Every `Level` carries its `game` and `name` ("" in C1); `UiText` strings a game lacks are "". Each game pins the SHA-256 of its expected binary; mismatch is a hard error. `spectrograph::embed` (feature `decode`) writes a game's data as Rust `static`s for the shells' build scripts.
-- **`crates/lumen`** — pure engine, no platform deps (`spectrograph` with `default-features = false`). `Cell` keeps the raw (type, colour, dir) bytes; `Colour` (3-bit RGB mask) and `Dir` (0–7) are `u8`s. `transfer` (per-piece rules), `trace` (fixed beam lists sized for C4's 128-beam cap, each game's own cap applied, into a reusable `BeamField`, no allocation; beams carry an entanglement tag), win check, `bsd_qsort` (exact FreeBSD `qsort` for toolbox and clipboard order), unlock rule, save-file and clipboard byte codecs, `GameState` + pure `handle(InputEvent) -> Effects`, the shells' shared input rules (`gesture`: `ButtonLatch`, `key_byte`, `typed_text`, `WheelGate` on millisecond time), `Damage` (dirty rects between presents), `resume_slot`, and `render` into a 640×480 `&mut [u32]` of `0x00RRGGBB` (softbuffer's format) plus a list of text boxes. Per-game differences live in one `RuleSet` per game (`rule_set.rs`: piece types, splitter variant, beam cap, teleport targets, fixed-point passes, unlock rule, cheat key, save file name, bit permutation and format marker, saved-board ids, clipboard digit, text-box set, mobile-teleporter sprite); a `Board` carries its `game`, so `trace` and the clipboard codec follow it, while the save codec takes the `RuleSet`. The complementor pass (C2 on) and the gate pass around it (C3 on) run inside `trace` with stack scratch only. `lumen shot` (feature `cli`, off by default) renders a level to PNG.
-- **`crates/chromatron`** — macOS shell: winit 0.30 (`ControlFlow::Wait`) + softbuffer + muda menus (the original nib's, plus app and View menus) + objc2 (NSUserDefaults for `UseMouseWheelToChangeLevel` and our own `LastLevelSlot` (reopen on the last level; not in the save file), NSPasteboard, Core Text with Lucida Grande 13 pt for text boxes, cached per string and rect). `build.rs` decodes the originals (`spectrograph/decode` as a build-dependency only) into `static GAME` data, so the app has no parser. `lumen` renders 640×480; the shell upscales only damaged rects into a device-resolution canvas (integer scale, letterboxed), composites text, and presents. Progress is the original `.dat` format in `~/Library/Application Support/Chromatron N/`. Bins `chromatron1` … `chromatron4`, one `AppSpec` each, `build.rs` embeds every game through `spectrograph::embed` (so building the crate needs all four originals). Keys reach `handle_key` as typed text, except a control-character cheat key (C4's Control-O), which comes from NSEvent's `characters`.
-- **`crates/chromatron-web`** — browser shell (`cdylib` + `rlib`, `wasm-bindgen` pinned to the CLI version): `build.rs` embeds all four games like the app's; one `#[wasm_bindgen] Session` holds a `GameState` per game (created on first `select`), takes pointer/key/wheel/clipboard/toolbar input in frame pixels and returns `Flag` bits (`Redraw`, `Save`, `Slot`, `Consumed`, `CorruptSave`); `render` converts only damaged rects to RGBA in a buffer allocated once, read by JS through `rgba_ptr`/`dirty_ptr`; text boxes cross only when they change. For the touch layout it also hands over lumen's board, toolbox and strip-number rects (`board_rect`, `toolbox_rect`, `strip_number_rect`), each level's `LevelState` (`slot_state`) and `open_slot`. Saves are base64 of the original `.dat` bytes. Pure helpers (`pixels`, `stage`, `save_text`, `browser_keys`) and the session have native tests in `just test`. Release builds use `[profile.web-release]`.
-- **`web/`** — the static page (`index.html`, `style.css`, `main.js`, `touch_layout.js`, `analytics.js`; no bundler, no npm): one compact toolbar (game `<select>` (`#1`…`#4`), ◀ ▶, an Actions popover with Reset/Copy/Paste, toggles, Help); on the desktop two stacked canvases (pixels `image-rendering: pixelated` at an integer CSS scale (exact fit below 1×); text at `devicePixelRatio`); with a coarse pointer a touch layout (`?layout=touch|desktop` forces one, a test hook): portrait scrolls as a page under a sticky toolbar, with the board (full width) and toolbox as separate canvases at fill scales (the exact fit, snapped to a 1/devicePixelRatio step only when that loses under 3 %; the toolbox fills the small viewport (`100svh`) below the board, at least 1.4×), the texts, Next level button and credits below them, the toolbar's ▶ highlighted while the level is won, and a Levels picker sheet, landscape the whole frame edge to edge beside a toolbar down the side; touches wait 8 CSS px before dragging and drag a point lifted 40 CSS px (pure rules in `touch_layout.js`, tested in Node); Pointer Events, keys (browser shortcuts untouched except Chromatron 4's Control-O), wheel, clipboard, `localStorage` (`chromatronN.save`, `chromatronN.lastLevelSlot`, `chromatron.game`, `chromatron.wheel`; never overwrites a save it could not read; a tab writes only the games it changed and reloads a game another tab stored, last writer wins when both changed it), one `requestAnimationFrame` per change. `analytics.js` (loaded after the first paint) sends GA4 page views and game events (`select_game`, `level_start` debounced 1 s, `level_end`, `tutorial_begin`, `copy_solution`, `paste_solution`, `open_levels`) only on shengtuo.me (or h1994st.github.io); `?analytics=debug` pushes them to `window.dataLayer` on any host without loading Google's script, for `just web-shots`. All URLs relative, stamped `?v=<wasm hash>` by `just web`. `.github/workflows/pages.yml` runs `just web-check` on every push to `main` (macOS runner; originals, CLI and cargo caches) and deploys to https://shengtuo.me/chromatron-remake/ on `v*` tags.
-- **`re/`** — `ghidra/` (our headless scripts, committed), `notes/chromatronN/{data,logic,platform}.md` plus `*.names.tsv` (our RE findings: function roles, data addresses, formats, quirks, and the names `ApplyNames` applies — committed), `out/` (ignored).
+- **`spectrograph`** decodes each original binary (its SHA-256 is pinned) into data types. It also emits that data as Rust `static`s, so the shells' build scripts can embed the games.
+- **`lumen`** is the pure, platform-free engine:
+  - beam tracing, piece rules and the win check;
+  - the save and clipboard codecs in the original formats;
+  - `GameState::handle(InputEvent) -> Effects`, the input rules shared by both shells;
+  - rendering into a 640×480 frame plus text boxes.
+- **`chromatron`** is the macOS shell, built on winit, softbuffer, muda menus and objc2/Core Text. There is one binary per game. Progress is saved in the original `.dat` format.
+- **`chromatron-web`** is the wasm shell, a `wasm-bindgen` `Session` that drives the four games for the page.
+- **`web/`** is the static page: plain HTML, CSS and JS, with no bundler.
+  - It has a desktop layout and a touch layout (portrait/landscape) for phones.
+  - It saves progress in `localStorage` and sends GA4 analytics only on the live site.
+  - `.github/workflows/pages.yml` deploys it.
+- **`re/`** holds our Ghidra scripts and reverse-engineering notes (`notes/chromatronN/*.md`). `re/out/` is git-ignored.
 
-Per-game behavior differs and must come from **that game's own binary**: e.g. C2 changed splitter semantics ("Splitters in the original Chromatron didn't work correctly") and adds complementor/multi-filter/twister; C3 adds dual-reflector/quad-bender (plus gate, starburst and mobile teleporter, used only in unreachable levels, and the gate pass); C4 adds occupied squares, the primary logic gate, a 128-beam cap and the Control-O cheat. Games 2–4 are reverse-engineered by diffing against game 1.
-
-Fidelity is verified by spectrograph decode tests, table-driven per-piece rule tests, every original level checked against the tracer and win rule, `insta` ASCII beam-field snapshots per level (derived data, so local only: `crates/lumen/tests/snapshots/` is git-ignored and `.config/insta.yaml` records missing ones), and solved-level fixtures in `tests/solutions/gameN/level-NN.txt` (small codec examples in the original clipboard format, e.g. `2-07-OFHqye`, `3-17-hODwhH`, `4-29-BROA`, already in the notes). There is no pixel matching against reference screenshots.
+Fidelity is checked by decode tests, per-piece rule tests, every original level run through the tracer and win rule, and local `insta` beam-field snapshots. There are also solved-level fixtures in `tests/solutions/`.
