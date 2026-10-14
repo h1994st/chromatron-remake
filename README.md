@@ -6,7 +6,21 @@
 
 Native Apple Silicon versions of Sean Barrett's laser puzzle games **Chromatron**, **Chromatron 2**, **Chromatron 3** and **Chromatron 4** (Silver Spaceship Software, 2003–2004). 🔦✨
 
-The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps that look and play like the originals: same rules, levels, sprites and text. The same engine also runs in the browser.
+The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps that look and play like the originals: same rules, levels, sprites and text. The same engine also runs in the browser, which adds a modern look with animated light, and keeps the classic one a click away.
+
+<table>
+  <tr>
+    <td align="center"><img src="assets/screenshots/chromatron1-modern.jpg" alt="Chromatron, level 46 solved, in the modern look" width="400"><br><b>Chromatron</b></td>
+    <td align="center"><img src="assets/screenshots/chromatron2-modern.jpg" alt="Chromatron 2, level 22 solved, in the modern look" width="400"><br><b>Chromatron 2</b></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="assets/screenshots/chromatron3-modern.jpg" alt="Chromatron 3, level 41 solved, in the modern look" width="400"><br><b>Chromatron 3</b></td>
+    <td align="center"><img src="assets/screenshots/chromatron4-modern.jpg" alt="Chromatron 4, level 21 solved, in the modern look" width="400"><br><b>Chromatron 4</b></td>
+  </tr>
+</table>
+
+<details>
+<summary>The classic look, as in the Mac apps</summary>
 
 <table>
   <tr>
@@ -19,12 +33,14 @@ The original Mac versions are PowerPC Carbon apps, which no longer run on curren
   </tr>
 </table>
 
+</details>
+
 > [!NOTE]
 > 📦 This repository contains **no game data**. The build reads the levels, graphics and text from the original apps, which you download from the author's site (see below), and embeds them in the new apps on your machine. The screenshots above are of this port.
 
 ## 🌐 Play in your browser
 
-**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. On a phone it switches to a touch layout: held upright, a bigger board and toolbox with a Levels picker; turned sideways, the whole original screen. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. The hosted page uses Google Analytics to count visits and plays. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
+**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. It opens in the modern look: beams sweep out from their lasers, targets flash as they light, and pieces lift, turn and land. **Actions ▸ Classic look** switches to the original graphics, and the page remembers your choice. With the system's reduced-motion setting on, every change appears at once. On a phone it switches to a touch layout, held upright or turned sideways. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. The hosted page uses Google Analytics to count visits and plays. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
 
 ## 🧰 Requirements
 

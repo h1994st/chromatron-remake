@@ -17,7 +17,7 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 - **Independent work.** Take no code or data from other Chromatron ports. Resolve unclear behaviour from our own disassembly (`re/notes/`).
 - **No game data in git.**
   - The originals, decompiled output (`re/out/`), `insta` snapshots and every build output (`dist/`, `target/`, the `.wasm`) stay out of git. Game data is decoded from the local originals at build time.
-  - The only game-derived files allowed in git are the four README screenshots in `assets/screenshots/`. `assets/promo/` and the web page's `og.png` and touch icon are our own artwork: the stills are rendered by `trailer/`, and `blog-concept.svg` is hand-made.
+  - The only game-derived files allowed in git are the eight README screenshots in `assets/screenshots/`: one solved level per game in the modern look (`just screenshots-modern`) and in the classic one. `assets/promo/` and the web page's `og.png` and touch icon are our own artwork: the stills are rendered by `trailer/`, and `blog-concept.svg` is hand-made.
 - **`docs/` is local-only.** Never commit it.
 - **Tooling.**
   - Commands go in the `justfile`; there are no shell scripts.

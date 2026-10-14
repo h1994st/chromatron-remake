@@ -196,8 +196,22 @@ snapshot game png level="1" solution="":
     CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
 
-# Regenerate the README screenshots in assets/screenshots/: one solved level per game
+# Regenerate the README's modern screenshots in assets/screenshots/ as 1280 × 800 JPEGs: the same solved level per game as the classic ones
+screenshots-modern:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --quiet --release -p halation --features cli
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    for shot in 1:46 2:22 3:41 4:21; do
+        game="${shot%%:*}"
+        "{{justfile_directory()}}/target/release/halation" shot "$game" "${shot##*:}" "$tmp/$game.png" stored --easel 1280x800@1
+        sips -s format jpeg -s formatOptions 90 "$tmp/$game.png" --out "{{justfile_directory()}}/assets/screenshots/chromatron$game-modern.jpg" >/dev/null
+    done
+
+# Regenerate the README screenshots in assets/screenshots/: one solved level per game, in the modern look and the classic one
 screenshots: \
+    screenshots-modern \
     (snapshot "1" (justfile_directory() / "assets/screenshots/chromatron1.png") "46" "stored") \
     (snapshot "2" (justfile_directory() / "assets/screenshots/chromatron2.png") "22" "stored") \
     (snapshot "3" (justfile_directory() / "assets/screenshots/chromatron3.png") "41" "stored") \
