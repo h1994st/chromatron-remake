@@ -1236,3 +1236,99 @@ fn memory_stays_within_budget_across_resizes() {
         grown as f64 / MB as f64
     );
 }
+
+/// Ruling P4 (phase 3): a rect the shell drew over is recomposed at the next paint, which then
+/// equals the clean frame; until then a paint leaves the shell's drawing alone.
+#[test]
+fn an_invalidated_rect_is_recomposed_at_the_next_paint() {
+    let game = state(Game::C1, 0, false);
+    let easel = Easel::new(800, 600, 1.0);
+    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut out = vec![0u32; 800 * 600];
+    lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+    let clean = out.clone();
+    let scribble = DeviceRect::new(500, 40, 560, 70);
+    for y in 40..70 {
+        out[y * 800 + 500..y * 800 + 560].fill(0x00ff_00ff);
+    }
+    lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+    assert!(out != clean, "an idle paint recomposes nothing");
+    lightbox.invalidate(scribble);
+    lightbox.invalidate(DeviceRect::new(790, 590, 900, 700)); // clipped to the canvas
+    let damage = lightbox
+        .paint(&game, SETTLED, Output::Xrgb(&mut out))
+        .damage
+        .to_vec();
+    assert!(damage.contains(&scribble), "{damage:?}");
+    assert!(
+        damage.iter().all(|r| r.right <= 800 && r.bottom <= 600),
+        "{damage:?}"
+    );
+    assert!(out == clean, "the scribble is gone");
+    let damage = lightbox
+        .paint(&game, SETTLED, Output::Xrgb(&mut out))
+        .damage
+        .len();
+    assert_eq!(damage, 0, "an invalidation is used once");
+}
+
+/// More invalidated rects than `MAX_DAMAGE` merge, and every scribbled pixel is still
+/// recomposed.
+#[test]
+fn more_invalidations_than_max_damage_still_recompose_every_rect() {
+    let game = state(Game::C1, 0, false);
+    let easel = Easel::new(800, 600, 1.0);
+    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut out = vec![0u32; 800 * 600];
+    lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+    let clean = out.clone();
+    let count = MAX_DAMAGE as i32 + 4;
+    for k in 0..count {
+        // Disjoint, far enough apart that no two touch.
+        let (left, top) = (20 + 60 * k, 30 + 40 * k);
+        let scribble = DeviceRect::new(left, top, left + 12, top + 9);
+        for y in top..top + 9 {
+            let row = y as usize * 800;
+            out[row + left as usize..row + left as usize + 12].fill(0x00ff_00ff);
+        }
+        lightbox.invalidate(scribble);
+    }
+    let damage = lightbox
+        .paint(&game, SETTLED, Output::Xrgb(&mut out))
+        .damage
+        .len();
+    assert!(damage <= MAX_DAMAGE, "{damage} rects");
+    assert!(out == clean, "every scribble is gone");
+}
+
+/// `reset` then `invalidate`: one cold paint covers the rect too, and the invalidation is not
+/// left over for the paint after it.
+#[test]
+fn a_reset_then_an_invalidation_is_one_cold_paint() {
+    let game = state(Game::C1, 0, false);
+    let easel = Easel::new(800, 600, 1.0);
+    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut out = vec![0u32; 800 * 600];
+    lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+    let clean = out.clone();
+    for y in 40..70 {
+        out[y * 800 + 500..y * 800 + 560].fill(0x00ff_00ff);
+    }
+    lightbox.reset();
+    lightbox.invalidate(DeviceRect::new(500, 40, 560, 70));
+    assert_eq!(
+        lightbox
+            .paint(&game, SETTLED, Output::Xrgb(&mut out))
+            .damage,
+        [full(easel)]
+    );
+    assert!(out == clean, "the scribble is gone");
+    assert_eq!(
+        lightbox
+            .paint(&game, SETTLED, Output::Xrgb(&mut out))
+            .damage
+            .len(),
+        0,
+        "nothing is left over"
+    );
+}

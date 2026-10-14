@@ -5,14 +5,22 @@ pub mod c1;
 pub mod c2;
 pub mod c3;
 pub mod c4;
+pub mod caption_typeset;
 pub mod frame_timing;
+pub mod layer_present;
+pub mod look_switch;
 pub mod menus;
+pub mod modern_stage;
+pub mod motion_watch;
 pub mod pasteboard;
+pub mod press_gate;
 pub mod progress_file;
 pub mod snapshot;
 pub mod typeset;
 pub mod user_defaults;
 pub mod viewport;
+pub mod wake_schedule;
+pub mod window_shape;
 
 mod game_window;
 

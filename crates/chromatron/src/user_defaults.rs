@@ -1,16 +1,21 @@
 //! The preferences, in NSUserDefaults under the app's bundle id: the original's
-//! `UseMouseWheelToChangeLevel` (platform.md P6) and our `LastLevelSlot` (the level to reopen on;
-//! a modern touch, not part of the original save file).
+//! `UseMouseWheelToChangeLevel` (platform.md P6), our `LastLevelSlot` (the level to reopen on) and
+//! `ClassicLook` (spec §11; modern touches, not part of the original save file).
 
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2_foundation::{NSBundle, NSString, NSUserDefaults};
+
+use crate::look_switch::{Look, look_setting};
 
 /// The original's preference key (platform.md P6).
 pub const WHEEL_KEY: &str = "UseMouseWheelToChangeLevel";
 
 /// The strip slot (0-based) the player was last on.
 pub const LAST_SLOT_KEY: &str = "LastLevelSlot";
+
+/// Whether the player chose the classic look (spec §11); absent means modern.
+pub const CLASSIC_LOOK_KEY: &str = "ClassicLook";
 
 pub struct Preferences {
     defaults: Retained<NSUserDefaults>,
@@ -61,6 +66,24 @@ impl Preferences {
         self.defaults
             .setInteger_forKey(slot, &NSString::from_str(LAST_SLOT_KEY));
     }
+
+    /// The stored `ClassicLook`, `None` when never written.
+    pub fn classic_look(&self) -> Option<bool> {
+        let key = NSString::from_str(CLASSIC_LOOK_KEY);
+        self.defaults
+            .objectForKey(&key)
+            .map(|_| self.defaults.boolForKey(&key))
+    }
+
+    pub fn set_classic_look(&self, on: bool) {
+        self.defaults
+            .setBool_forKey(on, &NSString::from_str(CLASSIC_LOOK_KEY));
+    }
+
+    /// The look to open in.
+    pub fn look(&self) -> Look {
+        look_setting(self.classic_look())
+    }
 }
 
 /// A missing (or never written) value means on, as in the original (`load_prefs`, platform.md P6).
@@ -71,6 +94,11 @@ fn wheel_setting(stored: Option<bool>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_classic_look_key_is_the_specs() {
+        assert_eq!(CLASSIC_LOOK_KEY, "ClassicLook");
+    }
 
     #[test]
     fn the_wheel_preference_is_on_unless_stored_off() {

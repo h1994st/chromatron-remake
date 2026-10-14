@@ -6,18 +6,21 @@ version.workspace = true
 publish.workspace = true
 
 [dependencies]
+block2 = "=0.6.2"
 env_logger = { version = "=0.11.11", default-features = false }
+halation = { path = "../halation" }
 log = "=0.4.34"
 lumen = { path = "../lumen" }
 muda = "=0.21.1"
 objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
-objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFAttributedString", "CFCGTypes", "CFDictionary", "CFString"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSAccessibility", "NSPasteboard", "NSScreen", "NSWindow", "NSWorkspace"] }
+objc2-core-foundation = { version = "=0.3.2", default-features = false, features = ["std", "CFArray", "CFAttributedString", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
 objc2-core-graphics = { version = "=0.3.2", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGPath"] }
-objc2-core-text = { version = "=0.3.2", default-features = false, features = ["std", "CTFont", "CTFrame", "CTFramesetter", "CTStringAttributes", "objc2-core-graphics"] }
-objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSBundle", "NSString", "NSUserDefaults"] }
+objc2-core-text = { version = "=0.3.2", default-features = false, features = ["std", "CTFont", "CTFontDescriptor", "CTFontTraits", "CTFrame", "CTFramesetter", "CTLine", "CTStringAttributes", "objc2-core-graphics"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "block2", "NSBundle", "NSGeometry", "NSNotification", "NSOperation", "NSString", "NSUserDefaults"] }
+objc2-io-surface = { version = "=0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes", "libc", "objc2", "objc2-core-foundation"] }
+objc2-quartz-core = { version = "=0.3.2", default-features = false, features = ["std", "CALayer", "CATransaction", "objc2-core-foundation"] }
 png = "=0.18.1"
-softbuffer = "=0.4.8"
 spectrograph = { path = "../spectrograph", default-features = false }
 winit = "=0.30.13"
 
@@ -27,3 +30,7 @@ spectrograph = { path = "../spectrograph", default-features = false, features = 
 [dev-dependencies]
 spectrograph = { path = "../spectrograph", default-features = false, features = ["decode"] }
 tempfile = "=3.27.0"
+
+[[bench]]
+name = "captions"
+harness = false

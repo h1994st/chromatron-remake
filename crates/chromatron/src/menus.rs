@@ -1,5 +1,5 @@
 //! The menu bar: the original nib's menus (platform.md P5), the standard application menu, and
-//! the View menu for the modern touches (fullscreen and scale).
+//! the View menu for the modern touches (fullscreen, the look, scale) and File ▸ Levels….
 
 use muda::accelerator::Accelerator;
 use muda::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
@@ -27,6 +27,10 @@ pub enum MenuCommand {
     ToggleFullscreen,
     /// View ▸ Scale N×.
     Scale(u32),
+    /// View ▸ Classic Look (spec §13).
+    ToggleClassicLook,
+    /// File ▸ Levels…: the modern level sheet (spec §13).
+    Levels,
 }
 
 impl MenuCommand {
@@ -42,6 +46,8 @@ impl MenuCommand {
             MenuCommand::PasteLevel => "paste-level".into(),
             MenuCommand::ToggleFullscreen => "toggle-fullscreen".into(),
             MenuCommand::Scale(n) => format!("scale-{n}"),
+            MenuCommand::ToggleClassicLook => "classic-look".into(),
+            MenuCommand::Levels => "levels".into(),
         }
     }
 
@@ -56,6 +62,8 @@ impl MenuCommand {
             "copy-level" => MenuCommand::CopyLevel,
             "paste-level" => MenuCommand::PasteLevel,
             "toggle-fullscreen" => MenuCommand::ToggleFullscreen,
+            "classic-look" => MenuCommand::ToggleClassicLook,
+            "levels" => MenuCommand::Levels,
             _ => {
                 let n: u32 = id.strip_prefix("scale-")?.parse().ok()?;
                 if !(MIN_SCALE..=MAX_SCALE).contains(&n) {
@@ -79,6 +87,8 @@ pub const COPY_KEY: &str = "Cmd+C";
 pub const PASTE_KEY: &str = "Cmd+V";
 pub const SELECT_ALL_KEY: &str = "Cmd+A";
 pub const FULLSCREEN_KEY: &str = "Ctrl+Cmd+F";
+pub const LOOK_KEY: &str = "Alt+Cmd+L";
+pub const LEVELS_KEY: &str = "Cmd+L";
 
 fn key(text: &str) -> Option<Accelerator> {
     Some(
@@ -99,18 +109,54 @@ fn disabled(title: &str, shortcut: Option<&str>) -> MenuItem {
 pub const ENTER_FULLSCREEN: &str = "Enter Full Screen";
 pub const EXIT_FULLSCREEN: &str = "Exit Full Screen";
 
+/// What the menus show: the window's fullscreen state and classic scale, the look, and whether
+/// Levels… can open the modern sheet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MenuState {
+    pub fullscreen: bool,
+    /// View ▸ Exit Full Screen's exit animation is running (winit already reports no
+    /// fullscreen; AppKit still owns the frame).
+    pub leaving: bool,
+    pub scale: usize,
+    pub classic: bool,
+    pub levels: bool,
+}
+
+/// The menu state to show, if it differs from what is shown.
+pub fn menu_update(shown: Option<MenuState>, now: MenuState) -> Option<MenuState> {
+    (shown != Some(now)).then_some(now)
+}
+
+/// View ▸ Scale applies to the classic window only, and not in fullscreen or on the way out of
+/// it (spec §13).
+pub fn scales_enabled(state: &MenuState) -> bool {
+    state.classic && !state.fullscreen && !state.leaving
+}
+
 /// The installed menu bar, kept alive for the app's lifetime, and the items whose state changes.
 pub struct MenuBar {
     _menu: Menu,
     wheel: CheckMenuItem,
     fullscreen: MenuItem,
+    classic: CheckMenuItem,
+    levels: MenuItem,
     scales: Vec<CheckMenuItem>,
 }
 
 impl MenuBar {
     /// Builds the menu bar and makes it the app's main menu. Main thread only, after the event
     /// loop exists. macOS titles the application menu with the bundle name itself.
-    pub fn install(wheel_on: bool) -> MenuBar {
+    /// `classic` is the initial Classic Look check. Levels… starts disabled, as `MenuState.levels`
+    /// (modern and a sheet picker) is not known yet; the first `show` sets it.
+    pub fn install(wheel_on: bool, classic: bool) -> MenuBar {
+        let classic_item = CheckMenuItem::with_id(
+            MenuCommand::ToggleClassicLook.id(),
+            "Classic Look",
+            true,
+            classic,
+            key(LOOK_KEY),
+        );
+        let levels = MenuItem::with_id(MenuCommand::Levels.id(), "Levels…", false, key(LEVELS_KEY));
         let wheel = CheckMenuItem::with_id(
             MenuCommand::ToggleWheel.id(),
             "Mouse Wheel Changes Level",
@@ -163,6 +209,7 @@ impl MenuBar {
                     "Previous Level",
                     Some(PREVIOUS_KEY),
                 ),
+                &levels,
                 &PredefinedMenuItem::separator(),
                 &wheel,
                 &PredefinedMenuItem::separator(),
@@ -188,7 +235,12 @@ impl MenuBar {
         let view_menu = Submenu::with_items(
             "View",
             true,
-            &[&fullscreen, &PredefinedMenuItem::separator()],
+            &[
+                &fullscreen,
+                &PredefinedMenuItem::separator(),
+                &classic_item,
+                &PredefinedMenuItem::separator(),
+            ],
         )
         .expect("muda builds the View menu");
         for scale in &scales {
@@ -213,6 +265,8 @@ impl MenuBar {
             _menu: menu,
             wheel,
             fullscreen,
+            classic: classic_item,
+            levels,
             scales,
         }
     }
@@ -221,17 +275,21 @@ impl MenuBar {
         self.wheel.set_checked(on);
     }
 
-    /// Shows the window's state: the fullscreen item's title, and a check on the current scale.
-    /// Scales can't be picked in fullscreen.
-    pub fn show_view(&self, fullscreen: bool, scale: usize) {
-        self.fullscreen.set_text(if fullscreen {
+    /// Shows the window's and the look's state: the fullscreen item's title, the Classic Look
+    /// check, Levels… enabled only for a modern sheet, and a check on the current scale where
+    /// scales apply.
+    pub fn show(&self, state: &MenuState) {
+        self.fullscreen.set_text(if state.fullscreen {
             EXIT_FULLSCREEN
         } else {
             ENTER_FULLSCREEN
         });
+        self.classic.set_checked(state.classic);
+        self.levels.set_enabled(state.levels);
+        let enabled = scales_enabled(state);
         for (item, n) in self.scales.iter().zip(MIN_SCALE..) {
-            item.set_checked(!fullscreen && n as usize == scale);
-            item.set_enabled(!fullscreen);
+            item.set_checked(enabled && n as usize == state.scale);
+            item.set_enabled(enabled);
         }
     }
 }
@@ -251,6 +309,8 @@ mod tests {
             MenuCommand::CopyLevel,
             MenuCommand::PasteLevel,
             MenuCommand::ToggleFullscreen,
+            MenuCommand::ToggleClassicLook,
+            MenuCommand::Levels,
         ];
         all.extend((MIN_SCALE..=MAX_SCALE).map(MenuCommand::Scale));
         for command in all {
@@ -279,8 +339,84 @@ mod tests {
             PASTE_KEY,
             SELECT_ALL_KEY,
             FULLSCREEN_KEY,
+            LOOK_KEY,
+            LEVELS_KEY,
         ] {
             assert!(text.parse::<Accelerator>().is_ok(), "{text}");
         }
+    }
+
+    #[test]
+    fn the_menus_are_updated_only_when_their_state_changed() {
+        let state = |fullscreen, scale, classic, levels| MenuState {
+            fullscreen,
+            leaving: false,
+            scale,
+            classic,
+            levels,
+        };
+        assert_eq!(
+            menu_update(None, state(false, 1, true, false)),
+            Some(state(false, 1, true, false))
+        );
+        assert_eq!(
+            menu_update(
+                Some(state(true, 2, true, false)),
+                state(true, 2, true, false)
+            ),
+            None
+        );
+        assert_eq!(
+            menu_update(
+                Some(state(true, 2, true, false)),
+                state(false, 2, true, false)
+            ),
+            Some(state(false, 2, true, false))
+        );
+        assert_eq!(
+            menu_update(
+                Some(state(false, 1, true, false)),
+                state(false, 1, false, true)
+            ),
+            Some(state(false, 1, false, true))
+        );
+    }
+
+    #[test]
+    fn forgetting_the_shown_state_shows_an_unchanged_state_again() {
+        // muda flips a check item on click; a command that changes nothing resets `shown`.
+        let now = MenuState {
+            fullscreen: false,
+            leaving: false,
+            scale: 2,
+            classic: true,
+            levels: false,
+        };
+        assert_eq!(menu_update(Some(now), now), None);
+        assert_eq!(menu_update(None, now), Some(now));
+        assert!(menu_update(None, now).unwrap().classic);
+    }
+
+    #[test]
+    fn scales_are_classic_and_windowed_only() {
+        let state = |fullscreen, leaving, classic| MenuState {
+            fullscreen,
+            leaving,
+            scale: 2,
+            classic,
+            levels: false,
+        };
+        assert!(scales_enabled(&state(false, false, true)));
+        assert!(!scales_enabled(&state(true, false, true)));
+        assert!(!scales_enabled(&state(false, false, false)));
+        assert!(
+            !scales_enabled(&state(false, true, true)),
+            "not during View ▸ Exit Full Screen's animation"
+        );
+    }
+
+    #[test]
+    fn the_look_and_levels_shortcuts_are_the_specs() {
+        assert_eq!((LOOK_KEY, LEVELS_KEY), ("Alt+Cmd+L", "Cmd+L"));
     }
 }

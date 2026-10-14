@@ -1,12 +1,105 @@
-//! `CHROMATRON_SNAPSHOT=path.png`: the first presented canvas as an RGB PNG, for checks without a
-//! person looking at the screen.
+//! `CHROMATRON_SNAPSHOT=path.png`: the game as an RGB PNG, for checks without a person looking
+//! at the screen. Classic writes the first presented canvas. Modern (`CHROMATRON_LOOK`, the
+//! default) paints an offscreen easel (`CHROMATRON_SNAPSHOT_SIZE`, `CHROMATRON_THEME`) settled,
+//! with its captions, before any window exists (spec §13, ruling P9), so it is independent of
+//! the window and the display. Neither reads or writes the save file or the preferences.
 
 use std::fs::File;
 use std::io::{self, BufWriter};
 use std::path::Path;
 
+use halation::{DeviceRect, Easel, Theme};
 use lumen::layout::STRIP_SLOTS;
 use lumen::{GameState, InputEvent, Redraw};
+use spectrograph::GameData;
+
+use crate::modern_stage::ModernStage;
+use crate::window_shape::theme_for;
+
+/// A modern snapshot's canvas when `CHROMATRON_SNAPSHOT_SIZE` is unset (spec §13).
+pub const DEFAULT_SNAPSHOT_SIZE: &str = "1280x800@2";
+
+/// A modern snapshot's easel and theme.
+#[derive(Debug, PartialEq)]
+pub struct ModernShot {
+    pub easel: Easel,
+    pub theme: Theme,
+}
+
+impl ModernShot {
+    /// `size` (`WxH@S` in pt and px per pt; unset or empty: 1280x800@2) and `theme` (`dark`,
+    /// the default, or `light`, which paints dark until phase 5 through `theme_for`).
+    pub fn parse(size: Option<&str>, theme: Option<&str>) -> Result<ModernShot, String> {
+        let size = size
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_SNAPSHOT_SIZE);
+        let easel = Easel::parse(size).ok_or_else(|| {
+            format!("CHROMATRON_SNAPSHOT_SIZE {size:?} is not WxH@S, such as 1280x800@2")
+        })?;
+        let theme = match theme.map(str::trim) {
+            None | Some("") | Some("dark") => theme_for(Some(winit::window::Theme::Dark)),
+            Some("light") => {
+                log::warn!("the light theme comes in phase 5; the snapshot is dark");
+                theme_for(Some(winit::window::Theme::Light))
+            }
+            Some(other) => {
+                return Err(format!(
+                    "CHROMATRON_THEME {other:?}: expected dark or light"
+                ));
+            }
+        };
+        Ok(ModernShot { easel, theme })
+    }
+
+    /// Reads `CHROMATRON_SNAPSHOT_SIZE` and `CHROMATRON_THEME`.
+    pub fn from_env() -> Result<ModernShot, String> {
+        let var = |name| std::env::var(name).ok();
+        ModernShot::parse(
+            var("CHROMATRON_SNAPSHOT_SIZE").as_deref(),
+            var("CHROMATRON_THEME").as_deref(),
+        )
+    }
+}
+
+/// A classic snapshot is the window's first frame, so a size would do nothing: an error (P9).
+pub fn classic_size_check(size: Option<&str>) -> Result<(), String> {
+    match size.map(str::trim) {
+        None | Some("") => Ok(()),
+        Some(size) => Err(format!(
+            "CHROMATRON_SNAPSHOT_SIZE {size:?} is for the modern look; a classic snapshot is the window's first frame"
+        )),
+    }
+}
+
+/// Spec §13: the game at `scene`, painted settled (`now = ∞`) on the shot's offscreen easel
+/// with its captions. Also returns where they were inked. No window, display, save file or
+/// preference.
+pub fn shoot_canvas(
+    data: &'static GameData,
+    scene: &Scene,
+    shot: &ModernShot,
+) -> Result<(Vec<u32>, Vec<DeviceRect>), String> {
+    let mut state = GameState::new(data, lumen::SaveData::fresh(lumen::RuleSet::of(data.game)));
+    scene.apply(&mut state)?;
+    let mut stage = ModernStage::new(shot.easel, shot.theme, false);
+    let mut canvas = vec![0u32; shot.easel.width as usize * shot.easel.height as usize];
+    stage.paint(&state, f64::INFINITY, &mut canvas);
+    Ok((canvas, stage.caption_rects().collect()))
+}
+
+/// `shoot_canvas`, written to `path` as a PNG.
+pub fn shoot_modern(
+    data: &'static GameData,
+    scene: &Scene,
+    shot: &ModernShot,
+    path: &Path,
+) -> Result<(), String> {
+    let (canvas, _) = shoot_canvas(data, scene, shot)?;
+    let (width, height) = (shot.easel.width as usize, shot.easel.height as usize);
+    write_png(path, &canvas, width, height)
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
+}
 
 /// Writes `pixels` (`width × height`, row-major, `0x00RRGGBB`) as an 8-bit RGB PNG.
 pub fn write_png(path: &Path, pixels: &[u32], width: usize, height: usize) -> io::Result<()> {
@@ -188,5 +281,102 @@ mod tests {
         assert_eq!(scene.apply(&mut state), Ok(()));
         assert_eq!(state.slot(), 45);
         assert!(state.is_won());
+    }
+
+    #[test]
+    fn modern_shots_default_to_1280_by_800_at_2_in_the_dark() {
+        let shot = ModernShot::parse(None, None).unwrap();
+        assert_eq!(
+            (shot.easel.width, shot.easel.height, shot.easel.px_per_pt),
+            (2560, 1600, 2.0)
+        );
+        assert_eq!(shot.theme, Theme::Dark);
+        assert_eq!(ModernShot::parse(Some(""), Some("")).unwrap(), shot);
+        let small = ModernShot::parse(Some("1280x800@1"), Some("dark")).unwrap();
+        assert_eq!((small.easel.width, small.easel.height), (1280, 800));
+    }
+
+    #[test]
+    fn modern_shots_reject_bad_sizes_and_themes() {
+        assert!(
+            ModernShot::parse(Some("1280x800"), None)
+                .unwrap_err()
+                .contains("WxH@S")
+        );
+        assert!(
+            ModernShot::parse(None, Some("sepia"))
+                .unwrap_err()
+                .contains("dark or light")
+        );
+    }
+
+    #[test]
+    fn modern_shots_paint_light_as_dark_until_phase_5() {
+        assert_eq!(
+            ModernShot::parse(None, Some("light")).unwrap().theme,
+            Theme::Dark
+        );
+    }
+
+    #[test]
+    fn a_classic_snapshot_rejects_a_size() {
+        assert_eq!(classic_size_check(None), Ok(()));
+        assert_eq!(classic_size_check(Some(" ")), Ok(()));
+        assert!(
+            classic_size_check(Some("1280x800@2"))
+                .unwrap_err()
+                .contains("modern look")
+        );
+    }
+
+    #[test]
+    fn a_modern_shot_is_byte_stable_and_sized() {
+        let dir = tempfile::tempdir().unwrap();
+        let shot = ModernShot::parse(Some("800x600@1"), None).unwrap();
+        let scene = Scene::parse(Some("1"), Some("1-01-hI")).unwrap();
+        let (a, b) = (dir.path().join("a.png"), dir.path().join("b.png"));
+        shoot_modern(&crate::c1::GAME, &scene, &shot, &a).unwrap();
+        shoot_modern(&crate::c1::GAME, &scene, &shot, &b).unwrap();
+        assert_eq!(
+            std::fs::read(&a).unwrap(),
+            std::fs::read(&b).unwrap(),
+            "byte-stable"
+        );
+        let decoder = png::Decoder::new(io::BufReader::new(File::open(&a).unwrap()));
+        let reader = decoder.read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (800, 600));
+    }
+
+    /// The shot is the settled lightbox plus its captions: it differs from a bare paint only
+    /// inside the captions' rects, and there it does.
+    #[test]
+    fn a_modern_shot_carries_its_captions() {
+        let shot = ModernShot::parse(Some("800x600@1"), None).unwrap();
+        let scene = Scene::parse(Some("1"), Some("1-01-hI")).unwrap();
+        let (canvas, rects) = shoot_canvas(&crate::c1::GAME, &scene, &shot).unwrap();
+        let data = &crate::c1::GAME;
+        let mut state = GameState::new(data, lumen::SaveData::fresh(lumen::RuleSet::of(data.game)));
+        scene.apply(&mut state).unwrap();
+        let mut bare = vec![0u32; 800 * 600];
+        halation::Lightbox::new(shot.easel, shot.theme, false).paint(
+            &state,
+            f64::INFINITY,
+            halation::Output::Xrgb(&mut bare),
+        );
+        assert!(!rects.is_empty());
+        let mut inked = 0;
+        for (i, (a, b)) in canvas.iter().zip(&bare).enumerate() {
+            if a != b {
+                inked += 1;
+                let (x, y) = ((i % 800) as i32, (i / 800) as i32);
+                assert!(
+                    rects
+                        .iter()
+                        .any(|r| r.left <= x && x < r.right && r.top <= y && y < r.bottom),
+                    "({x}, {y})"
+                );
+            }
+        }
+        assert!(inked > 100, "captions were inked");
     }
 }

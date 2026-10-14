@@ -92,10 +92,11 @@ shot-pieces easel="1280x800@2":
     mkdir -p "{{justfile_directory()}}/dist/shots-modern"
     cargo run --quiet --release -p halation --features cli -- pieces "{{justfile_directory()}}/dist/shots-modern/pieces-{{easel}}" --easel {{easel}}
 
-# Benchmark the engine (trace, classic render) and the modern look (arrange, cold paint, drag) on real levels of every game; fails if over the spec's budgets
+# Benchmark the engine (trace, classic render), the modern look (arrange, cold paint, drag) and the macOS captions on real levels of every game; fails if over the spec's budgets
 bench:
     cargo bench -p lumen --bench engine
     cargo bench -p halation --bench darkroom
+    cargo bench -p chromatron --bench captions
 
 # Print the wasm-bindgen version locked in Cargo.lock; the wasm-bindgen CLI must be exactly this version
 wasm-bindgen-version:
@@ -190,32 +191,40 @@ trailer-sheet dir:
 run game:
     cargo run --release --bin chromatron{{game}}
 
-# Write a game's first presented frame, text included, to a PNG, then quit (game: 1-4; level: strip number 1-50; solution: `stored` or copied text such as 3-17-hODwhH, pasted before the frame)
-snapshot game png level="1" solution="":
+# Write a game's snapshot to a PNG, then quit (game: 1-4; level: strip number 1-50; solution: `stored` or copied text such as 3-17-hODwhH, pasted first; look: modern, painted offscreen at size WxH@S with its captions, or classic, the window's first presented frame)
+snapshot game png level="1" solution="" look="modern" size="1280x800@2":
     cargo build --release --quiet --bin chromatron{{game}}
-    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
+    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" CHROMATRON_LOOK="{{look}}" CHROMATRON_SNAPSHOT_SIZE="{{ if look == "classic" { "" } else { size } }}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
 
-# Regenerate the README's modern screenshots in assets/screenshots/ as 1280 × 800 JPEGs: the same solved level per game as the classic ones
-screenshots-modern:
+# Open a game's window and present the whole canvas `frames` times (switching look half way when `switch` is set), then print the present's p50/p90/max, the surfaces' memory and a read-back check, and quit (look: modern or classic; size: a modern window's WxH in pt, such as 2560x1400, else the default; damage: set to present only the stage's damage while the level's solution is pasted and reset, at the cues' own pace); never touches saves or preferences; local only, needs a display (spec §14 "Present")
+present-probe game="1" look="modern" frames="240" switch="" size="" damage="":
+    cargo build --release --quiet --bin chromatron{{game}}
+    CHROMATRON_LOOK="{{look}}" CHROMATRON_PRESENT_PROBE="{{frames}}" CHROMATRON_PRESENT_PROBE_SWITCH="{{switch}}" CHROMATRON_PROBE_SIZE="{{size}}" CHROMATRON_PRESENT_PROBE_DAMAGE="{{damage}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
+
+# Regenerate the README's modern screenshots as 1280 × 800 JPEGs (the same solved level per game as the classic ones), through each app's offscreen modern snapshot, captions included; dir defaults to the repo's assets/screenshots, and a relative dir is taken from where just runs, as snapshot's png is
+screenshots-modern dir=(justfile_directory() / "assets/screenshots"):
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --quiet --release -p halation --features cli
+    out="{{join(invocation_directory(), dir)}}"
+    mkdir -p "$out"
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     for shot in 1:46 2:22 3:41 4:21; do
         game="${shot%%:*}"
-        "{{justfile_directory()}}/target/release/halation" shot "$game" "${shot##*:}" "$tmp/$game.png" stored --easel 1280x800@1
-        sips -s format jpeg -s formatOptions 90 "$tmp/$game.png" --out "{{justfile_directory()}}/assets/screenshots/chromatron$game-modern.jpg" >/dev/null
+        cargo build --quiet --release --bin "chromatron$game"
+        CHROMATRON_SNAPSHOT="$tmp/$game.png" CHROMATRON_SNAPSHOT_LEVEL="${shot##*:}" CHROMATRON_SNAPSHOT_SOLUTION=stored CHROMATRON_LOOK=modern CHROMATRON_SNAPSHOT_SIZE=1280x800@1 \
+            perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron$game"
+        sips -s format jpeg -s formatOptions 90 "$tmp/$game.png" --out "$out/chromatron$game-modern.jpg" >/dev/null
     done
 
 # Regenerate the README screenshots in assets/screenshots/: one solved level per game, in the modern look and the classic one
 screenshots: \
     screenshots-modern \
-    (snapshot "1" (justfile_directory() / "assets/screenshots/chromatron1.png") "46" "stored") \
-    (snapshot "2" (justfile_directory() / "assets/screenshots/chromatron2.png") "22" "stored") \
-    (snapshot "3" (justfile_directory() / "assets/screenshots/chromatron3.png") "41" "stored") \
-    (snapshot "4" (justfile_directory() / "assets/screenshots/chromatron4.png") "21" "stored")
+    (snapshot "1" (justfile_directory() / "assets/screenshots/chromatron1.png") "46" "stored" "classic") \
+    (snapshot "2" (justfile_directory() / "assets/screenshots/chromatron2.png") "22" "stored" "classic") \
+    (snapshot "3" (justfile_directory() / "assets/screenshots/chromatron3.png") "41" "stored" "classic") \
+    (snapshot "4" (justfile_directory() / "assets/screenshots/chromatron4.png") "21" "stored" "classic")
 
 # Build the four apps in dist/ (Chromatron.app, Chromatron 2.app, …): Info.plist and icon from each original, ad-hoc signed
 bundle: (_bundle "1") (_bundle "2") (_bundle "3") (_bundle "4")
@@ -258,23 +267,35 @@ _bundle game: _require-originals
     codesign --verify --strict "$app"
     echo "built $app"
 
-# Bundle a game, open it, check it idles at ~0% CPU, quit it with an Apple Event and check that it saved (game: 1-4)
-smoke game="1": (_bundle game)
+# Bundle a game, open it in a look (modern or classic), check it idles at ~0% CPU, quit it with an Apple Event and check that it saved (game: 1-4); the player's ClassicLook preference is put back afterwards
+smoke game="1" look="modern": (_bundle game)
     #!/usr/bin/env bash
     set -euo pipefail
+    [[ "{{look}}" == modern || "{{look}}" == classic ]] || { echo "error: look is modern or classic, not {{look}}" >&2; exit 1; }
     name="Chromatron"
     save_name="com.silverspaceship.chromatron.dat"
     if [[ "{{game}}" != 1 ]]; then
         name="Chromatron {{game}}"
         save_name="com.silverspaceship.chromatron{{game}}.dat"
     fi
+    domain="me.shengtuo.chromatron{{game}}"
     binary="{{justfile_directory()}}/dist/$name.app/Contents/MacOS/chromatron{{game}}"
     save="$HOME/Library/Application Support/Chromatron {{game}}/$save_name"
     if pgrep -f -x "$binary" > /dev/null; then
         echo "error: Chromatron {{game}} from dist/ is already running; quit it first" >&2
         exit 1
     fi
-    trap 'pkill -KILL -f -x "$binary" 2> /dev/null || true' EXIT
+    # The player's look, put back (or deleted, if it was never set) however the run ends.
+    saved_look="$(defaults read "$domain" ClassicLook 2> /dev/null || echo absent)"
+    restore_look() {
+        case "$saved_look" in
+            absent) defaults delete "$domain" ClassicLook 2> /dev/null || true ;;
+            1) defaults write "$domain" ClassicLook -bool true ;;
+            *) defaults write "$domain" ClassicLook -bool false ;;
+        esac
+    }
+    trap 'pkill -KILL -f -x "$binary" 2> /dev/null || true; restore_look' EXIT
+    defaults write "$domain" ClassicLook -bool {{ if look == "classic" { "true" } else { "false" } }}
     before="$(stat -f %m "$save" 2> /dev/null || echo none)"
     open -n "{{justfile_directory()}}/dist/$name.app"
     pid=""
@@ -286,7 +307,7 @@ smoke game="1": (_bundle game)
     [[ -n "$pid" ]] || { echo "error: Chromatron {{game}} did not start" >&2; exit 1; }
     sleep 2
     cpu="$(top -l 2 -s 3 -pid "$pid" -stats cpu | tail -n 1 | tr -d ' ')"
-    echo "running as pid $pid, idle CPU ${cpu}%"
+    echo "running as pid $pid ({{look}} look), idle CPU ${cpu}%"
     awk -v cpu="$cpu" 'BEGIN { exit !(cpu + 0 < 1.0) }' || { echo "error: idle CPU ${cpu}% is over the ~0% budget" >&2; exit 1; }
     perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 20 osascript -e 'tell application id "me.shengtuo.chromatron{{game}}" to quit'
     for _ in $(seq 20); do
@@ -299,7 +320,7 @@ smoke game="1": (_bundle game)
     fi
     after="$(stat -f %m "$save" 2> /dev/null || echo none)"
     [[ "$after" != none && "$after" != "$before" ]] || { echo "error: quitting did not write $save" >&2; exit 1; }
-    echo "ok: launched, idled, quit and saved"
+    echo "ok: launched in the {{look}} look, idled, quit and saved"
 
 # All four games: bundling copies each original's Info.plist and icon
 _require-originals:

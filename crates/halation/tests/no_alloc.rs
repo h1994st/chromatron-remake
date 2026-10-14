@@ -223,6 +223,8 @@ fn painting_and_input_never_allocate() {
             state.handle_on(&lightbox, InputEvent::Key(b'r'));
             state.handle_on(&lightbox, InputEvent::Key(b'='));
             lightbox.paint(&state, 48.0, Output::Xrgb(&mut out));
+            lightbox.invalidate(DeviceRect::new(10, 10, 60, 40));
+            lightbox.paint(&state, 1.0e9, Output::Xrgb(&mut out));
             let _ = lightbox.next_wake(64.0);
             lightbox.reset();
             lightbox.paint(&state, 80.0, Output::Xrgb(&mut out));

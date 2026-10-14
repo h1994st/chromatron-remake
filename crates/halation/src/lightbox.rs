@@ -159,6 +159,9 @@ pub struct Lightbox {
     /// The boxes the last paint's flourish, rising held piece and landing piece drew into: the
     /// next paint recomposes them.
     flourished: Patchwork<MAX_FLOURISH>,
+    /// Rects the shell drew over in its buffer (the macOS captions): the next paint recomposes
+    /// them (ruling P4).
+    invalid: Patchwork<MAX_DAMAGE>,
     /// This paint's flourish, worked out once and drawn into each damaged rect.
     cast: Box<Cast>,
     /// Diagnostics (ruling M6): every frame repainted whole.
@@ -214,6 +217,7 @@ impl Lightbox {
             swallow_up: false,
             next_shown: false,
             flourished: Patchwork::new(),
+            invalid: Patchwork::new(),
             cast,
             full_frames: false,
         }
@@ -325,6 +329,12 @@ impl Lightbox {
         self.tableau.picker.is_some()
     }
 
+    /// The shell drew over `rect` of its buffer (its typeset captions): the next paint recomposes
+    /// it from the layers, whatever else it repaints (ruling P4). Clipped to the canvas there.
+    pub fn invalidate(&mut self, rect: DeviceRect) {
+        self.invalid.add(rect);
+    }
+
     pub fn sheet_open(&self) -> bool {
         self.sheet
     }
@@ -408,6 +418,11 @@ impl Lightbox {
             self.darkroom.keep_for_fade(&out);
         }
         self.damage.clear();
+        // Rects the shell drew over (ruling P4), recomposed with everything else this paint.
+        for &r in self.invalid.as_slice() {
+            self.damage.add(r);
+        }
+        self.invalid.clear();
         let moment = self.choreography.moment(now_ms);
         // A kind that never turns is never posed turning (whatever now stands in the cell).
         let turn = moment

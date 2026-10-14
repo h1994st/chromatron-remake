@@ -6,7 +6,7 @@
 
 Native Apple Silicon versions of Sean Barrett's laser puzzle games **Chromatron**, **Chromatron 2**, **Chromatron 3** and **Chromatron 4** (Silver Spaceship Software, 2003–2004). 🔦✨
 
-The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps that look and play like the originals: same rules, levels, sprites and text. The same engine also runs in the browser, which adds a modern look with animated light, and keeps the classic one a click away.
+The original Mac versions are PowerPC Carbon apps, which no longer run on current macOS. This project rebuilds them in Rust 🦀 as four separate apps with the originals' rules, levels and text. They open in a modern look with animated light, and **View ▸ Classic Look** brings back the original graphics, pixel for pixel. The same engine runs in the browser too.
 
 <table>
   <tr>
@@ -20,7 +20,7 @@ The original Mac versions are PowerPC Carbon apps, which no longer run on curren
 </table>
 
 <details>
-<summary>The classic look, as in the Mac apps</summary>
+<summary>The classic look (View ▸ Classic Look in the apps, Actions ▸ Classic look on the page)</summary>
 
 <table>
   <tr>
@@ -63,7 +63,7 @@ just bundle    # build the four apps into dist/
 
 ## 🎮 Playing
 
-Guide the coloured beams 🌈 to light every target. Drag pieces between the toolbox and the board. Click a piece to turn it 45° anticlockwise; right-click (or Shift-, Option- or Control-click) to turn it clockwise. Pick a level from the numbered level strip; solving levels unlocks more. 🔓
+Guide the coloured beams 🌈 to light every target. Drag pieces between the toolbox and the board. Click a piece to turn it 45° anticlockwise; right-click (or Shift-, Option- or Control-click) to turn it clockwise. Pick a level from the numbered level picker (**File ▸ Levels…** when the picker doesn't fit beside the board); solving levels unlocks more. 🔓
 
 | | Command | Shortcut |
 |---|---|---|
@@ -72,9 +72,12 @@ Guide the coloured beams 🌈 to light every target. Drag pieces between the too
 | 📋 | Copy Level (your solution, as text) | ⌘C |
 | 📥 | Paste Level (a copied solution) | ⌘V |
 | 🖥️ | Full screen | ⌃⌘F |
+| 🎨 | Classic Look (the original graphics) | ⌥⌘L |
+| 🔢 | Levels… (when the picker is a sheet) | ⌘L |
 
 - 🖱️ **File ▸ Mouse Wheel Changes Level** turns level switching with the scroll wheel on or off.
-- 🔍 **View ▸ Scale** sets the window size in whole multiples of the original 640×480, so pixels stay sharp.
+- 🔍 In the classic look, **View ▸ Scale** sets the window size in whole multiples of the original 640×480, so pixels stay sharp. The modern window resizes freely, down to 800×600.
+- 🎞️ The modern look animates beams, targets and pieces; with the system's reduced-motion setting on, every change appears at once. Each app remembers which look you chose.
 - 💾 Progress is saved in `~/Library/Application Support/Chromatron N/` in the original games' own file format. Each game reopens on the level you last played.
 
 ## 🧑‍💻 Development
