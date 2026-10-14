@@ -323,6 +323,7 @@ dependencies = [
 name = "chromatron-web"
 version = "1.4.0"
 dependencies = [
+ "halation",
  "lumen",
  "spectrograph",
  "wasm-bindgen",
@@ -1097,6 +1098,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "halation"
+version = "1.4.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "lumen",
+ "png",
+ "spectrograph",
 ]
 
 [[package]]

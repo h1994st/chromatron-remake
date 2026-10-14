@@ -79,6 +79,43 @@ export function intersect(a, b) {
   return left < right && top < bottom ? { left, top, right, bottom } : null;
 }
 
+/** The look to show: `forced` (?look=) if it names one, else the stored choice, else modern. */
+export function lookFrom({ forced, stored }) {
+  if (forced === "classic" || forced === "modern") return forced;
+  return stored === "classic" ? "classic" : "modern";
+}
+
+/**
+ * The safe-area insets [top, right, bottom, left] the modern canvas itself must keep clear: the
+ * toolbar already covers the top (desktop, portrait) or the left (the landscape rail); in full
+ * screen the canvas is the whole screen.
+ */
+export function canvasInsets(mode, [top, right, bottom, left], fullscreen) {
+  if (fullscreen) return [top, right, bottom, left];
+  return mode === "landscape" ? [top, right, bottom, 0] : [0, right, bottom, left];
+}
+
+/**
+ * Client point (`clientX`, `clientY`) in the modern canvas's backing pixels (fractional), through
+ * its on-screen `box` and its `backing` size ({width, height}): backing px per CSS px are
+ * `backing.width / box.width` across and `backing.height / box.height` down. OFF_FRAME for an
+ * empty box or backing.
+ */
+export function lightboxPoint(box, backing, clientX, clientY) {
+  if (!(box.width > 0 && box.height > 0) || !(backing.width > 0 && backing.height > 0)) return [...OFF_FRAME];
+  return [((clientX - box.left) * backing.width) / box.width, ((clientY - box.top) * backing.height) / box.height];
+}
+
+/**
+ * Whether a press pans the page instead of reaching the game: a touch or pen press (`held`) on a
+ * point with nothing to press (`inert`), on a page taller than the viewport (`pageTaller`),
+ * scrolls the page by hand. The canvas keeps `touch-action: none`, so piece drags are never
+ * cancelled by a browser pan.
+ */
+export function startsPan({ held, inert, pageTaller }) {
+  return held && inert && pageTaller;
+}
+
 /** Client point (`clientX`, `clientY`) in frame pixels (fractional) through `view` ({frame, box}); OFF_FRAME for an empty box. */
 export function toFrame({ frame, box }, clientX, clientY) {
   if (!(box.width > 0 && box.height > 0)) return [...OFF_FRAME];

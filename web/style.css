@@ -7,6 +7,16 @@
   --muted: #9da1a8;
   --accent: #8ab4ff;
 }
+/* The modern look's dark tokens (spec §7.1 text and panel values); classic keeps the page's own. */
+[data-look="modern"] {
+  --page: #06070b;
+  --panel: #0c0f1a;
+  --line: rgba(220, 230, 255, 0.14);
+  --ink: #e8edff;
+  --body: #c3cbe6;
+  --muted: #8a94b8;
+  --accent: #8ab4ff;
+}
 
 * { box-sizing: border-box; }
 
@@ -82,6 +92,12 @@ button:focus-visible, select:focus-visible { outline: 2px solid var(--accent); o
   padding: 8px 12px;
 }
 .menu button:hover, .menu button:focus-visible { background: var(--line); outline: none; }
+.menu hr { margin: 4px 6px; border: 0; border-top: 1px solid var(--line); }
+/* The Classic look switch, at the right of its menu item. */
+.menu .switch { margin-left: auto; width: 30px; height: 18px; border-radius: 9px; background: var(--line); position: relative; }
+.menu .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--ink); transition: left 0.15s; }
+.menu [aria-checked="true"] .switch { background: var(--accent); }
+.menu [aria-checked="true"] .switch::after { left: 14px; }
 button[aria-pressed="true"] {
   background: var(--ink);
   color: var(--page);
@@ -112,6 +128,63 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
 #pixels { image-rendering: pixelated; touch-action: none; }
 #text { pointer-events: none; }
 
+/* The modern look (main.js sets html[data-look="modern"]): one canvas fills the stage. */
+#lightbox { display: none; }
+#safe-probe {
+  position: fixed;
+  visibility: hidden;
+  pointer-events: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+[data-look="modern"] { overscroll-behavior: none; }
+[data-look="modern"] #game { display: none; }
+[data-look="modern"] #lightbox {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  image-rendering: auto;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+[data-look="modern"] body { background: var(--page); }
+/* The Help's look-aware rows (its row rules set display, hence !important). */
+[data-look="classic"] [data-for="modern"], [data-look="modern"] [data-for="classic"] { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* The modern card's typeset text (main.js renderCaptions): spans over the canvas, which never take
+   a press or a selection, so presses reach the canvas and ⌘C copies the solution. The box covers
+   the canvas exactly (both fill the stage), so a caption's backing-px rect / pxPerCss lands in place. */
+#captions { display: none; }
+[data-look="modern"] #captions {
+  display: block; position: absolute; inset: 0; pointer-events: none;
+  -webkit-user-select: none; user-select: none; overflow: hidden;
+  font-family: system-ui, -apple-system, "Helvetica Neue", sans-serif;
+}
+/* The level sheet covers the card: its captions fade out as the sheet's panel fades in and back in
+   as it fades out (halation's SHEET_MS, 200 ms, ease-out cubic; 150 ms in reduced motion), then
+   are hidden from everyone while it is open. */
+[data-look="modern"] #captions { transition: opacity 0.2s cubic-bezier(0.33, 1, 0.68, 1); }
+[data-look="modern"] #captions.sheet {
+  opacity: 0; visibility: hidden;
+  transition: opacity 0.2s cubic-bezier(0.33, 1, 0.68, 1), visibility 0s 0.2s;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-look="modern"] #captions { transition-duration: 0.15s; }
+  [data-look="modern"] #captions.sheet { transition-duration: 0.15s, 0s; transition-delay: 0s, 0.15s; }
+}
+#captions > span { position: absolute; overflow: hidden; }
+/* main.js sets a title's line height to its row's height, which centres its one line. */
+.cap-title { font: 600 17px/1.25 system-ui, -apple-system, sans-serif; color: var(--ink); white-space: nowrap; text-overflow: ellipsis; }
+.cap-title-compact { font: 600 15px/28px system-ui, -apple-system, sans-serif; color: var(--ink); white-space: nowrap; text-overflow: ellipsis; text-align: right; }
+.cap-body { font: 400 15px/1.4 system-ui, -apple-system, sans-serif; color: var(--body); white-space: pre-line; }
+.cap-badge { font: 500 13px/28px system-ui, -apple-system, sans-serif; color: var(--muted); text-align: right; white-space: nowrap; }
+.cap-credit { font: 400 12px/18px system-ui, -apple-system, sans-serif; color: var(--muted); white-space: nowrap; text-overflow: ellipsis; }
+.cap-pill { font: 500 13px/28px system-ui, -apple-system, sans-serif; color: var(--ink); white-space: nowrap; }
+
 /* The touch layouts: main.js sets html.touch, and data-layout to "portrait" or "landscape". */
 .part, #texts { display: none; }
 .part {
@@ -141,6 +214,37 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
 .touch .toolbar button, .touch .toolbar select { height: 36px; }
 .touch .toolbar button { position: relative; min-width: 32px; padding: 0 7px; }
 .touch .toolbar select { padding: 0 22px 0 8px; background-position: right 6px center; }
+#game-short { display: none; }
+/* Modern touch layouts: a compact "C2 ▾" over the select (its options keep their names), which
+   still takes the taps: the label lets them through. */
+[data-look="modern"].touch #game-select { width: 64px; color: transparent; background-image: none; }
+[data-look="modern"].touch #game-short {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  width: 64px;
+  height: 36px;
+  margin-left: -66px;
+  padding-left: 10px;
+  pointer-events: none;
+  font-weight: 600;
+  color: var(--ink);
+}
+[data-look="modern"].touch #game-short .chev { width: 12px; height: 12px; fill: none; stroke: var(--muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+/* The landscape rail: "C2" over its chevron, on the full-width select. Its long option names
+   never widen the rail: sized 0 wide, it stretches to the rail the buttons set (min-width). */
+[data-look="modern"][data-layout="landscape"] #game-select { width: 0; min-width: 100%; height: 52px; }
+[data-look="modern"][data-layout="landscape"] #game-short {
+  display: grid;
+  grid-template-columns: auto auto;
+  justify-content: center;
+  align-content: center;
+  width: auto;
+  height: 52px;
+  margin: -54px 0 0;
+  padding: 0;
+}
+[data-look="modern"][data-layout="landscape"] #game-short .chev { grid-column: 1 / -1; justify-self: center; }
 /* Icons only; the words stay for screen readers. */
 .touch .toolbar .label {
   position: absolute;
@@ -224,9 +328,27 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
   border-right: 1px solid var(--line);
 }
 [data-layout="landscape"] .toolbar { flex-direction: column; align-items: stretch; overflow: hidden auto; }
+/* A short modern landscape (a phone with its browser's bars) has no room on the rail for every
+   36-px button: Turn clockwise and Full screen move into the Actions menu. */
+.menu .rail-overflow { display: none; }
+@media (max-height: 379.98px) {
+  [data-look="modern"][data-layout="landscape"] .toolbar :is(#clockwise, #fullscreen) { display: none; }
+  [data-look="modern"][data-layout="landscape"] .menu button.rail-overflow:not([hidden]) { display: flex; }
+  [data-look="modern"][data-layout="landscape"] .menu hr.rail-overflow { display: block; }
+}
 [data-layout="landscape"] body { height: 100vh; height: 100svh; overflow: hidden; }
 [data-layout="landscape"] #stage { height: 100vh; height: 100svh; }
+/* Modern landscape on a canvas too small even for the short Beside: main.js grows the stage to
+   stage_height (its min-height), and the page scrolls. */
+[data-layout="landscape"].stage-grown body { height: auto; overflow: visible; }
+/* The modern look fills the stage on every layout (spec §12): classic's portrait parts and texts
+   stay hidden, and main.js sets portrait's stage height (stage_height). */
+[data-look="modern"] .part, [data-look="modern"] #texts { display: none !important; }
+[data-look="modern"][data-layout="portrait"] #stage { padding: 0; gap: 0; }
 #help footer { padding: 20px 0 0; }
+/* A compact card's credits (renderCaptions), after the footer. */
+#help #credits-help { padding: 8px 0 0; text-align: center; color: var(--muted); font-size: 13px; }
+#help #credits-help[hidden] { display: none; }
 
 #fatal { max-width: 32em; padding: 0 16px; text-align: center; }
 
@@ -285,6 +407,7 @@ a { color: var(--accent); }
   text-transform: uppercase;
 }
 #help p { margin: 0; }
+#help section p + p { margin-top: 6px; }
 #help .sheet-body { display: grid; gap: 22px 32px; padding-top: 18px; }
 #help section { min-width: 0; }
 #help .rows { margin: 0; padding: 0; list-style: none; }

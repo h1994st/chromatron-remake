@@ -4,6 +4,8 @@
 // are free. Each line is drawn as a beam: a faint halo, red, green and blue strands side by side
 // that add up to white where they overlap, and a white-hot core.
 //
+// Its Rust twin is crates/halation/src/lettering.rs (the game's modern look): a change here is ported there, and the table checksum in its tests catches a missed port.
+//
 // Chinese is never lettered: drawZhLine sets it in PingFang SC with a soft glow, and
 // drawTitleCard pairs a lettered English line with it.
 //

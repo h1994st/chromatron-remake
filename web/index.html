@@ -6,7 +6,7 @@
   <title>Chromatron — laser puzzles in your browser</title>
   <meta name="description" content="Play Sean Barrett's Chromatron 1–4 laser puzzle games in your browser: bend, split and mix coloured beams to light every target. An independent port.">
   <link rel="canonical" href="https://shengtuo.me/chromatron-remake/">
-  <meta name="theme-color" content="#25272a">
+  <meta name="theme-color" content="#06070b">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Chromatron">
   <meta property="og:title" content="Chromatron — laser puzzles in your browser">
@@ -51,11 +51,12 @@
         <option value="3">Chromatron 3</option>
         <option value="4">Chromatron 4</option>
       </select>
+      <span id="game-short" aria-hidden="true"><b>C</b><span id="game-short-number">1</span><svg class="chev" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></svg></span>
       <button type="button" data-command="previous" title="Previous level (-)"><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg><span class="label">Previous</span></button>
       <button type="button" data-command="next" title="Next level (Space or =)"><span class="label">Next</span><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg></button>
       <button type="button" id="actions" popovertarget="actions-menu" title="Reset the level, or copy or paste a solution"><span class="label">Actions</span><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h.01M8 8h.01M12.5 8h.01" stroke-width="3"/></svg></button>
       <span class="spacer"></span>
-      <button type="button" id="levels-open" aria-haspopup="dialog" title="Choose a level" hidden><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h4v4h-4zM9.5 2.5h4v4h-4zM2.5 9.5h4v4h-4zM9.5 9.5h4v4h-4z"/></svg><span class="label">Levels</span></button>
+      <button type="button" id="levels-open" aria-haspopup="dialog" aria-expanded="false" title="Choose a level" hidden><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h4v4h-4zM9.5 2.5h4v4h-4zM2.5 9.5h4v4h-4zM9.5 9.5h4v4h-4z"/></svg><span class="label">Levels</span></button>
       <button type="button" id="clockwise" aria-pressed="false" title="Taps turn pieces clockwise" hidden><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M12 1.5v3h-3"/><rect x="6" y="6" width="4" height="4" rx=".5"/></svg><span class="label">Turn clockwise</span></button>
       <button type="button" id="wheel" aria-pressed="true" title="Scrolling over the game changes level">Mouse wheel changes level</button>
       <button type="button" id="fullscreen" title="Full screen" hidden><svg class="glyph" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10"/></svg><span class="label">Full screen</span></button>
@@ -65,6 +66,11 @@
       <button type="button" data-command="reset" title="Put every piece back (r)">Reset level</button>
       <button type="button" id="copy" title="Copy your solution as text (⌘C / Ctrl+C)">Copy solution</button>
       <button type="button" id="paste" title="Paste a copied solution (⌘V / Ctrl+V)">Paste solution</button>
+      <hr class="rail-overflow">
+      <button type="button" id="clockwise-item" class="rail-overflow" role="menuitemcheckbox" aria-checked="false" title="Taps turn pieces clockwise" hidden>Turn clockwise<span class="switch" aria-hidden="true"></span></button>
+      <button type="button" id="fullscreen-item" class="rail-overflow" title="Full screen" hidden>Full screen</button>
+      <hr>
+      <button type="button" id="classic-look" role="menuitemcheckbox" aria-checked="false" title="Show the original 640 × 480 screen">Classic look<span class="switch" aria-hidden="true"></span></button>
     </div>
   </header>
   <main id="stage">
@@ -72,6 +78,10 @@
       <canvas id="pixels" width="640" height="480" aria-label="Chromatron game board"></canvas>
       <canvas id="text" aria-hidden="true"></canvas>
     </div>
+    <canvas id="lightbox" aria-label="Chromatron game board"></canvas>
+    <div id="captions"></div>
+    <p id="win-live" class="visually-hidden" aria-live="polite"></p>
+    <div id="safe-probe" aria-hidden="true"></div>
     <canvas id="board-part" class="part" aria-label="Chromatron board"></canvas>
     <canvas id="toolbox-part" class="part" aria-label="Chromatron toolbox"></canvas>
     <div id="texts"><div id="text-list"></div></div>
@@ -87,7 +97,7 @@
       <div class="sheet-body">
         <section class="wide">
           <h3>Goal</h3>
-          <p>Light up every target with a beam of its colour. Drag pieces from the toolbox onto the board to bend, split and filter the lasers. Each level’s hint text introduces new pieces. Solving a level unlocks more, and the numbers in the level strip change colour as you go.</p>
+          <p>Light up every target with a beam of its colour. Drag pieces from the toolbox onto the board to bend, split and filter the lasers. Each level’s hint text introduces new pieces. <span data-for="classic">Solving a level unlocks more, and the numbers in the level strip change colour as you go.</span><span data-for="modern">Solving a level unlocks more. The level picker shows which levels are open and solved.</span></p>
         </section>
         <section>
           <h3>Mouse</h3>
@@ -104,9 +114,13 @@
               <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><path d="M12 2a10 10 0 0 1 10 10v2H12z" fill="var(--accent)"/><rect x="2" y="2" width="20" height="28" rx="10" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M2 14h20M12 2v12" stroke="currentColor" stroke-width="1.6"/><path d="M27 9a7 7 0 1 1-1 8m0 0-3-4m3 4 4-2" fill="none" stroke="var(--muted)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
               <span><b>Right-click</b> (or <kbd>Shift</kbd>, <kbd>Option</kbd> or <kbd>Control</kbd> and click) to turn it clockwise.</span>
             </li>
-            <li>
+            <li data-for="classic">
               <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="9" width="8" height="14" rx="2"/><rect x="14" y="9" width="8" height="14" rx="2"/><rect x="25" y="9" width="8" height="14" rx="2" stroke="var(--accent)" stroke-width="2.4"/></g></svg>
               <span><b>Click a number</b> in the level strip to go to that level.</span>
+            </li>
+            <li data-for="modern">
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="9" width="8" height="14" rx="2"/><rect x="14" y="9" width="8" height="14" rx="2"/><rect x="25" y="9" width="8" height="14" rx="2" stroke="var(--accent)" stroke-width="2.4"/></g></svg>
+              <span><b>Click a level</b> in the picker (or <b>Levels</b>) to go to it.</span>
             </li>
             <li>
               <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><rect x="12" y="2" width="16" height="28" rx="8" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M20 7v6" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/><path d="M6 12l4-4 4 4M6 20l4 4 4-4M34 12l-4-4-4 4M34 20l-4 4-4-4" fill="none" stroke="var(--muted)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -129,9 +143,13 @@
               <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><rect x="3" y="9" width="34" height="14" rx="7" fill="var(--accent)"/><circle cx="29" cy="16" r="4.5" fill="var(--panel)"/></svg>
               <span>On a touch screen, switch on <b>Turn clockwise</b> (the round arrow in the toolbar) and taps turn clockwise.</span>
             </li>
-            <li>
+            <li data-for="classic">
               <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="8" y="3" width="11" height="11" rx="2"/><rect x="21" y="3" width="11" height="11" rx="2"/><rect x="8" y="18" width="11" height="11" rx="2" stroke="var(--accent)" stroke-width="2.4"/><rect x="21" y="18" width="11" height="11" rx="2"/></g></svg>
               <span>Hold the phone upright for a bigger board, and pick a level with <b>Levels</b> in the toolbar, or tap <b>Next level</b> after a win. Turn it sideways to see the whole original screen.</span>
+            </li>
+            <li data-for="modern">
+              <svg class="icon" viewBox="0 0 40 32" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="8" y="3" width="11" height="11" rx="2"/><rect x="21" y="3" width="11" height="11" rx="2"/><rect x="8" y="18" width="11" height="11" rx="2" stroke="var(--accent)" stroke-width="2.4"/><rect x="21" y="18" width="11" height="11" rx="2"/></g></svg>
+              <span>Pick a level with <b>Levels</b>, or tap <b>Next ▶</b> after a win. Upright or sideways, the board fills the screen.</span>
             </li>
           </ul>
         </section>
@@ -154,8 +172,10 @@
         <section class="wide">
           <h3>Progress</h3>
           <p>Saved in this browser. Each game reopens on your last level.</p>
+          <p><b>Actions ▸ Classic look</b> switches to the original screen.</p>
         </section>
       </div>
+      <p id="credits-help" hidden></p>
     </div>
   </dialog>
   <dialog id="levels" class="sheet-dialog" aria-labelledby="levels-title">

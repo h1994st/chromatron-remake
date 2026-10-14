@@ -3,7 +3,7 @@
 use spectrograph::GameData;
 
 use crate::board::{Board, Cell};
-use crate::layout::{LAST_SLOT, Rect, STRIP_SLOTS};
+use crate::layout::{ClassicFloorplan, Floorplan, LAST_SLOT, Rect, STRIP_SLOTS};
 use crate::progress::PROGRESS_SLOTS;
 use crate::rule_set::RuleSet;
 use crate::save::{SaveData, encode_save};
@@ -12,7 +12,7 @@ use crate::toolbox::move_pieces_to_toolbox;
 use crate::trace::{BeamField, trace};
 use crate::win::is_won;
 
-/// Input, in window pixels of the 640 × 480 frame.
+/// Input. Pointer coordinates are the floorplan's pixels: the 640 × 480 frame for `handle`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InputEvent {
     /// A button went down. `alt`: button 2, or the primary button with Shift, Option or Control
@@ -181,12 +181,19 @@ impl<'a> GameState<'a> {
         state
     }
 
+    /// `handle_on` the original window (`ClassicFloorplan`).
     pub fn handle(&mut self, event: InputEvent) -> Effects {
+        self.handle_on(&ClassicFloorplan, event)
+    }
+
+    /// Handles one event, hit-testing pointer events with `plan` and taking its drag slop.
+    /// Monomorphised, so classic costs nothing. Allocation-free.
+    pub fn handle_on(&mut self, plan: &impl Floorplan, event: InputEvent) -> Effects {
         let event = clamp_pointer(event);
         match event {
-            InputEvent::MouseDown { x, y, alt } => self.mouse_down(x, y, alt),
-            InputEvent::MouseDragged { x, y } => self.mouse_dragged(x, y),
-            InputEvent::MouseUp { x, y, alt } => self.mouse_up(x, y, alt),
+            InputEvent::MouseDown { x, y, alt } => self.mouse_down(plan, x, y, alt),
+            InputEvent::MouseDragged { x, y } => self.mouse_dragged(plan, x, y),
+            InputEvent::MouseUp { x, y, alt } => self.mouse_up(plan, x, y, alt),
             InputEvent::Key(ch) => self.key(ch),
             InputEvent::Wheel { delta } => self.key(if delta > 0 { b'-' } else { b'=' }),
             InputEvent::Copy => Effects {

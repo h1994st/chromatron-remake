@@ -92,12 +92,32 @@ impl RuleSet {
     }
 }
 
+/// What a text box says, so a shell can style it (the modern look) or ignore it (classic).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextRole {
+    /// `you_win`.
+    Win,
+    /// "(won)": the level was solved before.
+    Won,
+    /// Chromatron 2–4's level name.
+    LevelName,
+    #[default]
+    Hint,
+    /// `click_next`, in the hint's place once won.
+    ClickNext,
+    Freeware,
+    MoreLevels,
+    ThankYou,
+    SiteUrl,
+}
+
 /// One string for the shell to draw with Lucida Grande 13 pt, black, left-aligned and wrapped to
 /// `rect`'s width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TextBox<'a> {
     pub text: &'a str,
     pub rect: Rect,
+    pub role: TextRole,
 }
 
 /// The frame's text boxes in draw order (fixed capacity, no allocation).
@@ -113,9 +133,9 @@ impl<'a> TextBoxes<'a> {
     }
 
     /// Empty strings draw nothing, so they are left out.
-    fn push(&mut self, text: &'a str, rect: Rect) {
+    fn push(&mut self, text: &'a str, rect: Rect, role: TextRole) {
         if !text.is_empty() {
-            self.boxes[self.len] = TextBox { text, rect };
+            self.boxes[self.len] = TextBox { text, rect, role };
             self.len += 1;
         }
     }
@@ -130,35 +150,36 @@ pub fn text_boxes<'a>(state: &GameState<'a>) -> TextBoxes<'a> {
     let set = state.rules().text_boxes;
     let mut boxes = TextBoxes::default();
     if state.is_won() {
-        boxes.push(ui.you_win.as_ref(), YOU_WIN_RECT);
+        boxes.push(ui.you_win.as_ref(), YOU_WIN_RECT, TextRole::Win);
     } else if state.is_completed(slot) {
-        boxes.push(ui.won.as_ref(), WON_RECT);
+        boxes.push(ui.won.as_ref(), WON_RECT, TextRole::Won);
     }
     if set == TextBoxSet::Purchased {
-        boxes.push(state.level_name(), LEVEL_NAME_RECT);
+        boxes.push(state.level_name(), LEVEL_NAME_RECT, TextRole::LevelName);
     }
-    boxes.push(
-        if state.is_won() {
-            ui.click_next.as_ref()
-        } else {
-            state.hint()
-        },
-        HINT_RECT,
-    );
+    if state.is_won() {
+        boxes.push(ui.click_next.as_ref(), HINT_RECT, TextRole::ClickNext);
+    } else {
+        boxes.push(state.hint(), HINT_RECT, TextRole::Hint);
+    }
     match set {
         TextBoxSet::Freeware => {
-            boxes.push(ui.freeware.as_ref(), FREEWARE_RECT);
+            boxes.push(ui.freeware.as_ref(), FREEWARE_RECT, TextRole::Freeware);
             if slot > 39 && (slot.is_multiple_of(2) || slot == LAST_SLOT) {
-                boxes.push(ui.more_levels.as_ref(), MORE_LEVELS_RECT);
+                boxes.push(
+                    ui.more_levels.as_ref(),
+                    MORE_LEVELS_RECT,
+                    TextRole::MoreLevels,
+                );
             }
         }
         TextBoxSet::Purchased => {
             if slot % 6 == 4 {
-                boxes.push(ui.thank_you.as_ref(), THANK_YOU_RECT);
+                boxes.push(ui.thank_you.as_ref(), THANK_YOU_RECT, TextRole::ThankYou);
             }
         }
     }
-    boxes.push(ui.site_url.as_ref(), SITE_URL_RECT);
+    boxes.push(ui.site_url.as_ref(), SITE_URL_RECT, TextRole::SiteUrl);
     boxes
 }
 
@@ -592,14 +613,16 @@ mod tests {
             boxes.as_slice()[0],
             TextBox {
                 text: "(won)",
-                rect: WON_RECT
+                rect: WON_RECT,
+                role: TextRole::Won,
             }
         );
         assert_eq!(
             boxes.as_slice()[1],
             TextBox {
                 text: "one",
-                rect: HINT_RECT
+                rect: HINT_RECT,
+                role: TextRole::Hint,
             }
         );
     }
@@ -625,6 +648,37 @@ mod tests {
             }
         }
         assert_eq!(shown, [41, 43, 45, 47, 49, 50]);
+    }
+
+    fn roles(state: &GameState) -> Vec<TextRole> {
+        text_boxes(state)
+            .as_slice()
+            .iter()
+            .map(|t| t.role)
+            .collect()
+    }
+
+    #[test]
+    fn every_text_box_names_its_role() {
+        use TextRole::*;
+        let data = tiny_game();
+        let mut state = GameState::new(&data, SaveData::default());
+        assert_eq!(roles(&state), [Hint, Freeware, SiteUrl]);
+        state.handle(InputEvent::Paste("1-01-hI".into()));
+        assert_eq!(roles(&state), [Win, ClickNext, Freeware, SiteUrl]);
+        let save = SaveData {
+            completed: [true; 64],
+            ..SaveData::default()
+        };
+        let mut state = GameState::new(&data, save.clone());
+        state.goto_slot(40);
+        assert_eq!(roles(&state), [Won, Hint, Freeware, MoreLevels, SiteUrl]);
+        let data = tiny_game_of(Game::C2);
+        let state = GameState::new(&data, SaveData::default());
+        assert_eq!(roles(&state), [LevelName, Hint, SiteUrl]);
+        let mut state = GameState::new(&data, save);
+        state.goto_slot(4);
+        assert_eq!(roles(&state), [Won, LevelName, Hint, ThankYou, SiteUrl]);
     }
 
     fn texts<'a>(state: &GameState<'a>) -> Vec<(&'a str, Rect)> {

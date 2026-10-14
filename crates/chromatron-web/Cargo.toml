@@ -9,6 +9,7 @@ publish.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+halation = { path = "../halation" }
 lumen = { path = "../lumen" }
 spectrograph = { path = "../spectrograph", default-features = false }
 # Must equal the wasm-bindgen CLI version (`just wasm-bindgen-version`, the Pages workflow).

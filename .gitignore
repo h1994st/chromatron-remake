@@ -16,3 +16,6 @@
 
 # insta snapshots of levels decoded from the originals (derived data; never commit)
 /crates/lumen/tests/snapshots/
+
+# Modern-look image snapshots, rendered from the originals (derived data; never commit)
+/crates/halation/tests/snapshots/

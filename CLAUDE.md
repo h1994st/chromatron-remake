@@ -33,7 +33,7 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 
 ## Git
 
-- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/), `type(scope): subject`. Scopes are crate or area names: `spectrograph`, `lumen`, `chromatron`, `chromatron-web`, `web`, `trailer`, `re`, `just`. The body is empty unless really needed.
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/), `type(scope): subject`. Scopes are crate or area names: `spectrograph`, `lumen`, `halation`, `chromatron`, `chromatron-web`, `web`, `trailer`, `re`, `just`. The body is empty unless really needed.
 - **Branches:** [Conventional Branch](https://conventional-branch.github.io/), `<type>/<kebab-description>`. The type is `feature`, `bugfix`, `hotfix`, `release` or `chore`.
 - **Releases:**
   - Finished branches are squash-merged into `main`.
@@ -63,14 +63,15 @@ To run a single test, use `cargo test -p <crate> <name>`. Review snapshots with 
 
 ## Architecture
 
-The Cargo workspace has a strict layering: `spectrograph` → `lumen` → shells.
+The Cargo workspace has a strict layering: `spectrograph` → `lumen` → `halation` → shells.
 
 - **`spectrograph`** decodes each original binary (its SHA-256 is pinned) into data types. It also emits that data as Rust `static`s, so the shells' build scripts can embed the games.
 - **`lumen`** is the pure, platform-free engine:
   - beam tracing, piece rules and the win check;
   - the save and clipboard codecs in the original formats;
   - `GameState::handle(InputEvent) -> Effects`, the input rules shared by both shells;
-  - rendering into a 640×480 frame plus text boxes.
+  - rendering into a 640×480 frame plus text boxes (the classic look).
+- **`halation`** is the modern look: a dependency-free CPU rasteriser (`etch`), additive light with glow and bloom, its own layout (`tableau`) and piece art, behind one façade (`Lightbox`) that both shells call. It never allocates while painting; `just bench` and `web-check` hold it to its time, size and memory budgets.
 - **`chromatron`** is the macOS shell, built on winit, softbuffer, muda menus and objc2/Core Text. There is one binary per game. Progress is saved in the original `.dat` format.
 - **`chromatron-web`** is the wasm shell, a `wasm-bindgen` `Session` that drives the four games for the page.
 - **`web/`** is the static page: plain HTML, CSS and JS, with no bundler.

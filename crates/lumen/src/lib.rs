@@ -34,13 +34,13 @@ pub use gesture::{
     Button, ButtonLatch, Held, PIXELS_PER_STEP, QUIET_MS, ScrollDelta, WheelGate, key_byte,
     typed_text,
 };
-pub use layout::{FRAME_HEIGHT, FRAME_WIDTH, Hit, Rect, hit_test};
+pub use layout::{ClassicFloorplan, FRAME_HEIGHT, FRAME_WIDTH, Floorplan, Hit, Rect, hit_test};
 pub use piece::{BLUE, Colour, DX, DY, Dir, GREEN, Piece, RED, WHITE, turn};
 pub use progress::{
     PROGRESS_SLOTS, resume_slot, update_unlocked, update_unlocked_by_count, update_unlocked_fixed,
 };
 pub use render::{
-    BACKGROUND, TextBox, TextBoxes, cell_sprite, render, strip_number_rect, text_boxes,
+    BACKGROUND, TextBox, TextBoxes, TextRole, cell_sprite, render, strip_number_rect, text_boxes,
 };
 pub use rule_set::{Passes, RuleSet, Splitter, TextBoxSet, Unlock};
 pub use save::{SaveData, SaveError, decode_save, encode_save};

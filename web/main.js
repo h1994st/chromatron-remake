@@ -16,6 +16,11 @@ const GAMES = [1, 2, 3, 4];
 // (`just web-shots`). It is never stored.
 const forcedLayout = new URLSearchParams(location.search).get("layout");
 const coarsePointer = matchMedia("(pointer: coarse)");
+// Spec §9.3: the visitor's reduced-motion setting, followed live (the Session settles a running
+// animation when it turns on).
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
+// `?look=classic` (or `modern`) forces a look over the stored choice, for tests; never stored.
+const forcedLook = new URLSearchParams(location.search).get("look");
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
@@ -24,11 +29,14 @@ const pixels = $("pixels");
 const text = $("text");
 const pixelContext = pixels.getContext("2d");
 const textContext = text.getContext("2d");
+const lightbox = $("lightbox");
+const lightboxContext = lightbox.getContext("2d");
 const header = document.querySelector("header");
 const footer = document.querySelector("footer");
 const boardPart = $("board-part");
 const toolboxPart = $("toolbox-part");
 const smallViewport = $("small-viewport");
+const themeColor = document.querySelector('meta[name="theme-color"]');
 const toolbarNext = document.querySelector('.toolbar [data-command="next"]');
 // The ▶'s own aria-label (none: its hidden "Next" names it), put back when its highlight goes.
 const toolbarNextLabel = toolbarNext.getAttribute("aria-label");
@@ -56,6 +64,26 @@ let wasm;
 let session;
 let Flag;
 let displayScale;
+// The look on screen, "classic" or "modern" (wantedLook); "" before the first layout.
+let look = "";
+let Look;
+let renderScale;
+let stageHeight;
+// The modern canvas's backing px per CSS px, as the session was last told.
+let pxPerCss = 1;
+// The last size given to session.resize, so an unchanged layout pass doesn't repeat it.
+let lightboxSize = "";
+// ImageData over the session's modern canvas in wasm memory; rebuilt after a resize or when
+// wasm memory grows (which detaches the old buffer).
+let lightboxImage = null;
+// `?perf`: the page's own log of its last 512 modern paints for the checks (spec §14): the `now`
+// given to render_at, when the paint began, render_at's and putImageData's times (ms), and how
+// many rects and px it put. Off unless asked for; no cost when off.
+const perfLog = new URLSearchParams(location.search).has("perf") ? (window.__perf = { frames: [] }).frames : null;
+function notePerf(at, wall, render, put, rects, px) {
+  perfLog.push({ at, wall, render, put, rects, px, look });
+  if (perfLog.length > 512) perfLog.shift();
+}
 let LevelState;
 // web/touch_layout.js: the pure layout and touch rules.
 let touchLayout;
@@ -70,6 +98,12 @@ let views = [];
 // Whether the RGBA frame in wasm memory holds a rendered frame yet.
 let framed = false;
 let layoutPending = false;
+// A live resize stretches the modern canvas (CSS fills the stage with it) and resizes the session
+// only once the size has been still this long: each session.resize repaints cold and takes its
+// buffers anew. Going fullscreen and a pixel-ratio change resize at once (resizeNow).
+const RESIZE_SETTLE_MS = 150;
+let resizeTimer = 0;
+let resizeNow = false;
 let game = 0;
 const started = new Set();
 // Games this tab changed since it last stored them: only these are written, so a tab left open
@@ -84,7 +118,11 @@ let wheelOn = storage.read("chromatron.wheel").value !== "0";
 let clockwiseWanted = storage.read("chromatron.clockwise").value === "1";
 let clockwise = false;
 let scale = 1;
-let framePending = false;
+// The pending requestAnimationFrame's id, 0 when none: one frame chain at a time (paint drops it).
+let frameRequest = 0;
+// The last paint's `now`: paints never go back in time (a direct paint reads the clock after the
+// frame's timestamp).
+let paintedAt = 0;
 let textBoxes = [];
 let messageTimer = 0;
 // The game's own "click for the next level" text (Session.click_next), read once per game select.
@@ -95,6 +133,15 @@ const TOUCH_NEXT = {
   portrait: "Tap Next level or pick a level from Levels.",
   landscape: "Tap a level number or ▶ for the next level.",
 };
+// The wasm's CaptionStyle and CaptionRole codes (caption_style, caption_role), and each style's CSS
+// class (captionClasses); Hidden has none (screen readers only).
+let CaptionStyle;
+let CaptionRole;
+let captionClasses;
+// What the modern touch layouts say instead of click_next while Next ▶ shows (ruling 21).
+const MODERN_TOUCH_NEXT = "Tap Next ▶ or pick a level from Levels.";
+// Body captions shrink through these sizes (CSS px) until they fit; at the last they clip.
+const BODY_SIZES = [15, 13, 11];
 // Portrait: shown right under "You win!" while the level is won and a next level is open.
 const nextButton = document.createElement("button");
 nextButton.type = "button";
@@ -117,9 +164,9 @@ let winGame = 0;
 let winSlot = -1;
 let winWon = false;
 
-// Sends a game event, with the game and the layout, to analytics (a no-op off the site).
+// Sends a game event, with the game, the layout and the look, to analytics (a no-op off the site).
 function track(name, params) {
-  const event = { game, layout: mode, ...params };
+  const event = { game, layout: mode, look, ...params };
   if (analytics) analytics.track(name, event);
   else if (earlyEvents.length < 16) earlyEvents.push([name, event]);
 }
@@ -166,10 +213,7 @@ function say(message) {
 }
 
 function schedule() {
-  if (!framePending) {
-    framePending = true;
-    requestAnimationFrame(paint);
-  }
+  if (frameRequest === 0) frameRequest = requestAnimationFrame(paint);
 }
 
 // Tells the player once per game per page load that progress is not being kept.
@@ -204,6 +248,8 @@ function apply(flags) {
     levelChanged();
   }
   if (flags & Flag.Redraw) schedule();
+  // The modern look's level sheet opened (the toolbar's Levels, the card's pill, a key).
+  if (flags & Flag.SheetOpened) track("open_levels", {});
   return flags;
 }
 
@@ -237,6 +283,9 @@ function selectGame(n) {
     }
   }
   game = n;
+  // The Help's off-canvas credits are the last game's until the next captions: the paint after
+  // this sets them, except under an open level sheet (renderCaptions waits for it to close).
+  clearHelpCredits();
   clearTimeout(levelStartTimer);
   winGame = n;
   winSlot = session.slot();
@@ -247,6 +296,7 @@ function selectGame(n) {
   document.title = session.title();
   clickNext = session.click_next();
   $("game-select").value = String(n);
+  $("game-short-number").textContent = String(n);
   schedule();
 }
 
@@ -283,12 +333,190 @@ function blit(image, rect) {
 
 // Fills the views on screen from the last frame, after a layout change.
 function blitAll() {
-  if (framed) blit(frameImage(), frameView.frame);
+  if (look === "classic" && framed) blit(frameImage(), frameView.frame);
 }
 
-function paint() {
-  framePending = false;
-  const count = session.render();
+function lightboxPixels() {
+  const width = session.canvas_width();
+  const height = session.canvas_height();
+  if (lightboxImage === null || lightboxImage.data.buffer !== wasm.memory.buffer || lightboxImage.width !== width || lightboxImage.height !== height) {
+    lightboxImage = new ImageData(new Uint8ClampedArray(wasm.memory.buffer, session.rgba_ptr(), width * height * 4), width, height);
+  }
+  return lightboxImage;
+}
+
+function paintLightbox(now) {
+  // Switched to modern, not laid out yet: sizeLightbox resizes the session and paints at once.
+  // Painting the session's old lightbox at its stale size first would paint cold twice in a frame.
+  if (lightboxSize === "") return;
+  const wall = perfLog ? performance.now() : 0;
+  const count = session.render_at(now);
+  const rendered = perfLog ? performance.now() : 0;
+  let px = 0;
+  if (count > 0) {
+    const image = lightboxPixels();
+    const rects = new Int32Array(wasm.memory.buffer, session.dirty_ptr(), count * 4);
+    for (let i = 0; i < count; i += 1) {
+      const [left, top, right, bottom] = rects.subarray(i * 4, i * 4 + 4);
+      lightboxContext.putImageData(image, 0, 0, left, top, right - left, bottom - top);
+      px += (right - left) * (bottom - top);
+    }
+  }
+  if (perfLog) notePerf(now, wall, rendered - wall, performance.now() - rendered, count, px);
+  // The typeset text changes far less often than the pixels (never during a drag).
+  if (session.captions_changed()) renderCaptions();
+  // Spec §9.1 "Idle": the next frame only while a cue runs and the page is seen (ruling M4); the
+  // classic look and settled pages never get here with next_wake ≥ 0. A page hidden mid-cue
+  // paints once more when it is shown again (the visibilitychange listener).
+  if (!document.hidden && session.next_wake(now) >= 0) schedule();
+  afterPaint();
+}
+
+// The modern card's captions as HTML spans over the canvas (spec §10), each at its backing-px rect
+// / pxPerCss CSS px. Consecutive credits share a rect and join with " · " (ruling 6); a compact
+// card gives them an empty rect, and they go into the Help sheet instead. The win text, lettered
+// on the canvas or not, is read out through #win-live.
+function renderCaptions() {
+  const box = $("captions");
+  const sheetOpen = session.sheet_open();
+  box.classList.toggle("sheet", sheetOpen);
+  // The sheet covers the card: the captions shown fade out with its panel fading in (style.css),
+  // and are set anew when it closes, fading in as the panel fades out.
+  if (sheetOpen) return;
+  const spans = [];
+  const credits = [];
+  let live = "";
+  for (let i = 0; i < session.caption_count(); i += 1) {
+    const style = session.caption_style(i);
+    const role = session.caption_role(i);
+    let words = session.caption_text(i).replace(/\r\n?/g, "\n");
+    if (role === CaptionRole.ClickNext && mode !== "desktop" && session.next_open()) words = MODERN_TOUCH_NEXT;
+    if (role === CaptionRole.Win) live = words;
+    if (style === CaptionStyle.Hidden) continue;
+    const [left, top, right, bottom] = session.caption_rect(i);
+    if (style === CaptionStyle.Credit) {
+      const last = credits.at(-1);
+      if (last && last.left === left && last.top === top) last.words += ` · ${words}`;
+      else credits.push({ left, top, right, bottom, words });
+      continue;
+    }
+    spans.push({ left, top, right, bottom, words, role, className: captionClasses.get(style), alpha: session.caption_alpha(i) });
+  }
+  for (const credit of credits) {
+    if (credit.right <= credit.left) continue;
+    // Stacked's credits line runs under the card across the canvas, centred as in the comps;
+    // Beside's sits in the column right of the board, left-aligned.
+    const centred = Math.abs(credit.left - (lightbox.width - credit.right)) <= 2;
+    spans.push({ ...credit, className: "cap-credit", alpha: 1, centred });
+  }
+  const offCanvas = credits.filter((credit) => credit.right <= credit.left).map((credit) => credit.words).join(" · ");
+  const creditsHelp = $("credits-help");
+  creditsHelp.textContent = offCanvas;
+  creditsHelp.hidden = offCanvas === "";
+  box.replaceChildren(
+    ...spans.map(({ left, top, right, bottom, words, role, className, alpha, centred }) => {
+      const span = document.createElement("span");
+      span.className = className;
+      span.textContent = words;
+      // A win text that can't be lettered is a Title span; #win-live already reads it out.
+      if (role === CaptionRole.Win) span.setAttribute("aria-hidden", "true");
+      const height = (bottom - top) / pxPerCss;
+      Object.assign(span.style, {
+        left: `${left / pxPerCss}px`,
+        top: `${top / pxPerCss}px`,
+        width: `${(right - left) / pxPerCss}px`,
+        height: `${height}px`,
+        opacity: alpha === 1 ? "" : String(alpha),
+        textAlign: centred ? "center" : "",
+        // A title's one line, centred in its row (a plain block, so it can ellipsise).
+        lineHeight: className === "cap-title" ? `${height}px` : "",
+      });
+      return span;
+    }),
+  );
+  widenCompactName(box);
+  // Body text shrinks 15 → 13 → 11 px until it fits, with line height 1.3 at 11 (ruling 22, as
+  // card_min assumes); at 11 it clips (spec §10).
+  for (const span of box.querySelectorAll(".cap-body")) {
+    for (const size of BODY_SIZES) {
+      span.style.fontSize = `${size}px`;
+      span.style.lineHeight = size === BODY_SIZES.at(-1) ? "1.3" : "";
+      if (span.scrollHeight <= span.clientHeight + 1) break;
+    }
+  }
+  // The sheet hides the card's captions; the win text stays put under it (renderCaptions returns
+  // above), so closing the sheet does not read it out again.
+  const winLive = $("win-live");
+  if (winLive.textContent !== live) winLive.textContent = live;
+}
+
+// A compact card's level name (halation's rect ends at the "(won)" slot, which Rust can't size to
+// its text) grows rightwards on the header row: to 8 px left of the badge's measured text when
+// there is one, else across the empty badge slot. That slot is BADGE_W wide and starts
+// BADGE_NAME_GAP right of the name's rect (tableau's card_parts, in pt = CSS px), and it ends
+// 10 pt left of the Levels pill, so the name never reaches the pill.
+const BADGE_W = 44;
+const BADGE_NAME_GAP = 4;
+const BADGE_TEXT_GAP = 8;
+function widenCompactName(box) {
+  const name = box.querySelector(".cap-title-compact");
+  if (name === null) return;
+  const left = parseFloat(name.style.left);
+  const right = left + parseFloat(name.style.width);
+  const slotRight = right + BADGE_NAME_GAP + BADGE_W;
+  const badge = box.querySelector(".cap-badge");
+  let edge = slotRight;
+  if (badge !== null) {
+    const range = document.createRange();
+    range.selectNodeContents(badge);
+    edge = range.getBoundingClientRect().left - box.getBoundingClientRect().left - BADGE_TEXT_GAP;
+  }
+  if (edge > right) name.style.width = `${Math.min(edge, slotRight) - left}px`;
+}
+
+// The classic look has no captions: the overlay (hidden by CSS), the Help's credits and the win
+// text all go.
+function clearCaptions() {
+  $("captions").replaceChildren();
+  clearHelpCredits();
+  $("win-live").textContent = "";
+}
+
+// Empties and hides the Help's off-canvas credits (a compact card's).
+function clearHelpCredits() {
+  $("credits-help").textContent = "";
+  $("credits-help").hidden = true;
+}
+
+// What follows every paint, in either look.
+function afterPaint() {
+  updateNextButton();
+  showNewLevel();
+  noteWin();
+  updateLevelsExpanded();
+}
+
+// The toolbar's Levels says whether what it opens is open: the modern sheet (it closes with
+// Escape, the scrim, the close chip, a chip, or a resize to an inline picker, each followed by a
+// paint) or the classic dialog.
+function updateLevelsExpanded() {
+  const open = look === "modern" ? session.sheet_open() : levelsDialog.open;
+  setAttributeIfChanged($("levels-open"), "aria-expanded", String(open));
+}
+
+// Paints at `t`, the requestAnimationFrame timestamp (performance.now()'s clock), so every frame of
+// one vsync agrees on the time (ruling M4). A direct call (a resize) paints at performance.now()
+// and drops a frame still pending, which would only paint again.
+function paint(t) {
+  cancelAnimationFrame(frameRequest);
+  frameRequest = 0;
+  const now = Math.max(t ?? performance.now(), paintedAt);
+  paintedAt = now;
+  if (look === "modern") {
+    paintLightbox(now);
+    return;
+  }
+  const count = session.render_at(now);
   if (count > 0) {
     framed = true;
     const image = frameImage();
@@ -308,9 +536,7 @@ function paint() {
     if (mode === "portrait") listText();
     else drawText();
   }
-  updateNextButton();
-  showNewLevel();
-  noteWin();
+  afterPaint();
 }
 
 // The game and level the last paint showed; 0 and -1 before the first.
@@ -346,13 +572,14 @@ function listText() {
   updateNextButton();
 }
 
-// The Next level button shows in portrait while the level is won and the next one is open (on the
-// last level the toolbar's Next does nothing, so there is no button). It sits after the first text,
-// "You win!"; listText rebuilds the list, so this puts it back. The toolbar's ▶ is highlighted
-// meanwhile, so the win shows even with the texts scrolled below the screen.
+// The Next level button shows in classic portrait while the level is won and the next one is open
+// (on the last level the toolbar's Next does nothing, so there is no button). It sits after the
+// first text, "You win!"; listText rebuilds the list, so this puts it back. The toolbar's ▶ is
+// highlighted meanwhile, so the win shows even with the texts scrolled below the screen. The
+// modern look has its own Next ▶ on the canvas.
 function updateNextButton() {
   const list = $("text-list");
-  const show = mode === "portrait" && session.won() && session.slot_state(session.slot() + 1) !== LevelState.Locked;
+  const show = look === "classic" && mode === "portrait" && session.won() && session.slot_state(session.slot() + 1) !== LevelState.Locked;
   if (nextButton.hidden !== !show) nextButton.hidden = !show;
   if (toolbarNext.classList.contains("won") !== show) {
     toolbarNext.classList.toggle("won", show);
@@ -441,6 +668,78 @@ function sizeView(view, viewScale) {
   view.canvas.style.height = `${(view.frame.bottom - view.frame.top) * viewScale}px`;
 }
 
+// The look to show (spec §11): ?look= wins and is never stored; then the stored choice; then modern.
+function wantedLook() {
+  return touchLayout.lookFrom({ forced: forcedLook, stored: storage.read("chromatron.look").value });
+}
+
+// Switches the look (spec §11), storing it as the player's choice when `store`: the drag ends (the
+// piece stays put), the session starts the look cold, and the page lays out again.
+function setLook(next, { store = false } = {}) {
+  if (store) storage.write("chromatron.look", next);
+  if (next === look) return;
+  closeMenu();
+  endDrag();
+  look = next;
+  const root = document.documentElement;
+  root.dataset.look = look;
+  // Theme-ready (ruling 1): phase 2's modern look is dark only.
+  root.dataset.theme = "dark";
+  $("classic-look").setAttribute("aria-checked", String(look === "classic"));
+  themeColor.content = look === "modern" ? "#06070b" : "#25272a";
+  lightboxImage = null;
+  lightboxSize = "";
+  clearTimeout(resizeTimer);
+  resizeTimer = 0;
+  // Classic sizes its stage with CSS alone; the modern look has its own level sheet.
+  if (look === "classic") {
+    clearStageHeight();
+    clearCaptions();
+  } else if (levelsDialog.open) levelsDialog.close();
+  placeFooter();
+  apply(session.set_look(look === "modern" ? Look.Modern : Look.Classic));
+  updateLevelsButton();
+  requestLayout();
+}
+
+// Drops the stage height the modern look set (sizeLightbox), so CSS sizes the stage again.
+function clearStageHeight() {
+  stage.style.height = "";
+  stage.style.minHeight = "";
+  document.documentElement.classList.remove("stage-grown");
+}
+
+// The credits footer. Modern: always at the end of the Help sheet, followed by a compact card's
+// credits (spec §12). Classic: it follows the texts in portrait, and sits at the end of the help
+// in landscape, which fits one screen, instead of below the page.
+function placeFooter() {
+  if (look === "modern") helpDialog.querySelector(".sheet").append(footer, $("credits-help"));
+  else if (mode === "landscape") helpDialog.querySelector(".sheet").append(footer);
+  else if (mode === "portrait") $("texts").append(footer);
+  else if (footer.parentElement !== document.body) document.body.append(footer);
+}
+
+// The toolbar's Levels: in modern whenever the canvas has no level picker of its own (it opens the
+// sheet, and is the keyboard path to it); in classic in portrait, whose parts leave out the strip.
+// The modern desktop keeps its slot while it is not shown (visibility: hidden): the desktop toolbar
+// wraps, and whether the canvas has a picker is not monotonic in its height, so a button that came
+// and went could wrap and unwrap the toolbar, and resize the canvas, forever.
+function updateLevelsButton() {
+  const button = $("levels-open");
+  const show = look === "modern" ? !session.has_inline_picker() : mode === "portrait";
+  const keepSlot = look === "modern" && mode === "desktop";
+  const hidden = !show && !keepSlot;
+  const visibility = show || hidden ? "" : "hidden";
+  if (button.hidden !== hidden) button.hidden = hidden;
+  if (button.style.visibility !== visibility) button.style.visibility = visibility;
+}
+
+// The "Turn clockwise" toggle's state, on the rail's button and its Actions menu item.
+function showClockwise() {
+  $("clockwise").setAttribute("aria-pressed", String(clockwise));
+  $("clockwise-item").setAttribute("aria-checked", String(clockwise));
+}
+
 // Switches to layout `next`. The regions under a finger change, so any drag ends (the piece stays
 // put); the game itself carries on.
 function setMode(next) {
@@ -450,23 +749,25 @@ function setMode(next) {
   const root = document.documentElement;
   root.dataset.layout = mode;
   root.classList.toggle("touch", mode !== "desktop");
+  // The first layout picks the look; later layouts keep the one on screen, so a rotation never
+  // undoes a toggle (with ?look= forced, or storage that refused it).
+  setLook(look || wantedLook());
   $("wheel").hidden = mode !== "desktop";
   $("clockwise").hidden = mode === "desktop";
-  $("levels-open").hidden = mode !== "portrait";
+  $("clockwise-item").hidden = mode === "desktop";
   if (mode !== "portrait" && levelsDialog.open) levelsDialog.close();
   // A hidden toggle stays off: the desktop's taps (mouse clicks) never turn clockwise by surprise.
   // A touch layout restores the saved choice; neither case writes it.
   clockwise = mode !== "desktop" && clockwiseWanted;
-  $("clockwise").setAttribute("aria-pressed", String(clockwise));
+  showClockwise();
   document.body.style.paddingLeft = "";
+  // The last layout's stage height; the modern look sets this one's (sizeLightbox).
+  clearStageHeight();
   views = mode === "portrait" ? [boardView, toolboxView] : [frameView];
-  // The credits follow the texts in portrait, and sit at the end of the help in landscape, which
-  // fits one screen, instead of below the page.
-  if (mode === "portrait") $("texts").append(footer);
-  else if (mode === "landscape") helpDialog.querySelector(".sheet").append(footer);
-  else if (footer.parentElement !== document.body) document.body.append(footer);
+  placeFooter();
+  updateLevelsButton();
   blitAll();
-  if (mode === "portrait") listText();
+  if (look === "classic" && mode === "portrait") listText();
   else updateNextButton();
 }
 
@@ -474,6 +775,12 @@ function layout() {
   const width = window.innerWidth;
   const height = window.innerHeight;
   setMode(touchLayout.layoutMode({ forced: forcedLayout, coarse: coarsePointer.matches, width, height }));
+  // Landscape: edge to edge beside the toolbar, which runs down the left side.
+  if (mode === "landscape") document.body.style.paddingLeft = `${header.offsetWidth}px`;
+  if (look === "modern") {
+    sizeLightbox();
+    return;
+  }
   const ratio = window.devicePixelRatio || 1;
   if (mode === "portrait") {
     // The board and the toolbox fill the small viewport (100svh) below the toolbar, with a gap
@@ -494,11 +801,8 @@ function layout() {
     return;
   }
   if (mode === "landscape") {
-    // Edge to edge beside the toolbar, which runs down the left side. CSS sizes the stage to the
-    // small viewport (100svh), so Safari's bars collapsing changes nothing.
-    const rail = header.offsetWidth;
-    document.body.style.paddingLeft = `${rail}px`;
-    const fit = Math.min((document.documentElement.clientWidth - rail) / FRAME_WIDTH, stage.clientHeight / FRAME_HEIGHT);
+    // CSS sizes the stage to the small viewport (100svh), so Safari's bars collapsing changes nothing.
+    const fit = Math.min((document.documentElement.clientWidth - header.offsetWidth) / FRAME_WIDTH, stage.clientHeight / FRAME_HEIGHT);
     scale = touchLayout.fillScale(fit, ratio);
   } else {
     const gutter = document.fullscreenElement ? 0 : GUTTER;
@@ -507,6 +811,89 @@ function layout() {
   board.style.width = `${FRAME_WIDTH * scale}px`;
   board.style.height = `${FRAME_HEIGHT * scale}px`;
   drawText();
+}
+
+function safeInsets() {
+  const style = getComputedStyle($("safe-probe"));
+  return [style.paddingTop, style.paddingRight, style.paddingBottom, style.paddingLeft].map((v) => parseFloat(v) || 0);
+}
+
+// Sizes the modern canvas, on every layout: its CSS height (portrait, and a desktop window or a
+// landscape phone too short for the card: stage_height), then its backing store to that CSS size × the render scale
+// (spec D2), and tells the session (which ends any drag: the layout changed under it). Debounced
+// (see RESIZE_SETTLE_MS) unless `now`, resizeNow is set, or the canvas has no size yet.
+function sizeLightbox(now = false) {
+  clearTimeout(resizeTimer);
+  resizeTimer = 0;
+  const immediate = now || resizeNow || lightboxSize === "";
+  const touch = mode !== "desktop";
+  const fullscreen = document.fullscreenElement !== null;
+  const [top, right, bottom, left] = touchLayout.canvasInsets(mode, safeInsets(), fullscreen);
+  // The desktop's full screen shows the stage alone, as wide as the screen.
+  const width = mode === "desktop" && fullscreen ? stage.getBoundingClientRect().width : document.documentElement.clientWidth - (mode === "landscape" ? header.offsetWidth : 0);
+  let height;
+  if (mode === "portrait") {
+    // The small viewport below the toolbar; never less than Stacked's minimum (the page scrolls
+    // then, and only then).
+    const room = smallViewport.getBoundingClientRect().height - header.getBoundingClientRect().height;
+    height = stageHeight(width - left - right, room - top - bottom, touch) + top + bottom;
+    stage.style.height = `${height}px`;
+  } else if (mode === "desktop" && !fullscreen) {
+    // The stage's own box (CSS fills the window below the toolbar with it), unless the window is
+    // too short for the card: then the stage grows and the page scrolls.
+    stage.style.minHeight = "";
+    const room = stage.getBoundingClientRect().height;
+    height = stageHeight(width - left - right, room - top - bottom, touch) + top + bottom;
+    if (height > room) stage.style.minHeight = `${height}px`;
+    else height = room;
+  } else if (mode === "landscape" && !fullscreen) {
+    // CSS sizes the stage to the small viewport (100svh). Beside fits every phone there, its
+    // browser's bars shown or not (spec §6 "Revision: short landscape"); a canvas too small even
+    // for that grows to stage_height, and the page scrolls by hand (ruling 19).
+    stage.style.minHeight = "";
+    const room = stage.getBoundingClientRect().height;
+    height = stageHeight(width - left - right, room - top - bottom, touch) + top + bottom;
+    if (height > room) stage.style.minHeight = `${height}px`;
+    else height = room;
+    document.documentElement.classList.toggle("stage-grown", height > room);
+  } else {
+    // Full screen: the stage's own box (the screen), never grown.
+    stage.style.minHeight = "";
+    document.documentElement.classList.remove("stage-grown");
+    height = stage.getBoundingClientRect().height;
+  }
+  const scale = renderScale(width - left - right, height - top - bottom, window.devicePixelRatio || 1, touch);
+  const backingWidth = Math.max(1, Math.round(width * scale));
+  const backingHeight = Math.max(1, Math.round(height * scale));
+  // A layout pass that changes nothing must not end a drag or repaint cold. The touch layout is
+  // part of the size: the same pixels laid out for touch or not arrange differently.
+  const size = `${backingWidth}x${backingHeight}@${scale}:${top},${right},${bottom},${left}:${touch}`;
+  // The captions are placed for the last size: hidden while the canvas stretches to a new one,
+  // shown again by the cold paint that places them anew (or when the size comes back). At once:
+  // only the sheet's own opacity fades (style.css).
+  const captions = $("captions");
+  const pending = size !== lightboxSize && !immediate;
+  const visibility = pending ? "hidden" : "";
+  if (captions.style.visibility !== visibility) captions.style.visibility = visibility;
+  if (size === lightboxSize) return;
+  if (pending) {
+    resizeTimer = setTimeout(() => {
+      if (look === "modern") sizeLightbox(true);
+    }, RESIZE_SETTLE_MS);
+    return;
+  }
+  resizeNow = false;
+  lightboxSize = size;
+  pxPerCss = scale;
+  if (lightbox.width !== backingWidth) lightbox.width = backingWidth;
+  if (lightbox.height !== backingHeight) lightbox.height = backingHeight;
+  lightboxImage = null;
+  apply(session.resize(backingWidth, backingHeight, pxPerCss, [top, right, bottom, left], touch));
+  // The new arrangement may or may not have a level picker on the canvas.
+  updateLevelsButton();
+  // Setting the size cleared the canvas: paint it now, not on the next frame, so it never shows
+  // blank.
+  paint();
 }
 
 // Lays out on the next frame, never inside a ResizeObserver callback: a size change made there
@@ -524,6 +911,7 @@ function watchPixelRatio() {
   matchMedia(`(resolution: ${window.devicePixelRatio || 1}dppx)`).addEventListener(
     "change",
     () => {
+      resizeNow = true;
       layout();
       watchPixelRatio();
     },
@@ -538,8 +926,16 @@ function framePoint(clientX, clientY) {
   return touchLayout.framePointAt(live, clientX, clientY);
 }
 
+// A client point in the game's pixels: the classic frame, or the modern canvas's backing px.
+function gamePoint(clientX, clientY) {
+  if (look !== "modern") return framePoint(clientX, clientY);
+  // A stretched canvas waiting for its resize: resize now, so the point lands where it shows.
+  if (resizeTimer) sizeLightbox(true);
+  return touchLayout.lightboxPoint(lightbox.getBoundingClientRect(), { width: lightbox.width, height: lightbox.height }, clientX, clientY);
+}
+
 function isView(target) {
-  return target === pixels || target === boardPart || target === toolboxPart;
+  return target === pixels || target === lightbox || target === boardPart || target === toolboxPart;
 }
 
 // Touch and pen presses are primary. While "Turn clockwise" is on, a touch or pen release that
@@ -831,14 +1227,20 @@ function openLevels() {
   dialogOpener = document.activeElement;
   refreshLevels(framed ? frameImage() : null);
   levelsDialog.showModal();
+  updateLevelsExpanded();
   levelButtons.find(({ button }) => button.getAttribute("aria-current") === "true")?.button.focus();
   track("open_levels", {});
 }
 
 function wireLevels() {
   buildLevels();
-  $("levels-open").addEventListener("click", () => openLevels());
+  // Modern: the sheet on the canvas (apply tracks open_levels); classic: the HTML dialog.
+  $("levels-open").addEventListener("click", () => {
+    if (look === "modern") apply(session.command("levels"));
+    else openLevels();
+  });
   wireDialog(levelsDialog, $("levels-close"));
+  levelsDialog.addEventListener("close", updateLevelsExpanded);
 }
 
 // First visit only: shows the help once, if storage can say it has not been shown before.
@@ -878,23 +1280,48 @@ function wire() {
     // point, so it picks up what is under the finger.
     press = touchLayout.startPress(event.pointerType, event.clientX, event.clientY);
     pressStart = { scrollY: window.scrollY, time: performance.now() };
-    const [x, y] = framePoint(event.clientX, event.clientY);
+    const [x, y] = gamePoint(event.clientX, event.clientY);
+    // Modern (ruling 19): a touch or pen press with nothing under it, on a page taller than the
+    // viewport, pans the page by hand (the canvas keeps touch-action: none, so a browser pan never
+    // cancels a piece drag). It never reaches the game.
+    if (look === "modern") {
+      const pageTaller = document.documentElement.scrollHeight > window.innerHeight;
+      press.pans = touchLayout.startsPan({ held: press.held, inert: session.inert(x, y), pageTaller });
+      press.lastY = event.clientY;
+      if (press.pans) return;
+      // The open sheet on such a page (review M3): its chips are tapped, never dragged, so a touch
+      // on it that leaves the slop pans the page too, and the rows below the screen come into view.
+      press.pansPastSlop = press.held && pageTaller && session.sheet_open();
+    }
     apply(session.pointer_down(x, y, pressButton(event), event.shiftKey, event.altKey, event.ctrlKey));
   });
   stage.addEventListener("pointermove", (event) => {
     if (press === null || dialogOpen() || !event.isPrimary || event.buttons === 0) return;
+    if (press.pansPastSlop && !press.pans) {
+      if (touchLayout.movePoint(press, event.clientX, event.clientY, false) === null) return;
+      // The press on the sheet becomes a pan: it reaches nothing more (its release is dropped).
+      press.pans = true;
+      apply(session.pointer_cancel());
+    }
+    if (press.pans) {
+      // Past the slop, the page follows the finger.
+      if (touchLayout.movePoint(press, event.clientX, event.clientY, false) === null) return;
+      window.scrollBy(0, press.lastY - event.clientY);
+      press.lastY = event.clientY;
+      return;
+    }
     // A touch picks a piece up at the finger, so a piece near a region's top edge still starts a
     // drag; from then on it sends the point LIFT px above the finger, where the engine draws the piece.
     const wasDragging = session.dragging();
     const point = touchLayout.movePoint(press, event.clientX, event.clientY, wasDragging);
     if (point === null) return;
-    const [x, y] = framePoint(point[0], point[1]);
+    const [x, y] = gamePoint(point[0], point[1]);
     apply(session.pointer_move(x, y));
     if (!wasDragging && session.dragging()) {
       // This move started the drag: lift the piece above the finger at once.
       const [liftedX, liftedY] = touchLayout.movePoint(press, event.clientX, event.clientY, true);
       if (liftedY !== point[1]) {
-        const [fx, fy] = framePoint(liftedX, liftedY);
+        const [fx, fy] = gamePoint(liftedX, liftedY);
         apply(session.pointer_move(fx, fy));
       }
     }
@@ -904,7 +1331,8 @@ function wire() {
     capturedPointer = null;
     const ended = press;
     press = null;
-    if (ended === null || dialogOpen()) return;
+    // A pan sends nothing.
+    if (ended === null || ended.pans || dialogOpen()) return;
     // A touch that moved without a piece turns nothing: its release is away from its press.
     const dragging = session.dragging();
     if (touchLayout.isSwipe(ended, dragging)) {
@@ -913,24 +1341,27 @@ function wire() {
     }
     // A drag drops under the lifted point, where the piece is drawn.
     const [releaseX, releaseY] = touchLayout.releasePoint(ended, event.clientX, event.clientY, dragging);
-    const [x, y] = framePoint(releaseX, releaseY);
+    const [x, y] = gamePoint(releaseX, releaseY);
     apply(session.pointer_up(x, y, releaseButton(event, x, y)));
   });
   stage.addEventListener("pointercancel", (event) => {
     if (!event.isPrimary) return;
     capturedPointer = null;
+    const panned = press?.pans === true;
     press = null;
-    if (!dialogOpen()) apply(session.pointer_cancel());
+    if (!panned && !dialogOpen()) apply(session.pointer_cancel());
   });
-  // Portrait: a touch on the parts never scrolls the page (touch-action: none), but another finger
-  // on the texts or the toolbar can. A real scroll under a live touch or pen press ends the drag as
+  // The touch layouts (portrait, and a modern landscape grown to stage_height): a touch on the
+  // game never scrolls the page (touch-action: none), but another finger on the texts or the
+  // toolbar can. A real scroll under a live touch or pen press ends the drag as
   // on focus loss (the piece stays put), and that press's later moves and release reach nothing.
   // A fling still settling just after the press, and a scroll of a few pixels, leave it alone
   // (touchLayout.scrollEndsPress); the parts are measured at each event, so the drag stays true.
+  // A modern pan scrolls the page itself, and goes on.
   window.addEventListener(
     "scroll",
     () => {
-      if (press === null || mode !== "portrait") return;
+      if (press === null || press.pans || mode === "desktop") return;
       if (touchLayout.scrollEndsPress(press, pressStart, window.scrollY, performance.now())) endDrag();
     },
     { passive: true },
@@ -938,16 +1369,18 @@ function wire() {
   stage.addEventListener("contextmenu", (event) => {
     // A press on a view captures the pointer, so the event can target the stage itself: decide by
     // position too. The portrait texts, the toolbar and the dialogs keep the browser's menu.
-    const [x, y] = framePoint(event.clientX, event.clientY);
+    const [x, y] = gamePoint(event.clientX, event.clientY);
     const [offX, offY] = touchLayout.OFF_FRAME;
     if (isView(event.target) || x !== offX || y !== offY) event.preventDefault();
   });
-  pixels.addEventListener(
+  for (const view of [pixels, lightbox]) view.addEventListener(
     "wheel",
     (event) => {
       // Ctrl+wheel (and trackpad pinch) stays the browser's zoom.
       // Only the desktop layout has the wheel toggle; a touch layout never changes level by scrolling.
       if (mode !== "desktop" || !wheelOn || event.ctrlKey || dialogOpen()) return;
+      // A modern window too short for the card grows the canvas and scrolls: the wheel scrolls it.
+      if (look === "modern" && document.documentElement.scrollHeight > window.innerHeight) return;
       event.preventDefault();
       const inPixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
       apply(session.wheel(event.deltaX, event.deltaY, inPixels, event.timeStamp));
@@ -957,6 +1390,13 @@ function wire() {
 
   document.addEventListener("keydown", (event) => {
     if (dialogOpen() || event.isComposing) return;
+    // Escape closes the modern sheet wherever the focus is: after Tab to Levels and Enter, the
+    // focus stays on the button, a control that keeps every other key.
+    if (event.key === "Escape" && look === "modern" && session.sheet_open()) {
+      event.preventDefault();
+      apply(session.key("Escape", false, false, false));
+      return;
+    }
     // A focused game picker keeps only its own keys (pickerKey), so it never swallows Space, r, = or -.
     const control = isControl(event.target) && !(event.target === gameSelect && !pickerKey(event.key));
     if (event.key === "?" && !event.ctrlKey && !event.metaKey && !event.altKey && !control) {
@@ -1027,6 +1467,11 @@ function wire() {
   });
   $("copy").addEventListener("click", copyWithClipboardApi);
   $("paste").addEventListener("click", pasteWithClipboardApi);
+  // Actions ▸ Classic look: the player's choice, stored (select_look carries the new look).
+  $("classic-look").addEventListener("click", () => {
+    setLook(look === "classic" ? "modern" : "classic", { store: true });
+    track("select_look", {});
+  });
   wireMenu();
   wireHelp();
   wireLevels();
@@ -1042,10 +1487,13 @@ function wire() {
     clockwise = !clockwise;
     clockwiseWanted = clockwise;
     storage.write("chromatron.clockwise", clockwise ? "1" : "0");
-    clockwiseButton.setAttribute("aria-pressed", String(clockwise));
+    showClockwise();
   });
   const fullscreenButton = $("fullscreen");
-  if (document.fullscreenEnabled) fullscreenButton.hidden = false;
+  if (document.fullscreenEnabled) fullscreenButton.hidden = $("fullscreen-item").hidden = false;
+  // A short modern landscape's Actions menu holds these two in the rail's place (style.css).
+  $("clockwise-item").addEventListener("click", () => clockwiseButton.click());
+  $("fullscreen-item").addEventListener("click", () => fullscreenButton.click());
   fullscreenButton.addEventListener("click", () => {
     if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
     else {
@@ -1068,7 +1516,16 @@ function wire() {
     if (document.visibilityState === "hidden") {
       endDrag();
       saveAll();
+    } else if (look === "modern") {
+      // Shown again: one paint at the time now settles any cue that ended while hidden, and
+      // goes on with one still running (frames are never caught up).
+      schedule();
     }
+  });
+  // Spec §9.3: a change of the setting settles a running animation (a repaint shows it settled).
+  // Not apply(): this changes no game, so nothing is to be stored.
+  reduceMotion.addEventListener("change", (event) => {
+    if (session.set_reduced_motion(event.matches) & Flag.Redraw) schedule();
   });
   window.addEventListener("hashchange", () => {
     const n = gameFromHash();
@@ -1080,7 +1537,10 @@ function wire() {
   new ResizeObserver(requestLayout).observe(stage);
   window.addEventListener("resize", requestLayout);
   coarsePointer.addEventListener("change", requestLayout);
-  document.addEventListener("fullscreenchange", requestLayout);
+  document.addEventListener("fullscreenchange", () => {
+    resizeNow = true;
+    requestLayout();
+  });
   watchPixelRatio();
 }
 
@@ -1099,10 +1559,26 @@ async function start() {
     });
     Flag = glue.Flag;
     LevelState = glue.LevelState;
+    CaptionStyle = glue.CaptionStyle;
+    CaptionRole = glue.CaptionRole;
+    captionClasses = new Map([
+      [CaptionStyle.Title, "cap-title"],
+      [CaptionStyle.TitleCompact, "cap-title-compact"],
+      [CaptionStyle.Body, "cap-body"],
+      [CaptionStyle.Badge, "cap-badge"],
+      [CaptionStyle.Credit, "cap-credit"],
+      [CaptionStyle.Pill, "cap-pill"],
+    ]);
     displayScale = glue.display_scale;
+    Look = glue.Look;
+    renderScale = glue.render_scale;
+    stageHeight = glue.stage_height;
     session = new glue.Session();
+    session.set_reduced_motion(reduceMotion.matches);
     wire();
     const stored = Number(storage.read("chromatron.game").value);
+    // The look's styles from the start, so the other look never flashes.
+    document.documentElement.dataset.look = wantedLook();
     selectGame(gameFromHash() ?? (GAMES.includes(stored) ? stored : 1));
     layout();
     showHelpOnFirstVisit();

@@ -14,8 +14,11 @@ import { gzipSync } from "node:zlib";
 const [webDir, solutionsDir] = process.argv.slice(2);
 assert.ok(webDir && solutionsDir, "usage: node web_check.mjs <dist/web> <tests/solutions>");
 
-const MAX_WASM_BYTES = 600_000;
-const MAX_PAGE_GZIP_BYTES = 150_000;
+// Scales with the user's 300 KB gzip cap below (the wasm gzips to roughly a third of its size).
+const MAX_WASM_BYTES = 1_000_000;
+// 300 KB, up from 150 KB: the user raised it for the modern renderer (halation), compiled for
+// speed (opt-level 3, about 2× faster paints), through phases 2 and 4.
+const MAX_PAGE_GZIP_BYTES = 300_000;
 const RGBA_BYTES = 640 * 480 * 4;
 const BACKGROUND = [0xa4, 0xa4, 0xa4, 0xff];
 // Each game's cheat key as the browser reports it, and whether Control is held.
@@ -190,11 +193,98 @@ assert.equal(displayScale(320, 480), 0.5);
   session.free();
 }
 
+// The modern look (spec §15): every game paints whole then idles at the reference desktop and
+// phone sizes, captions cross, a drag moves a piece, an alternate tap on a chip opens its level,
+// the look round-trips, and the fixtures still win in modern (the solutions loop below).
+{
+  const { Look, render_scale: renderScale, stage_height: stageHeight } = glue;
+  assert.equal(renderScale(1400, 955, 2, false), 1.75);
+  assert.equal(renderScale(1400, 955, 1, false), 1);
+  assert.equal(renderScale(390, 740, 3, true), 2);
+  assert.ok(Math.abs(stageHeight(390, 500, true) - 596) <= 0.6, "a short phone canvas grows to Stacked's minimum");
+  for (const [w, h, scale, touch] of [[2560, 1600, 2, false], [780, 1480, 2, true]]) {
+    for (const game of [1, 2, 3, 4]) {
+      const session = new Session();
+      session.select(game, undefined, undefined);
+      session.set_look(Look.Modern);
+      session.resize(w, h, scale, [0, 0, 0, 0], touch);
+      assert.equal(session.render_at(0), 1, `game ${game} ${w}×${h}: a cold paint`);
+      assert.ok(session.captions_changed() && session.caption_count() >= 2, "captions");
+      assert.equal(session.render_at(16), 0);
+      assert.equal(session.next_wake(16), -1, "idle");
+      if (game === 1) {
+        // C1 level 1: the reflector in tray slot 0 (cell index 225) drags onto the empty board
+        // cell (8, 7) (index 7 · 15 + 8 = 113), as tests/session.rs does in classic.
+        const centre = (r) => [(r[0] + r[2]) / 2, (r[1] + r[3]) / 2];
+        const before = session.copy();
+        session.pointer_down(...centre(session.cell_rect(225)), 0, false, false, false);
+        session.pointer_move(...centre(session.cell_rect(113)));
+        session.pointer_up(...centre(session.cell_rect(113)), 0);
+        assert.notEqual(session.copy(), before, `${w}×${h}: the piece moved onto the board`);
+        assert.ok(session.render_at(32) >= 1, "a drop repaints");
+      }
+      session.free();
+    }
+  }
+  // An alternate (clockwise) tap on a chip opens its level: inline at 1280 × 800, in the sheet on a phone.
+  for (const [w, h, scale, touch, sheet] of [[2560, 1600, 2, false, false], [780, 1480, 2, true, true]]) {
+    const session = new Session();
+    session.select(2, undefined, undefined);
+    session.set_look(Look.Modern);
+    session.resize(w, h, scale, [0, 0, 0, 0], touch);
+    session.render_at(0);
+    if (sheet) assert.ok(has(session.command("levels"), Flag.SheetOpened));
+    const chip = session.chip_rect(3);
+    const [x, y] = [(chip[0] + chip[2]) / 2, (chip[1] + chip[3]) / 2];
+    session.pointer_down(x, y, 2, false, false, false);
+    assert.ok(has(session.pointer_up(x, y, 2), Flag.Slot) && session.slot() === 3, `${w}×${h}: chip 3 opened`);
+    session.render_at(16);
+    assert.equal(session.sheet_open(), false);
+    session.free();
+  }
+  // Looks round-trip and repaint whole (phase 1's checks, kept): a cold paint of the whole canvas,
+  // then nothing until something changes; idle; the classic frame back on a switch.
+  for (const game of [1, 2, 3, 4]) {
+    const session = new Session();
+    session.select(game, undefined, undefined);
+    assert.ok(has(session.set_look(Look.Modern), Flag.Redraw));
+    assert.ok(has(session.resize(2560, 1600, 2, [0, 0, 0, 0], false), Flag.Redraw));
+    assert.equal(session.render_at(0), 1, `game ${game}: the first modern paint`);
+    assert.deepEqual([...new Int32Array(wasm.memory.buffer, session.dirty_ptr(), 4)], [0, 0, 2560, 1600]);
+    const pixels = new Uint8Array(wasm.memory.buffer, session.rgba_ptr(), 2560 * 1600 * 4);
+    assert.ok(pixels[0] < 40 && pixels[1] < 40 && pixels[2] < 40 && pixels[3] === 255, `game ${game}: ink in the corner`);
+    assert.equal(session.render_at(16), 0, "nothing changed");
+    assert.equal(session.next_wake(16), -1, "idle");
+    session.set_look(Look.Classic);
+    assert.equal(session.render_at(32), 1);
+    assert.deepEqual([...new Int32Array(wasm.memory.buffer, session.dirty_ptr(), 4)], [0, 0, 640, 480]);
+    session.set_look(Look.Modern);
+    assert.equal(session.render_at(48), 1, "back to modern: a cold paint");
+    session.free();
+  }
+  // A resize can grow wasm memory, which detaches every view made before it: the page rebuilds its
+  // ImageData from the buffer at each paint (lightboxPixels), so a view made after the resize reads.
+  const session = new Session();
+  session.select(1, undefined, undefined);
+  session.set_look(Look.Modern);
+  session.resize(800, 600, 1, [0, 0, 0, 0], false);
+  session.render_at(0);
+  const before = new Uint8ClampedArray(wasm.memory.buffer, session.rgba_ptr(), 800 * 600 * 4);
+  session.resize(3840, 2400, 2, [0, 0, 0, 0], false);
+  session.render_at(16);
+  assert.equal(session.canvas_width(), 3840);
+  const after = new Uint8ClampedArray(wasm.memory.buffer, session.rgba_ptr(), 3840 * 2400 * 4);
+  assert.equal(after.buffer, wasm.memory.buffer);
+  assert.equal(after[3], 255, "the grown canvas is painted");
+  if (before.buffer !== wasm.memory.buffer) assert.equal(before.length, 0, "a view over grown memory is detached");
+  session.free();
+}
+
 let solved = 0;
 for (const game of [1, 2, 3, 4]) {
   const session = new Session();
   assert.ok(has(session.select(game, undefined, undefined), Flag.Redraw));
-  assert.equal(session.render(), 1);
+  assert.equal(session.render_at(0), 1);
   const rgba = new Uint8Array(wasm.memory.buffer, session.rgba_ptr(), RGBA_BYTES);
   assert.deepEqual([...rgba.subarray(0, 4)], BACKGROUND, `game ${game}: background at (0, 0)`);
   assert.deepEqual([...new Int32Array(wasm.memory.buffer, session.dirty_ptr(), 4)], [0, 0, 640, 480]);
@@ -217,8 +307,49 @@ for (const game of [1, 2, 3, 4]) {
     }
     assert.ok(has(session.paste(solution), Flag.Redraw), `${solution} pastes`);
     assert.ok(session.won(), `${solution} wins`);
-    assert.ok(session.render() > 0, `${solution}: a frame renders`);
+    assert.ok(session.render_at(0) > 0, `${solution}: a frame renders`);
     assert.ok(session.copy().startsWith(`${game}-${String(level).padStart(2, "0")}-`));
+    // A second time in the modern look at 1280 × 800 @2: the level restarted, then pasted again;
+    // the win paints, wakes the page for its cues, then settles.
+    session.set_look(glue.Look.Modern);
+    session.resize(2560, 1600, 2, [0, 0, 0, 0], false);
+    session.render_at(0);
+    session.key("r", false, false, false);
+    assert.ok(!session.won(), `${solution}: the restart unwins it in modern`);
+    session.render_at(0);
+    session.paste(solution);
+    assert.ok(session.won(), `${solution} wins in modern`);
+    assert.ok(session.render_at(0) > 0, `${solution}: a modern frame renders`);
+    // The win wakes the page (its cues), then settles within SETTLE_MS and paints nothing more.
+    let t = 0;
+    while (session.next_wake(t) !== -1) {
+      assert.ok(t < 2_500, `${solution}: the modern win settles`);
+      t += 1000 / 60;
+      session.render_at(t);
+    }
+    assert.ok(t > 0, `${solution}: the modern win animates`);
+    assert.equal(session.render_at(t + 1000 / 60), 0, `${solution}: nothing to paint once settled`);
+    // Reduced motion: a restart and a win repaint without a sweep; only the header fades (150 ms).
+    assert.ok(has(session.set_reduced_motion(true), Flag.Redraw), `${solution}: reduced motion repaints`);
+    assert.equal(session.set_reduced_motion(true), 0, `${solution}: the same setting changes nothing`);
+    session.key("r", false, false, false);
+    let r = t + 10_000;
+    session.render_at(r);
+    assert.equal(session.next_wake(r), -1, `${solution}: a reduced restart doesn't animate`);
+    session.paste(solution);
+    session.render_at((r += 10_000));
+    for (let k = 0; session.next_wake(r) !== -1; k += 1) {
+      assert.ok(k < 9, `${solution}: a reduced win settles within 150 ms (still waking at ${(k * 1000 / 60).toFixed(1)} ms)`);
+      session.render_at((r += 1000 / 60));
+    }
+    session.set_reduced_motion(false);
+    // The classic look never wakes the page: a restart and a win there leave next_wake at -1.
+    session.set_look(glue.Look.Classic);
+    session.key("r", false, false, false);
+    session.render_at((r += 1000));
+    session.paste(solution);
+    assert.ok(session.won() && session.render_at((r += 1000)) > 0, `${solution}: wins again in classic`);
+    assert.equal(session.next_wake(r), -1, `${solution}: classic never wakes`);
 
     const resumed = new Session();
     const flags = resumed.select(game, session.save_text(), level - 1);

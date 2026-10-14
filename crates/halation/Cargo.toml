@@ -1,0 +1,29 @@
+[package]
+name = "halation"
+description = "Chromatron's modern look: layout, vector art, additive light and motion around lumen"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# The `halation` command-line tool (`halation shot`), which decodes the originals and writes PNGs.
+cli = ["spectrograph/cli"]
+
+[dependencies]
+lumen = { path = "../lumen" }
+spectrograph = { path = "../spectrograph", default-features = false }
+
+[dev-dependencies]
+criterion = "0.8.2"
+insta = "1.49.0"
+png = "=0.18.1"
+spectrograph = { path = "../spectrograph", default-features = false, features = ["decode"] }
+
+[[bin]]
+name = "halation"
+required-features = ["cli"]
+
+[[bench]]
+name = "darkroom"
+harness = false

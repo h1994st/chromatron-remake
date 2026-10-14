@@ -26,8 +26,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install just and unar
-        run: brew install just unar
+      - name: Install just, unar and binaryen
+        run: brew install just unar binaryen
 
       - uses: actions/setup-node@v7
         with:

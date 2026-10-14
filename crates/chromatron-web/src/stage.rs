@@ -14,6 +14,39 @@ pub fn frame_point(x: f64, y: f64) -> (i32, i32) {
     (axis(x, FRAME_WIDTH), axis(y, FRAME_HEIGHT))
 }
 
+/// A pointer position in modern canvas backing px (fractional) as the pixel it falls in: floors,
+/// NaN gives 0, and the result is clamped to ±65 536 (lumen clamps the same way).
+pub fn device_point(x: f64, y: f64) -> (i32, i32) {
+    let axis = |v: f64| {
+        if v.is_nan() {
+            0
+        } else {
+            v.floor().clamp(-65_536.0, 65_536.0) as i32
+        }
+    };
+    (axis(x), axis(y))
+}
+
+/// Backing px per CSS px for the modern canvas (spec D2), for a `width × height` CSS-px canvas
+/// less its safe area at `devicePixelRatio` `ratio`, laid out for touch when `touch` (as
+/// `Session::resize` is told).
+#[wasm_bindgen]
+pub fn render_scale(width: f64, height: f64, ratio: f64, touch: bool) -> f64 {
+    f64::from(halation::render_scale(
+        width as f32,
+        height as f32,
+        ratio as f32,
+        touch,
+    ))
+}
+
+/// The CSS height the page gives the modern canvas: `room` (CSS px, safe area excluded) when the
+/// arrangement at `width × room` fits its card, else Stacked's minimum height (ruling 4).
+#[wasm_bindgen]
+pub fn stage_height(width: f64, room: f64, touch: bool) -> f64 {
+    f64::from(halation::stage_height(width as f32, room as f32, touch))
+}
+
 /// CSS pixels per frame pixel for a `width × height` CSS-pixel area: the largest whole multiple of
 /// 640 × 480 that fits, or the exact fit when even 1× does not (phones). 1 for an empty, negative
 /// or non-finite area, so the game never disappears.
@@ -44,6 +77,13 @@ mod tests {
             "one frame beyond each edge"
         );
         assert_eq!(frame_point(f64::NAN, f64::INFINITY), (0, 960));
+    }
+
+    #[test]
+    fn canvas_positions_floor_and_clamp() {
+        assert_eq!(device_point(-0.5, 2.9), (-1, 2));
+        assert_eq!(device_point(f64::NAN, f64::NAN), (0, 0));
+        assert_eq!(device_point(1e12, -1e12), (65_536, -65_536));
     }
 
     #[test]

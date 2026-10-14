@@ -44,11 +44,11 @@ fetch-originals:
 # Check formatting and lints
 lint:
     cargo fmt --all --check
-    cargo clippy --workspace --all-targets --features lumen/cli -- -D warnings
+    cargo clippy --workspace --all-targets --features lumen/cli,halation/cli -- -D warnings
 
 # Run all tests
 test:
-    cargo test --workspace --features lumen/cli
+    cargo test --workspace --features lumen/cli,halation/cli
 
 # Print a game's sections, strings and levels; write its sprite sheet to re/out/chromatron<game>/ (game: 1-4)
 dump game:
@@ -66,9 +66,36 @@ shot game level solution="":
         cargo run --quiet -p lumen --features cli -- shot {{game}} {{level}} "$out/chromatron{{game}}-level{{level}}.png"
     fi
 
-# Benchmark trace and render on real levels of every game; fails if over the spec's budgets
+# Render one level in the modern look to dist/shots-modern/ for review: optionally solved (stored, or a copied solution), at an easel (WxH@S), with the level sheet open (sheet=1) or on a touch layout (touch=1)
+shot-modern game level solution="" easel="1280x800@2" sheet="" touch="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="{{justfile_directory()}}/dist/shots-modern"
+    mkdir -p "$out"
+    png="$out/chromatron{{game}}-level{{level}}{{ if solution == "" { "" } else { "-solved" } }}{{ if sheet == "" { "" } else { "-sheet" } }}{{ if touch == "" { "" } else { "-touch" } }}-{{easel}}.png"
+    cargo run --quiet --release -p halation --features cli -- shot {{game}} {{level}} "$png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} {{ if sheet == "" { "" } else { "--sheet" } }} {{ if touch == "" { "" } else { "--touch" } }}
+
+# Render frames of a cue in the modern look to dist/shots-motion/ for review: cue is turn:<cell>, move:<from>,<to>, lift:<from>,<to>, win, level or sheet (cells: 0–224 board, 225– tray); one PNG per time in `at` (ms after the cue); with `sheet`, from the level sheet open (so `sheet` closes it)
+shot-motion game level cue at="0 50 100 200 400 800" solution="stored" easel="1280x800@2" touch="" sheet="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    out="{{justfile_directory()}}/dist/shots-motion"
+    mkdir -p "$out"
+    cargo build --quiet --release -p halation --features cli
+    name="$(printf '%s' "{{cue}}" | tr ':,' '--'){{ if sheet == "" { "" } else { "-from-sheet" } }}"
+    for t in {{at}}; do
+        "{{justfile_directory()}}/target/release/halation" shot {{game}} {{level}} "$out/c{{game}}-l{{level}}-$name-${t}ms-{{easel}}.png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} --cue {{cue}} --at "$t" {{ if touch == "" { "" } else { "--touch" } }} {{ if sheet == "" { "" } else { "--sheet" } }}
+    done
+
+# Render the synthetic pieces sheet (every kind, colour and direction) in the modern look to dist/shots-modern/
+shot-pieces easel="1280x800@2":
+    mkdir -p "{{justfile_directory()}}/dist/shots-modern"
+    cargo run --quiet --release -p halation --features cli -- pieces "{{justfile_directory()}}/dist/shots-modern/pieces-{{easel}}" --easel {{easel}}
+
+# Benchmark the engine (trace, classic render) and the modern look (arrange, cold paint, drag) on real levels of every game; fails if over the spec's budgets
 bench:
     cargo bench -p lumen --bench engine
+    cargo bench -p halation --bench darkroom
 
 # Print the wasm-bindgen version locked in Cargo.lock; the wasm-bindgen CLI must be exactly this version
 wasm-bindgen-version:
@@ -88,12 +115,22 @@ web: _require-originals
     targets="$(rustup target list --installed)"
     grep -x wasm32-unknown-unknown <<< "$targets" > /dev/null \
         || { echo "error: the wasm32 target is missing; run: rustup target add wasm32-unknown-unknown" >&2; exit 1; }
-    cargo build --quiet -p chromatron-web --profile web-release --target wasm32-unknown-unknown
+    command -v wasm-opt > /dev/null || { echo "error: wasm-opt not found; run: just setup (binaryen)" >&2; exit 1; }
+    wasm-opt --version
+    # Wasm SIMD (Safari 16.4+, Chrome 91+, Firefox 89+) for halation's light planes.
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUSTFLAGS="-C target-feature=+simd128" \
+        cargo build --quiet -p chromatron-web --profile web-release --target wasm32-unknown-unknown
     out="{{justfile_directory()}}/dist/web"
     rm -rf "$out"
     mkdir -p "$out"
     wasm-bindgen --target web --no-typescript --out-dir "$out" \
         "${CARGO_TARGET_DIR:-{{justfile_directory()}}/target}/wasm32-unknown-unknown/web-release/chromatron_web.wasm"
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/wasm_ledger.mjs" "$out/chromatron_web_bg.wasm" halation
+    # Every feature the build may use, all inside the browsers the page supports (spec §4).
+    wasm-opt -Oz --enable-bulk-memory --enable-nontrapping-float-to-int --enable-sign-ext \
+        --enable-reference-types --enable-multivalue --enable-mutable-globals --enable-simd \
+        -o "$out/chromatron_web_bg.opt.wasm" "$out/chromatron_web_bg.wasm"
+    mv "$out/chromatron_web_bg.opt.wasm" "$out/chromatron_web_bg.wasm"
     cp "{{justfile_directory()}}"/web/* "$out/"
     # Every page URL carries a hash of all shipped files (wasm, glue, main.js, touch_layout.js, analytics.js, style.css, index.html template), so a browser never mixes files of two deploys.
     build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js touch_layout.js analytics.js style.css index.html | shasum -a 256 | cut -c 1-12)"
@@ -106,13 +143,14 @@ web: _require-originals
 web-serve port="8000": web
     cd "{{justfile_directory()}}/dist/web" && python3 -m http.server {{port}} --bind 127.0.0.1
 
-# Build dist/web/ and smoke-test it in Node: every game starts, every tests/solutions/ fixture wins and reloads, size budgets hold, the touch layout rules hold
+# Build dist/web/ and smoke-test it in Node: every game starts, every tests/solutions/ fixture wins and reloads, size budgets hold, the touch layout rules hold, the modern look paints within its time budgets and a live resize within its memory budget
 web-check: web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_check.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
     node "{{justfile_directory()}}/crates/chromatron-web/tests/touch_layout_check.mjs" "{{justfile_directory()}}/dist/web"
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/lightbox_budgets.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
 
-# Build dist/web/ and photograph it in headless Google Chrome (phone portrait and landscape, desktop) into <dir> (relative to the repo; default re/out/web-shots, git-ignored), checking each view; local only, needs Chrome
-web-shots dir="re/out/web-shots": web
+# Build dist/web/ and photograph it in headless Google Chrome (both looks; phone portrait and landscape, small phones, desktop) into <dir> (relative to the repo; default dist/web-shots, git-ignored), checking each view; local only, needs Chrome
+web-shots dir="dist/web-shots": web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"
 
 # Render the brand stills (og.png, apple-touch-icon.png, assets/promo/*: banner, portrait cover and three 1280 × 720 video thumbnails for A/B testing) with the trailer renderer; with <dir> (under dist/ or outside the repo), into it for review; local only

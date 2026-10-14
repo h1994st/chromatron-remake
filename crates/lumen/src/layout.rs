@@ -123,9 +123,52 @@ pub fn hit_test(x: i32, y: i32) -> Hit {
     Hit::Nothing
 }
 
+/// A pixel geometry for pointer input: what each pixel is over, and how far a press must move to
+/// become a drag. Classic is the original window (`ClassicFloorplan`); the modern look supplies
+/// its own. Coordinates are the floorplan's pixels.
+pub trait Floorplan {
+    /// What pixel (`x`, `y`) is over.
+    fn hit(&self, x: i32, y: i32) -> Hit;
+    /// A drag starts once the pointer is more than this many pixels from the press on an axis.
+    fn drag_slop(&self) -> i32;
+}
+
+/// The original 640 × 480 window: `hit_test` and a 1 px slop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ClassicFloorplan;
+
+impl Floorplan for ClassicFloorplan {
+    fn hit(&self, x: i32, y: i32) -> Hit {
+        hit_test(x, y)
+    }
+
+    fn drag_slop(&self) -> i32 {
+        1
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_classic_floorplan_is_the_original_hit_test() {
+        let plan = ClassicFloorplan;
+        assert_eq!(plan.drag_slop(), 1);
+        for y in -(FRAME_HEIGHT as i32)..2 * FRAME_HEIGHT as i32 {
+            for x in -(FRAME_WIDTH as i32)..2 * FRAME_WIDTH as i32 {
+                assert_eq!(plan.hit(x, y), hit_test(x, y), "({x}, {y})");
+            }
+        }
+        for (x, y) in [
+            (-0x10000, -0x10000),
+            (0x10000, 0x10000),
+            (-0x10000, 420),
+            (100, 0x10000),
+        ] {
+            assert_eq!(plan.hit(x, y), hit_test(x, y), "({x}, {y})");
+        }
+    }
 
     #[test]
     fn board_cells_sit_on_a_24_px_grid() {

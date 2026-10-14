@@ -10,3 +10,5 @@ brew "unar"
 brew "node"
 # Play, record, convert, and stream select audio and video codecs
 brew "ffmpeg"
+# Compiler infrastructure and toolchain library for WebAssembly
+brew "binaryen"

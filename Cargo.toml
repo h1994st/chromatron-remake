@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/spectrograph",
     "crates/lumen",
+    "crates/halation",
     "crates/chromatron",
     "crates/chromatron-web",
 ]
@@ -17,8 +18,34 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 
-# The browser build (`just web`): the release profile, plus abort on panic and no symbols.
+# The browser build (`just web`): the release profile, plus abort on panic, no debug info and code
+# built for size. Function names stay until wasm-opt (which drops them) so `just web` can report
+# halation's share.
 [profile.web-release]
 inherits = "release"
 panic = "abort"
-strip = true
+strip = "debuginfo"
+opt-level = "s"
+
+# halation alone is compiled for speed (about 2× faster paints): the user chose speed over size and
+# raised the page cap to 300 KB gzip. Everything else (lumen's classic frame costs far under a
+# frame) stays small, which keeps the wasm under its 600 000 B cap.
+[profile.web-release.package.halation]
+opt-level = 3
+
+# halation's tests paint and encode full canvases (stills, incremental-equals-cold); unoptimised
+# they take minutes.
+[profile.dev.package.halation]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.flate2]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+[profile.dev.package.zlib-rs]
+opt-level = 3

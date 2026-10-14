@@ -1,7 +1,7 @@
 //! The mouse state machine (logic.md L7, `handle_mouse` @ 0x50d4).
 
 use crate::game_state::{DragState, Effects, GameState, Redraw};
-use crate::layout::{Hit, Rect, hit_test};
+use crate::layout::{Floorplan, Hit, Rect};
 use crate::piece::{Piece, turn};
 
 impl GameState<'_> {
@@ -11,7 +11,13 @@ impl GameState<'_> {
     /// A press while a drag is still running means its mouse-up was lost (released outside the
     /// window, platform.md P4): the drag is cancelled and the piece stays where it was, where the
     /// original would later drop whatever cell this press selects.
-    pub(crate) fn mouse_down(&mut self, x: i32, y: i32, alt: bool) -> Effects {
+    pub(crate) fn mouse_down(
+        &mut self,
+        plan: &impl Floorplan,
+        x: i32,
+        y: i32,
+        alt: bool,
+    ) -> Effects {
         let cancelled = std::mem::take(&mut self.pointer.state) == DragState::Dragging;
         let effects = if cancelled {
             Effects::full_redraw()
@@ -21,7 +27,7 @@ impl GameState<'_> {
         if alt {
             return effects;
         }
-        if let Hit::Cell(index) = hit_test(x, y) {
+        if let Hit::Cell(index) = plan.hit(x, y) {
             self.pointer.cursor = index;
             if self.board.cells[index].piece.is_movable() {
                 self.pointer.state = DragState::Pressed;
@@ -31,15 +37,16 @@ impl GameState<'_> {
         effects
     }
 
-    /// A drag starts once the pointer is over the board or toolbox and more than 1 px away from the
-    /// press. Beams are not retraced while dragging.
-    pub(crate) fn mouse_dragged(&mut self, x: i32, y: i32) -> Effects {
+    /// A drag starts once the pointer is over the board or toolbox and more than the floorplan's
+    /// drag slop (1 px in classic) away from the press. Beams are not retraced while dragging.
+    pub(crate) fn mouse_dragged(&mut self, plan: &impl Floorplan, x: i32, y: i32) -> Effects {
         match self.pointer.state {
             DragState::Idle => Effects::default(),
             DragState::Pressed => {
                 let (px, py) = self.pointer.press;
-                let near = (x - px).abs() <= 1 && (y - py).abs() <= 1;
-                if near || !matches!(hit_test(x, y), Hit::Cell(_)) {
+                let slop = plan.drag_slop();
+                let near = (x - px).abs() <= slop && (y - py).abs() <= slop;
+                if near || !matches!(plan.hit(x, y), Hit::Cell(_)) {
                     return Effects::default();
                 }
                 let piece = self.board.cells[self.pointer.cursor];
@@ -72,9 +79,9 @@ impl GameState<'_> {
     ///
     /// Unlike the original, every release ends the gesture: the original can leave `drag_state`
     /// at 1 after a click, which later swallows right-click rotations (logic.md L7 quirk).
-    pub(crate) fn mouse_up(&mut self, x: i32, y: i32, alt: bool) -> Effects {
+    pub(crate) fn mouse_up(&mut self, plan: &impl Floorplan, x: i32, y: i32, alt: bool) -> Effects {
         let was = std::mem::take(&mut self.pointer.state);
-        let hit = hit_test(x, y);
+        let hit = plan.hit(x, y);
         if was == DragState::Dragging {
             if let Hit::Cell(target) = hit
                 && !alt
@@ -104,9 +111,51 @@ mod tests {
     use crate::board::{Cell, board_index, toolbox_index};
     use crate::fixture::tiny_game;
     use crate::game_state::{Drag, Effects, GameState, InputEvent, Redraw};
-    use crate::layout::{Rect, cell_origin, strip_origin};
+    use crate::layout::{Floorplan, Hit, Rect, cell_origin, hit_test, strip_origin};
     use crate::piece::Piece;
     use crate::save::SaveData;
+
+    /// The classic frame at twice the size, with a 2 px slop: a stand-in for a modern floorplan.
+    struct Doubled;
+
+    impl Floorplan for Doubled {
+        fn hit(&self, x: i32, y: i32) -> Hit {
+            hit_test(x.div_euclid(2), y.div_euclid(2))
+        }
+        fn drag_slop(&self) -> i32 {
+            2
+        }
+    }
+
+    #[test]
+    fn a_floorplan_supplies_the_hits_and_the_drag_slop() {
+        let data = tiny_game();
+        let mut state = GameState::new(&data, SaveData::default());
+        let (x, y) = centre(MIRROR_SLOT);
+        let (x, y) = (2 * x, 2 * y);
+        state.handle_on(&Doubled, InputEvent::MouseDown { x, y, alt: false });
+        state.handle_on(&Doubled, InputEvent::MouseDragged { x: x + 2, y: y - 2 });
+        assert_eq!(state.drag(), None, "2 px is within Doubled's slop");
+        let (tx, ty) = centre(board_index(8, 7));
+        state.handle_on(
+            &Doubled,
+            InputEvent::MouseDragged {
+                x: 2 * tx,
+                y: 2 * ty,
+            },
+        );
+        assert!(state.drag().is_some(), "3 px or more starts the drag");
+        state.handle_on(
+            &Doubled,
+            InputEvent::MouseUp {
+                x: 2 * tx,
+                y: 2 * ty,
+                alt: false,
+            },
+        );
+        assert_eq!(state.board().cells[board_index(8, 7)].piece, Piece::Mirror);
+        assert_eq!(state.board().cells[MIRROR_SLOT].piece, Piece::Empty);
+    }
 
     /// The centre pixel of cell `index`.
     fn centre(index: usize) -> (i32, i32) {

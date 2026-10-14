@@ -187,4 +187,27 @@ assert.equal(t.scrollEndsPress(pressed, at, 91, 2000), true, "the slop holds bot
 assert.equal(t.scrollEndsPress(t.startPress("pen", 0, 0), at, 160, 2000), true, "a pen press ends too");
 assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), false, "a mouse press never does");
 
+// The modern look: which look, the canvas's safe insets, client points in backing pixels, and
+// portrait's hand-scroll.
+{
+  const { lookFrom, canvasInsets, lightboxPoint } = t;
+  assert.equal(lookFrom({ forced: null, stored: null }), "modern", "modern is the default");
+  assert.equal(lookFrom({ forced: null, stored: "classic" }), "classic");
+  assert.equal(lookFrom({ forced: "modern", stored: "classic" }), "modern", "?look= wins and is never stored");
+  assert.equal(lookFrom({ forced: "bogus", stored: "nonsense" }), "modern");
+  const insets = [47, 34, 21, 47];
+  assert.deepEqual(canvasInsets("desktop", insets, false), [0, 34, 21, 47], "the toolbar is above the canvas");
+  assert.deepEqual(canvasInsets("portrait", insets, false), [0, 34, 21, 47]);
+  assert.deepEqual(canvasInsets("landscape", insets, false), [47, 34, 21, 0], "the rail is left of it");
+  assert.deepEqual(canvasInsets("desktop", insets, true), insets, "full screen: the canvas is the screen");
+  const box = { left: 10, top: 20, width: 400, height: 300 };
+  assert.deepEqual(lightboxPoint(box, { width: 701, height: 525 }, 210, 170), [(200 * 701) / 400, (150 * 525) / 300], "backing px, not pxPerCss (ruling 15)");
+  assert.deepEqual(lightboxPoint({ ...box, width: 0 }, { width: 701, height: 525 }, 1, 1), [...t.OFF_FRAME]);
+  assert.deepEqual(lightboxPoint(box, { width: 0, height: 0 }, 1, 1), [...t.OFF_FRAME]);
+  assert.equal(t.startsPan({ held: true, inert: true, pageTaller: true }), true, "a finger on the card of a scrolling page pans it");
+  assert.equal(t.startsPan({ held: true, inert: false, pageTaller: true }), false, "a finger on a piece drags it");
+  assert.equal(t.startsPan({ held: true, inert: true, pageTaller: false }), false, "nothing to scroll");
+  assert.equal(t.startsPan({ held: false, inert: true, pageTaller: true }), false, "a mouse never pans");
+}
+
 console.log("ok: touch layout rules");
