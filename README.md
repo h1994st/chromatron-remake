@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="https://shengtuo.me/chromatron-remake/"><img src="assets/promo/banner.jpg" alt="Chromatron Remake: laser puzzles, Chromatron 1–4, free in your browser and native on Apple Silicon" width="100%"></a>
+</p>
+
 # 🔴🟢🔵 Chromatron for modern macOS
 
 Native Apple Silicon versions of Sean Barrett's laser puzzle games **Chromatron**, **Chromatron 2**, **Chromatron 3** and **Chromatron 4** (Silver Spaceship Software, 2003–2004). 🔦✨
@@ -60,6 +64,8 @@ Guide the coloured beams 🌈 to light every target. Drag pieces between the too
 ## 🧑‍💻 Development
 
 See [CLAUDE.md](CLAUDE.md) for the architecture and the full list of `just` recipes. In short: `just test` runs the tests, `just lint` checks formatting and lints, `just bench` checks the engine against its performance budgets, `just screenshots` regenerates the images above, and `just web-check` builds the browser version and plays every stored solution through it in Node.
+
+`just trailer` renders the 30 s promo videos (landscape and portrait) with their synthesised soundtrack into `dist/trailer/`, and `just trailer-sheet <dir>` makes their keyframe contact sheets; both are local only (they need macOS fonts).
 
 ## 🙏 Credits
 

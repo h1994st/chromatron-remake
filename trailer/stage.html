@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Chromatron Remake trailer stage</title>
+  <!-- The trailer's stage: reel.mjs opens it in headless Chrome at the exact output size and draws
+       stills or frames through window.trailer. -->
+  <style>
+    html, body { margin: 0; padding: 0; background: #06070b; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <script type="module">
+    import { STILLS, drawStill } from "./stills.mjs";
+    import { renderFrame } from "./scenes.mjs";
+    import { DURATION, FPS } from "./timeline.mjs";
+
+    const canvas = document.getElementById("stage");
+    // Sizes the canvas to the viewport only when that changes, so frames reuse it.
+    const fit = (reset) => {
+      if (reset || canvas.width !== innerWidth || canvas.height !== innerHeight) {
+        canvas.width = innerWidth;
+        canvas.height = innerHeight;
+      }
+      return canvas.getContext("2d");
+    };
+    window.trailer = {
+      stills: Object.keys(STILLS),
+      duration: DURATION,
+      fps: FPS,
+      // Draws the named still at the viewport's size.
+      async still(name) {
+        await document.fonts.ready;
+        drawStill(fit(true), name, { width: innerWidth, height: innerHeight });
+        return true;
+      },
+      // Draws frame time t (seconds) of the trailer in `shape` ("landscape" or "portrait") at the
+      // viewport's size.
+      async render(t, shape) {
+        await document.fonts.ready;
+        renderFrame(fit(false), t, { width: innerWidth, height: innerHeight, shape });
+        return true;
+      },
+    };
+    window.trailerReady = true;
+  </script>
+</body>
+</html>

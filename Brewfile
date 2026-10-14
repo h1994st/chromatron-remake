@@ -8,3 +8,5 @@ brew "radare2"
 brew "unar"
 # Open-source, cross-platform JavaScript runtime environment
 brew "node"
+# Play, record, convert, and stream select audio and video codecs
+brew "ffmpeg"

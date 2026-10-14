@@ -115,41 +115,38 @@ web-check: web
 web-shots dir="re/out/web-shots": web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"
 
-# Render our own artwork in assets/social/ (nothing from the games) to web/og.png (1200 × 630) and web/apple-touch-icon.png (180 × 180) in headless Google Chrome; local only
-social-images:
+# Render the brand stills (og.png, apple-touch-icon.png, assets/promo/*: banner, portrait cover and three 1280 × 720 video thumbnails for A/B testing) with the trailer renderer; with <dir> (under dist/ or outside the repo), into it for review; local only
+social-images dir="":
+    node "{{justfile_directory()}}/trailer/reel.mjs" stills {{ if dir == "" { "" } else { quote(join(invocation_directory(), dir)) } }}
+
+# Test the trailer's beam tracer, playback, timeline and lettering
+trailer-test:
+    node --test "{{justfile_directory()}}/trailer/"*.test.mjs
+
+# Render the 30 s promo videos, landscape (1920 × 1080) and portrait (1080 × 1920), with the synthesised soundtrack, into dist/trailer/ in headless Google Chrome and ffmpeg, then check them with ffprobe and ebur128; local only, takes about 10 minutes
+trailer: trailer-test
     #!/usr/bin/env bash
     set -euo pipefail
-    chrome="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
-    [[ -x "$chrome" ]] || { echo "error: no Google Chrome at $chrome; set CHROME to its executable" >&2; exit 1; }
-    profile="$(mktemp -d "${TMPDIR:-/tmp}/chromatron-social.XXXXXX")"
-    pid=""
-    trap '[[ -z "$pid" ]] || { kill "$pid" 2> /dev/null; wait "$pid" 2> /dev/null; }; rm -rf "$profile"' EXIT
-    # <svg> <png> <width> <height> <bits per channel> <max bytes>: the PNG is rounded to that many bits per channel and recompressed
-    render() {
-        local svg="{{justfile_directory()}}/assets/social/$1" png="{{justfile_directory()}}/web/$2"
-        rm -f "$png" "$profile/chrome.log"
-        perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "$chrome" --headless=new --disable-gpu --hide-scrollbars \
-            --force-device-scale-factor=1 --no-first-run --no-default-browser-check --user-data-dir="$profile/data" \
-            --window-size="$3,$4" --screenshot="$png" "file://$svg" > "$profile/chrome.log" 2>&1 &
-        pid=$!
-        # Chrome can linger after writing the screenshot: wait for its "written" line (or its exit, or the 60 s alarm), then stop it.
-        until grep -q "bytes written to file" "$profile/chrome.log"; do
-            kill -0 "$pid" 2> /dev/null || break
-            sleep 0.2
-        done
-        kill "$pid" 2> /dev/null || true
-        wait "$pid" 2> /dev/null || true
-        pid=""
-        [[ -f "$png" ]] || { echo "error: Chrome wrote no $2" >&2; exit 1; }
-        node "{{justfile_directory()}}/crates/chromatron-web/tests/png_squeeze.mjs" "$png" "$5"
-        size="$(sips -g pixelWidth -g pixelHeight "$png" | awk '/pixel/ { printf "%s ", $2 }')"
-        [[ "$size" == "$3 $4 " ]] || { echo "error: $2 is ${size}pixels, not $3 × $4" >&2; exit 1; }
-        bytes="$(wc -c < "$png" | tr -d ' ')"
-        (( bytes <= $6 )) || { echo "error: $2 is $bytes bytes, over $6" >&2; exit 1; }
-        printf '%8d bytes  %s (%s × %s)\n' "$bytes" "$2" "$3" "$4"
-    }
-    render og.svg og.png 1200 630 6 300000
-    render icon.svg apple-touch-icon.png 180 180 8 50000
+    work="$(mktemp -d "${TMPDIR:-/tmp}/chromatron-trailer.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
+    mkdir -p "{{justfile_directory()}}/dist/trailer"
+    SECONDS=0
+    node "{{justfile_directory()}}/trailer/score.mjs" "$work/score.wav"
+    node "{{justfile_directory()}}/trailer/reel.mjs" video "{{justfile_directory()}}/dist/trailer" "$work/score.wav"
+    echo "just trailer took $((SECONDS / 60)) min $((SECONDS % 60)) s"
+
+# Re-render only the soundtrack and lay it onto the videos already in dist/trailer/ (the picture is copied), then check them again; seconds instead of `just trailer`'s minutes
+trailer-score: trailer-test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    work="$(mktemp -d "${TMPDIR:-/tmp}/chromatron-trailer.XXXXXX")"
+    trap 'rm -rf "$work"' EXIT
+    node "{{justfile_directory()}}/trailer/score.mjs" "$work/score.wav"
+    node "{{justfile_directory()}}/trailer/reel.mjs" remux "{{justfile_directory()}}/dist/trailer" "$work/score.wav"
+
+# Render keyframe contact sheets of the trailer, one per shape, into <dir> (under dist/, e.g. dist/trailer/review, or outside the repo; relative to the current directory), for review
+trailer-sheet dir:
+    node "{{justfile_directory()}}/trailer/reel.mjs" sheet {{quote(join(invocation_directory(), dir))}}
 
 # Run a game's app (game: 1-4)
 run game:

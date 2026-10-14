@@ -1,0 +1,210 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 420" width="720" height="420" role="img" aria-labelledby="title desc">
+  <title id="title">How Chromatron works</title>
+  <desc id="desc">A white laser fires through a red filter, which lets only red light through. A mirror bounces the red beam down onto a target. A green laser also hits the target. Light adds up, so red plus green makes yellow, and the yellow target lights up.</desc>
+  <style>
+    svg {
+      --room0: #f9fafc; --room1: #f1f3f8; --room2: #e7eaf2;
+      --grid: #1b2340; --grid-a: .065;
+      --tile0: #ffffff; --tile0-a: .85; --tile1: #dfe4f2; --tile1-a: .6; --tile-line: #1b2340; --tile-line-a: .14;
+      --body0: #4a5266; --body1: #262b38; --body2: #12151d; --body-line: #ffffff; --body-line-a: .35;
+      --red: #f0213a; --red-core: #f0213a; --green: #08b85a; --green-core: #08b85a;
+      --white-glow: #7f93cf; --white-core: #ffffff; --white-dot: #ffffff;
+      --yellow: #f2b705; --yellow-hot: #ffe680; --yellow-text: #c98f00;
+      --glass0: #ff3b52; --glass1: #f0213a; --glass-line: #b8102a;
+      --mirror-halo: #7f93cf; --mirror: #3a4466;
+      --ink: #141a2e; --ink2: #4a5577; --border: #1b2340; --border-a: .1;
+      --bloom-a: .12; --glow-a: .6; --blend: normal; --pulse: #ffffff;
+    }
+    @media (prefers-color-scheme: dark) {
+      svg {
+        --room0: #1a2142; --room1: #0b0d18; --room2: #06070b;
+        --grid: #96aaff; --grid-a: .07;
+        --tile0: #aabeff; --tile0-a: .12; --tile1: #788cdc; --tile1-a: .03; --tile-line: #dce6ff; --tile-line-a: .16;
+        --body0: #3a4152; --body1: #1a1e29; --body2: #0b0d13; --body-line: #e6ecff; --body-line-a: .3;
+        --red: #ff2234; --red-core: #ffc8c4; --green: #18ff76; --green-core: #d2ffe2;
+        --white-glow: #dfe6ff; --white-core: #ffffff; --white-dot: #ffffff;
+        --yellow: #ffe23c; --yellow-hot: #fff6a8; --yellow-text: #ffe23c;
+        --glass0: #ff5a6a; --glass1: #ff2234; --glass-line: #ffd0d4;
+        --mirror-halo: #c8d6ff; --mirror: #ffffff;
+        --ink: #e1e8ff; --ink2: #a9b6dc; --border: #dce6ff; --border-a: .12;
+        --bloom-a: .35; --glow-a: 1; --blend: screen; --pulse: #ffffff;
+      }
+    }
+    .room0 { stop-color: var(--room0) } .room1 { stop-color: var(--room1) } .room2 { stop-color: var(--room2) }
+    .tile0 { stop-color: var(--tile0); stop-opacity: var(--tile0-a) } .tile1 { stop-color: var(--tile1); stop-opacity: var(--tile1-a) }
+    .body0 { stop-color: var(--body0) } .body1 { stop-color: var(--body1) } .body2 { stop-color: var(--body2) }
+    .glass0 { stop-color: var(--glass0); stop-opacity: .55 } .glass1 { stop-color: var(--glass1); stop-opacity: .2 }
+    .red-s { stop-color: var(--red) } .red-e { stop-color: var(--red); stop-opacity: 0 }
+    .green-s { stop-color: var(--green) } .green-e { stop-color: var(--green); stop-opacity: 0 }
+    .hot0 { stop-color: #fff } .hot1 { stop-color: var(--yellow-hot) } .hot2 { stop-color: var(--yellow); stop-opacity: 0 }
+    .halo0 { stop-color: var(--yellow); stop-opacity: .45 } .halo1 { stop-color: var(--yellow); stop-opacity: 0 }
+
+    .gridlines { stroke: var(--grid); stroke-opacity: var(--grid-a) }
+    .tiles { stroke: var(--tile-line); stroke-opacity: var(--tile-line-a) }
+    .laser { stroke: var(--body-line); stroke-opacity: var(--body-line-a) }
+    .beams { mix-blend-mode: var(--blend) }
+    .bloom { opacity: var(--bloom-a) } .glow { opacity: var(--glow-a) }
+    .red { stroke: var(--red) } .red-core { stroke: var(--red-core) }
+    .green { stroke: var(--green) } .green-core { stroke: var(--green-core) }
+    .white-glow { stroke: var(--white-glow) } .white-core { stroke: var(--white-core) }
+    .white-dot { fill: var(--white-dot) } .green-dot { fill: var(--green) }
+    .filter-glass { stroke: var(--glass-line) }
+    .mirror-halo { stroke: var(--mirror-halo); stroke-opacity: .35 } .mirror { stroke: var(--mirror) }
+    .ring { stroke: var(--yellow) } .rays { stroke: var(--yellow) }
+    .ink { fill: var(--ink) } .ink2 { fill: var(--ink2) } .yellow-text { fill: var(--yellow-text) }
+    .border { stroke: var(--border); stroke-opacity: var(--border-a) }
+
+    /* Photon pulses: short dashes riding each beam, one period (100) every 1.2 s, so the loop is seamless. */
+    .pulse { stroke: var(--pulse); stroke-width: 3.2; stroke-linecap: round; stroke-dasharray: 0.1 99.9; fill: none;
+      animation: travel 1.2s linear infinite }
+    .pulse.tint-red { stroke: var(--red-core) } .pulse.tint-green { stroke: var(--green-core) }
+    @keyframes travel { from { stroke-dashoffset: 0 } to { stroke-dashoffset: -100 } }
+    .lit { transform-box: fill-box; transform-origin: center; animation: breathe 2.4s ease-in-out infinite }
+    .rays { transform-box: view-box; transform-origin: 522px 300px; animation: rays 2.4s ease-in-out infinite }
+    @keyframes breathe { 0%, 100% { opacity: .75; transform: scale(.94) } 50% { opacity: 1; transform: scale(1.06) } }
+    @keyframes rays { 0%, 100% { opacity: .55; transform: scale(.96) } 50% { opacity: 1; transform: scale(1.08) } }
+    @media (prefers-reduced-motion: reduce) {
+      .pulse { animation: none; display: none }
+      .lit, .rays { animation: none }
+    }
+  </style>
+  <defs>
+    <radialGradient id="room" cx="42%" cy="55%" r="75%">
+      <stop offset="0" class="room0"/>
+      <stop offset=".55" class="room1"/>
+      <stop offset="1" class="room2"/>
+    </radialGradient>
+    <pattern id="grid" width="48" height="48" patternUnits="userSpaceOnUse" x="8" y="10">
+      <path class="gridlines" d="M48 0H0V48" fill="none"/>
+    </pattern>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" class="tile0"/>
+      <stop offset="1" class="tile1"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" class="body0"/>
+      <stop offset=".45" class="body1"/>
+      <stop offset="1" class="body2"/>
+    </linearGradient>
+    <linearGradient id="redglass" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" class="glass0"/>
+      <stop offset="1" class="glass1"/>
+    </linearGradient>
+    <linearGradient id="fadeDown" gradientUnits="userSpaceOnUse" x1="0" y1="300" x2="0" y2="420">
+      <stop offset="0" class="red-s"/>
+      <stop offset="1" class="red-e"/>
+    </linearGradient>
+    <linearGradient id="fadeRight" gradientUnits="userSpaceOnUse" x1="522" y1="0" x2="720" y2="0">
+      <stop offset="0" class="green-s"/>
+      <stop offset="1" class="green-e"/>
+    </linearGradient>
+    <radialGradient id="hot">
+      <stop offset="0" class="hot0"/>
+      <stop offset=".35" class="hot1"/>
+      <stop offset="1" class="hot2"/>
+    </radialGradient>
+    <radialGradient id="halo">
+      <stop offset="0" class="halo0"/>
+      <stop offset="1" class="halo1"/>
+    </radialGradient>
+    <filter id="bloom" filterUnits="userSpaceOnUse" x="0" y="0" width="720" height="420"><feGaussianBlur stdDeviation="7"/></filter>
+    <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="720" height="420"><feGaussianBlur stdDeviation="2.2"/></filter>
+    <clipPath id="panel"><rect width="720" height="420" rx="22"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#panel)">
+    <rect width="720" height="420" fill="url(#room)"/>
+    <rect width="720" height="420" fill="url(#grid)"/>
+
+    <!-- Glass tiles under the pieces -->
+    <g class="tiles" fill="url(#tile)">
+      <rect x="52" y="104" width="56" height="52" rx="12"/>
+      <rect x="224" y="104" width="56" height="52" rx="12"/>
+      <rect x="494" y="104" width="56" height="52" rx="12"/>
+      <rect x="52" y="274" width="56" height="52" rx="12"/>
+      <rect x="494" y="274" width="56" height="52" rx="12"/>
+    </g>
+
+    <!-- Beams: wide bloom, coloured glow, core; on the dark panel they add up like light (screen) -->
+    <g class="beams" stroke-linecap="round" fill="none">
+      <g class="bloom" filter="url(#bloom)" stroke-width="16">
+        <path class="white-glow" d="M96 130H236"/>
+        <path class="red" d="M264 130H522V300"/>
+        <path class="green" d="M96 300H522"/>
+      </g>
+      <g class="glow" filter="url(#glow)" stroke-width="6">
+        <path class="white-glow" d="M96 130H236"/>
+        <path class="red" d="M264 130H522V300"/>
+        <path class="green" d="M96 300H522"/>
+        <path d="M522 300V420" stroke="url(#fadeDown)"/>
+        <path d="M522 300H720" stroke="url(#fadeRight)"/>
+      </g>
+      <g stroke-width="2">
+        <path class="white-core" d="M96 130H236" stroke-width="2.6"/>
+        <path class="red-core" d="M264 130H522V300"/>
+        <path class="green-core" d="M96 300H522"/>
+        <path d="M522 300V420" stroke="url(#fadeDown)" stroke-opacity=".8"/>
+        <path d="M522 300H720" stroke="url(#fadeRight)" stroke-opacity=".8"/>
+      </g>
+    </g>
+
+    <!-- Photon pulses -->
+    <path class="pulse" d="M96 130H236"/>
+    <path class="pulse tint-red" d="M264 130H522V420"/>
+    <path class="pulse tint-green" d="M96 300H720"/>
+
+    <!-- Lasers -->
+    <g class="laser">
+      <rect x="62" y="118" width="40" height="24" rx="12" fill="url(#body)"/>
+      <rect x="62" y="288" width="40" height="24" rx="12" fill="url(#body)"/>
+    </g>
+    <circle class="white-dot" cx="96" cy="130" r="5"/>
+    <circle class="green-dot" cx="96" cy="300" r="5"/>
+
+    <!-- Red filter -->
+    <rect class="filter-glass" x="236" y="114" width="32" height="32" rx="6" fill="url(#redglass)" stroke-opacity=".7"/>
+    <path d="M241 120h22" stroke="#fff" stroke-opacity=".6" stroke-width="1.5" stroke-linecap="round"/>
+
+    <!-- Mirror: a bright bar at 45 degrees -->
+    <g stroke-linecap="round">
+      <path class="mirror-halo" d="M506 114 538 146" stroke-width="9"/>
+      <path class="mirror" d="M506 114 538 146" stroke-width="3"/>
+    </g>
+
+    <!-- Yellow target, lit -->
+    <circle class="lit" cx="522" cy="300" r="46" fill="url(#halo)"/>
+    <circle class="ring" cx="522" cy="300" r="19" fill="none" stroke-width="4"/>
+    <circle class="ring" cx="522" cy="300" r="19" fill="none" stroke-width="10" opacity=".35" filter="url(#glow)"/>
+    <circle cx="522" cy="300" r="14" fill="url(#hot)"/>
+    <g class="rays" stroke-width="3" stroke-linecap="round">
+      <path d="M495 262l5 8M549 262l-5 8M484 318l8-3M560 318l-8-3M522 252v8"/>
+    </g>
+
+    <!-- Light adds up: always on a small dark badge, since light only adds up in the dark -->
+    <rect x="588" y="100" width="104" height="104" rx="18" fill="#0b0d18"/>
+    <g transform="translate(640 152)" style="isolation:isolate">
+      <circle cx="0" cy="-15" r="25" fill="#ff2234" opacity=".9"/>
+      <circle cx="-14" cy="9" r="25" fill="#18ff76" opacity=".9" style="mix-blend-mode:screen"/>
+      <circle cx="14" cy="9" r="25" fill="#2860ff" opacity=".9" style="mix-blend-mode:screen"/>
+    </g>
+
+    <!-- Labels -->
+    <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif">
+      <g class="ink" font-size="20" font-weight="800" letter-spacing="2.5">
+        <text x="80" y="84" text-anchor="middle">LASER</text>
+        <text x="252" y="186" text-anchor="middle">FILTER</text>
+        <text x="522" y="64" text-anchor="middle">MIRROR</text>
+        <text x="80" y="254" text-anchor="middle">LASER</text>
+        <text x="700" y="370" text-anchor="end">TARGET</text>
+        <text x="640" y="236" text-anchor="middle">LIGHT</text>
+        <text x="640" y="260" text-anchor="middle">ADDS UP</text>
+      </g>
+      <g class="ink2" font-size="18" font-weight="500">
+        <text x="252" y="212" text-anchor="middle">keeps only red</text>
+        <text x="522" y="88" text-anchor="middle">bounces it</text>
+        <text x="700" y="395" text-anchor="end">red + green = <tspan class="yellow-text" font-weight="700">yellow</tspan></text>
+      </g>
+    </g>
+  </g>
+  <rect class="border" x=".5" y=".5" width="719" height="419" rx="21.5" fill="none"/>
+</svg>

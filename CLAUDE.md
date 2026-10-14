@@ -17,7 +17,7 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 - **Independent work.** Take no code or data from other Chromatron ports. Resolve unclear behaviour from our own disassembly (`re/notes/`).
 - **No game data in git.**
   - The originals, decompiled output (`re/out/`), `insta` snapshots and every build output (`dist/`, `target/`, the `.wasm`) stay out of git. Game data is decoded from the local originals at build time.
-  - The only game-derived files allowed in git are the four README screenshots in `assets/screenshots/`. `assets/social/` is our own artwork.
+  - The only game-derived files allowed in git are the four README screenshots in `assets/screenshots/`. `assets/promo/` and the web page's `og.png` and touch icon are our own artwork: the stills are rendered by `trailer/`, and `blog-concept.svg` is hand-made.
 - **`docs/` is local-only.** Never commit it.
 - **Tooling.**
   - Commands go in the `justfile`; there are no shell scripts.
@@ -33,7 +33,7 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 
 ## Git
 
-- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/), `type(scope): subject`. Scopes are crate or area names: `spectrograph`, `lumen`, `chromatron`, `chromatron-web`, `web`, `re`, `just`. The body is empty unless really needed.
+- **Commits:** [Conventional Commits](https://www.conventionalcommits.org/), `type(scope): subject`. Scopes are crate or area names: `spectrograph`, `lumen`, `chromatron`, `chromatron-web`, `web`, `trailer`, `re`, `just`. The body is empty unless really needed.
 - **Branches:** [Conventional Branch](https://conventional-branch.github.io/), `<type>/<kebab-description>`. The type is `feature`, `bugfix`, `hotfix`, `release` or `chore`.
 - **Releases:**
   - Finished branches are squash-merged into `main`.
@@ -54,6 +54,9 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 | `just web` / `just web-serve` | build the browser page into `dist/web/` / serve it locally |
 | `just web-check` | Node smoke test of the built page (CI runs it) |
 | `just web-shots` | headless-Chrome screenshots and checks of the page's layouts |
+| `just trailer` / `just trailer-score` | the two promo videos with their soundtrack into `dist/trailer/` / re-score them, picture copied |
+| `just trailer-sheet <dir>` / `just trailer-test` | keyframe contact sheets for review / test the trailer's modules |
+| `just social-images` | re-render the brand stills |
 | `just dump <game>` / `just decompile <game>` | inspect a game's decoded data / Ghidra decompile |
 
 To run a single test, use `cargo test -p <crate> <name>`. Review snapshots with `cargo insta review`.
@@ -74,6 +77,7 @@ The Cargo workspace has a strict layering: `spectrograph` → `lumen` → shells
   - It has a desktop layout and a touch layout (portrait/landscape) for phones.
   - It saves progress in `localStorage` and sends GA4 analytics only on the live site.
   - `.github/workflows/pages.yml` deploys it.
+- **`trailer/`** is the promo renderer (plain ES modules drawn in headless Chrome, with `score.mjs` synthesising the soundtrack in Node) and the single source of the brand art: invented boards only, never game data.
 - **`re/`** holds our Ghidra scripts and reverse-engineering notes (`notes/chromatronN/*.md`). `re/out/` is git-ignored.
 
 Fidelity is checked by decode tests, per-piece rule tests, every original level run through the tracer and win rule, and local `insta` beam-field snapshots. There are also solved-level fixtures in `tests/solutions/`.
