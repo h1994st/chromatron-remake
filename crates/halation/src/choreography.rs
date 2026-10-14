@@ -6,7 +6,7 @@ use std::f32::consts::FRAC_PI_4;
 
 use lumen::{BOARD_CELLS, BeamField, Board, Cell, Colour, Drag, Piece};
 
-use crate::beamline::{Reach, SweepView, half_colour, strand_start};
+use crate::beamline::{Reach, SweepView, completion, half_colour, strand_start};
 use crate::piece_art::turn_period;
 
 /// One frame at 60 Hz: `next_wake` asks for the next this long after `now`.
@@ -67,7 +67,7 @@ pub struct Observed<'a> {
     pub sheet: [bool; 2],
 }
 
-/// A target's burst: it starts when the sweep's front reaches the target.
+/// A target's burst: it starts when the sweep completes the target (its last needed colour lands).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Burst {
     pub cell: usize,
@@ -449,10 +449,14 @@ impl Choreography {
             if !newly_lit(board, &self.old, new, c) {
                 continue;
             }
+            // When it is complete: the last bit it needs lands, as its light shows
+            // (`SweepView::received`); lit only by losing light, at the sweep's start.
+            let reach = completion(&self.old, new, &self.reach, c, board.cells[c].colour)
+                .unwrap_or(f32::NEG_INFINITY);
             self.bursts[self.burst_len] = Burst {
                 cell: c,
                 mask: board.cells[c].colour,
-                at: beams.arrival(f32::from(self.reach.cells[c])),
+                at: beams.arrival(reach),
             };
             self.burst_len += 1;
         }
@@ -705,6 +709,56 @@ mod tests {
         let (below, above) = (board_index(9, 6), board_index(9, 4));
         assert!(south.received(below) != 0 && south.received(above) == 0);
         assert!(north.received(above) != 0 && north.received(below) == 0);
+    }
+
+    #[test]
+    fn a_target_bursts_when_the_light_that_completes_it_arrives() {
+        // A yellow target at (5, 5) already takes green from the south-going laser at (5, 0),
+        // five cells on; the red laser set at (14, 5) completes it nine cells on.
+        let target = (5, 5, Piece::Pinwheel, 6, 0);
+        let green = (5, 0, Piece::Laser, 2, 4);
+        let before = lit(&[target, green]);
+        let after = lit(&[target, green, (14, 5, Piece::Laser, 4, 6)]);
+        let mut c = Choreography::new();
+        observe(&mut c, &before, &after, 1000.0);
+        let burst = c.bursts()[0];
+        assert_eq!(burst.cell, board_index(5, 5));
+        assert_eq!(c.reach().cells[burst.cell], 5, "green got there first");
+        let front = c.moment(burst.at).sweep.expect("a sweep").front;
+        assert!((front - 9.0).abs() < 1e-3, "red's arrival: {front}");
+    }
+
+    #[test]
+    fn a_target_two_new_colours_light_bursts_when_the_later_one_arrives() {
+        // A yellow target at (5, 5): red from (4, 5) gets there one cell on, green from (5, 14)
+        // nine cells on. It is complete, and bursts, only at 9.
+        let target = (5, 5, Piece::Pinwheel, 6, 0);
+        let before = lit(&[target]);
+        let after = lit(&[
+            target,
+            (4, 5, Piece::Laser, 4, 2),
+            (5, 14, Piece::Laser, 2, 0),
+        ]);
+        let mut c = Choreography::new();
+        observe(&mut c, &before, &after, 1000.0);
+        let burst = c.bursts()[0];
+        assert_eq!(burst.cell, board_index(5, 5));
+        let front = c.moment(burst.at).sweep.expect("a sweep").front;
+        assert!((front - 9.0).abs() < 1e-3, "green's arrival: {front}");
+    }
+
+    #[test]
+    fn a_target_lit_by_losing_light_bursts_as_the_sweep_starts() {
+        // A red target at (9, 5) takes red from (2, 5) and blue from (9, 0): spoilt. Turning the
+        // blue laser away leaves it red alone, lit, with nothing new to wait for.
+        let target = (9, 5, Piece::Pinwheel, 4, 0);
+        let red = (2, 5, Piece::Laser, 4, 2);
+        let before = lit(&[target, red, (9, 0, Piece::Laser, 1, 4)]);
+        let after = lit(&[target, red, (9, 0, Piece::Laser, 1, 2)]);
+        let mut c = Choreography::new();
+        observe(&mut c, &before, &after, 1000.0);
+        assert_eq!(c.bursts()[0].cell, board_index(9, 5));
+        assert_eq!(c.bursts()[0].at, 1000.0);
     }
 
     #[test]

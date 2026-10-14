@@ -129,6 +129,14 @@ pub struct Palette {
     pub core_red: Rgb,
     pub core_green: Rgb,
     pub core_blue: Rgb,
+    /// Two channels together in one beam or piece: their own saturated colours, not the
+    /// channels' sum (which reads as cream, lavender and ice).
+    pub yellow: Rgb,
+    pub cyan: Rgb,
+    pub magenta: Rgb,
+    pub core_yellow: Rgb,
+    pub core_cyan: Rgb,
+    pub core_magenta: Rgb,
     pub white: Rgb,
     /// Bright bars, sheens and ticks.
     pub fg: Tone,
@@ -217,6 +225,12 @@ impl Palette {
         core_red: Rgb(255, 200, 196),
         core_green: Rgb(210, 255, 226),
         core_blue: Rgb(214, 226, 255),
+        yellow: Rgb(255, 214, 40),
+        cyan: Rgb(30, 225, 255),
+        magenta: Rgb(255, 50, 215),
+        core_yellow: Rgb(255, 246, 200),
+        core_cyan: Rgb(205, 248, 255),
+        core_magenta: Rgb(255, 205, 245),
         white: Rgb(255, 255, 255),
         fg: Tone::plain(Rgb(255, 255, 255)),
         rim: Tone::plain(Rgb(220, 230, 255)),
@@ -298,21 +312,17 @@ impl Palette {
         }
     }
 
-    /// A beam mask's colour: the channels added and clamped, then scaled so the brightest
-    /// component is 255 (the trailer's `maskColor`). Mask 0 is black.
+    /// A beam mask's colour: a channel's own, a secondary's own saturated colour (yellow, cyan,
+    /// magenta), white for all three. Mask 0 is black. Two beams of different masks that cross
+    /// still add as light; only a beam that carries the mask is drawn in its colour.
     pub fn mix(&self, mask: Colour) -> Rgb {
-        let mut sum = [0u32; 3];
-        for bit in [RED, GREEN, BLUE] {
-            if mask & bit != 0 {
-                let c = self.channel(bit);
-                for (s, v) in sum.iter_mut().zip([c.0, c.1, c.2]) {
-                    *s = (*s + u32::from(v)).min(255);
-                }
-            }
+        match mask & (RED | GREEN | BLUE) {
+            0 => Rgb(0, 0, 0),
+            m if m == RED | GREEN => self.yellow,
+            m if m == GREEN | BLUE => self.cyan,
+            m if m == RED | BLUE => self.magenta,
+            m => self.channel(m),
         }
-        let top = sum.into_iter().max().unwrap_or(0).max(1);
-        let scale = |v: u32| (v * 255 / top) as u8;
-        Rgb(scale(sum[0]), scale(sum[1]), scale(sum[2]))
     }
 
     /// The glow colour of a mask (dark: the mix).
@@ -320,12 +330,15 @@ impl Palette {
         self.mix(mask)
     }
 
-    /// A beam's core: a single channel's own core colour, white for mixes.
+    /// A beam's core: hot, near white, tinted toward its colour; white for all three channels.
     pub fn core(&self, mask: Colour) -> Rgb {
-        match mask {
+        match mask & (RED | GREEN | BLUE) {
             RED => self.core_red,
             GREEN => self.core_green,
             BLUE => self.core_blue,
+            m if m == RED | GREEN => self.core_yellow,
+            m if m == GREEN | BLUE => self.core_cyan,
+            m if m == RED | BLUE => self.core_magenta,
             _ => self.white,
         }
     }
@@ -349,6 +362,12 @@ impl Palette {
             core_red: rgb,
             core_green: rgb,
             core_blue: rgb,
+            yellow: rgb,
+            cyan: rgb,
+            magenta: rgb,
+            core_yellow: rgb,
+            core_cyan: rgb,
+            core_magenta: rgb,
             white: rgb,
             fg: t(p.fg),
             rim: t(p.rim),
@@ -426,19 +445,27 @@ mod tests {
     }
 
     #[test]
-    fn mixes_add_then_scale_to_full_brightness() {
+    fn secondaries_have_their_own_saturated_colours() {
         let p = &Palette::DARK;
-        assert_eq!(p.mix(RED), Rgb(255, 34, 52));
-        assert_eq!(p.mix(RED | GREEN), Rgb(255, 255, 170));
-        assert_eq!(p.mix(GREEN | BLUE), Rgb(64, 255, 255));
+        assert_eq!(p.mix(RED), Rgb(255, 34, 52), "a channel is its own");
+        assert_eq!(p.mix(RED | GREEN), p.yellow);
+        assert_eq!(p.mix(GREEN | BLUE), p.cyan);
+        assert_eq!(p.mix(RED | BLUE), p.magenta);
         assert_eq!(p.mix(WHITE), Rgb(255, 255, 255));
+        assert_eq!(p.mix(0), Rgb(0, 0, 0));
+        // Saturated: one component well under the others, not the channels' pale sum.
+        for m in [RED | GREEN, GREEN | BLUE, RED | BLUE] {
+            let Rgb(r, g, b) = p.mix(m);
+            assert!(r.min(g).min(b) < 60, "{m}: {:?}", p.mix(m));
+        }
         assert_eq!(
             p.halo(RED | BLUE),
             p.mix(RED | BLUE),
             "dark halos are the mix"
         );
         assert_eq!(p.core(GREEN), Rgb(210, 255, 226));
-        assert_eq!(p.core(RED | GREEN), Rgb(255, 255, 255));
+        assert_eq!(p.core(RED | GREEN), p.core_yellow);
+        assert_eq!(p.core(WHITE), Rgb(255, 255, 255));
     }
 
     #[test]

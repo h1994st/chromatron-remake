@@ -1,8 +1,9 @@
-//! Spec §15: crossing glints are exactly the cells where classic draws its centre dot, on every
-//! original level, with the pieces in the toolbox and at their stored (solution) positions.
+//! Spec §15: crossing glints are exactly the cells where classic draws its centre dot, but for
+//! targets (no sparkle on targets: a bright centre always means lit), on every original level,
+//! with the pieces in the toolbox and at their stored (solution) positions. No target glints.
 
 use halation::beamline::{Beamline, GlintKind};
-use lumen::{BOARD_CELLS, BeamField, Board, move_pieces_to_toolbox, trace};
+use lumen::{BOARD_CELLS, BeamField, Board, Piece, move_pieces_to_toolbox, trace};
 use spectrograph::Game;
 
 /// Classic's rule, copied from `draw_cell_beams` (lumen/src/render.rs:313–331). If lumen's rule
@@ -40,12 +41,24 @@ fn crossing_glints_are_classics_centre_dots_on_every_level() {
                 trace(board, &mut field);
                 line.rebuild(board, &field, None);
                 for cell in 0..BOARD_CELLS {
+                    if board.cells[cell].piece == Piece::Pinwheel {
+                        assert!(
+                            line.glints().iter().all(|g| g.cell != cell),
+                            "{game} level id {} target {cell} glints",
+                            level.id
+                        );
+                    }
                     let glint = line
                         .glints()
                         .iter()
                         .find(|g| g.cell == cell && g.kind == GlintKind::Crossing)
                         .map(|g| g.mask);
-                    let dot = classic_dot(&field, cell);
+                    // No sparkle on targets: classic's dot there is left out.
+                    let dot = if board.cells[cell].piece == Piece::Pinwheel {
+                        0
+                    } else {
+                        classic_dot(&field, cell)
+                    };
                     assert_eq!(
                         glint.unwrap_or(0),
                         dot,

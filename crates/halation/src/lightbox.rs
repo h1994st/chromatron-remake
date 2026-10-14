@@ -167,33 +167,40 @@ pub struct Lightbox {
 
 impl Lightbox {
     pub fn new(easel: Easel, theme: Theme, reduced_motion: bool) -> Lightbox {
-        let tableau = Tableau::arrange(&easel);
-        let darkroom = Darkroom::new(&tableau, theme.palette());
-        let canvas = tableau.canvas();
+        // Every small long-lived box (`last`, the choreography) before the darkroom's big buffers.
+        // A small box made after them sits above them in the heap, so when a resize frees them
+        // they can't merge back into the heap's top, and the next layout's buffers grow wasm
+        // memory instead: a phone turned back and forth goes past its budget (spec §14). The
+        // flourish's `cast` (about 280 KB) is one of the big ones: made first, it does the same.
+        let last = Box::new(Remembered {
+            board: Board::default(),
+            field: BeamField::default(),
+            drag: None,
+            game: Game::C1,
+            slot: 0,
+            won: false,
+            strip: [SlotState::Locked; STRIP_SLOTS],
+            card: (0, false, false),
+            header: (1.0, 1.0),
+            sheet: false,
+            sheet_moving: false,
+            drop: None,
+            turning: None,
+            landing: None,
+            fading: false,
+        });
         let mut choreography = Choreography::new();
         choreography.set_reduced(reduced_motion);
+        let tableau = Tableau::arrange(&easel);
+        let darkroom = Darkroom::new(&tableau, theme.palette());
+        let cast = Cast::new();
+        let canvas = tableau.canvas();
         Lightbox {
             easel,
             theme,
             tableau,
             darkroom,
-            last: Box::new(Remembered {
-                board: Board::default(),
-                field: BeamField::default(),
-                drag: None,
-                game: Game::C1,
-                slot: 0,
-                won: false,
-                strip: [SlotState::Locked; STRIP_SLOTS],
-                card: (0, false, false),
-                header: (1.0, 1.0),
-                sheet: false,
-                sheet_moving: false,
-                drop: None,
-                turning: None,
-                landing: None,
-                fading: false,
-            }),
+            last,
             cold: true,
             damage: Damage {
                 patches: Patchwork::new(),
@@ -207,7 +214,7 @@ impl Lightbox {
             swallow_up: false,
             next_shown: false,
             flourished: Patchwork::new(),
-            cast: Cast::new(),
+            cast,
             full_frames: false,
         }
     }

@@ -1,10 +1,10 @@
 //! `beamline`: what the board's beams look like as geometry (spec §7.3). The half-segment —
 //! cell `i`, side `s`, colour `outbound[i][s] | inbound[i][(s + 4) & 7]` (classic's
 //! `draw_cell_beams`) — is the unit; collinear neighbours of one colour merge into runs. Glints
-//! mark crossings (classic's centre-dot rule) and bounces. `Reach` (§9.2) is each lit cell's
-//! distance from a laser along the beams. Fixed arrays: no allocation after `new`.
+//! mark crossings (classic's centre-dot rule) and bounces, never on a target. `Reach` (§9.2) is how far light has
+//! come from a laser along its own beams, per half-beam. Fixed arrays: no allocation after `new`.
 
-use lumen::{BOARD_CELLS, BeamField, Board, Colour, DX, DY, Piece, RuleSet, SIDE};
+use lumen::{BOARD_CELLS, BeamField, Board, Colour, DX, DY, Dir, Piece, RuleSet, SIDE, transfer};
 
 pub const MAX_RUNS: usize = BOARD_CELLS * 8;
 
@@ -115,10 +115,30 @@ fn end_at(board: &Board, field: &BeamField, cell: usize, side: usize) -> End {
 }
 
 impl SweepView<'_> {
-    /// Whether the front has reached `cell`: always, unless light new to it enters or leaves it.
+    /// Whether the front has reached `cell`: always, unless light new to one of its halves enters
+    /// or leaves it; then once the earliest such light is at its centre.
     pub fn arrived(&self, new: &BeamField, cell: usize) -> bool {
-        let lit = |f: &BeamField| f.received(cell) | f.outbound[cell].iter().fold(0, |m, &c| m | c);
-        lit(new) & !lit(self.old) == 0 || self.front >= f32::from(self.reach.cells[cell])
+        fresh_arrival(self.old, new, self.reach, cell).is_none_or(|at| self.front >= at)
+    }
+
+    /// What `cell` shows it receives at this front, per bit: what both fields deliver, and each
+    /// bit new to it once that bit's light is at its centre. A target's arcs fill as each colour
+    /// lands, and its core lights at completion, as it bursts. Bits it loses are gone from the
+    /// sweep's start, as their strands fade (`flourish`).
+    pub fn received(&self, new: &BeamField, cell: usize) -> Colour {
+        let (then, now) = (self.old.received(cell), new.received(cell));
+        let mut shown = then & now;
+        for bit in BITS {
+            if now & !then & bit != 0
+                && self
+                    .reach
+                    .received_at(new, cell, bit)
+                    .is_none_or(|at| self.front >= at)
+            {
+                shown |= bit;
+            }
+        }
+        shown
     }
 
     /// What half (`cell`, `side`) of `new` shows at this front (spec §9.1 "Beams", per channel):
@@ -198,6 +218,39 @@ impl SweepView<'_> {
         state.steady = 0;
         state
     }
+}
+
+/// When light that `new` adds to a half of `cell` (bits not in `old`) first reaches its centre,
+/// in reach units; none when no half of it gains light.
+pub fn fresh_arrival(old: &BeamField, new: &BeamField, reach: &Reach, cell: usize) -> Option<f32> {
+    let mut first = f32::INFINITY;
+    for side in 0..8 {
+        let fresh = half_colour(new, cell, side) & !half_colour(old, cell, side);
+        for bit in [1u8, 2, 4] {
+            if fresh & bit != 0 {
+                let (start, inward) = strand_start(new, reach, cell, side, bit);
+                first = first.min(if inward { start + 0.5 } else { start });
+            }
+        }
+    }
+    (first < f32::INFINITY).then_some(first)
+}
+
+/// When target `cell` of colour `colour` is complete in `new`, in reach units: each bit it needs
+/// is at its centre (a bit `old` already delivered counts as −∞), the latest of them; none when
+/// every bit it needs was already there (lit only by losing light).
+pub fn completion(
+    old: &BeamField,
+    new: &BeamField,
+    reach: &Reach,
+    cell: usize,
+    colour: Colour,
+) -> Option<f32> {
+    let had = old.received(cell);
+    BITS.into_iter()
+        .filter(|&bit| colour & !had & bit != 0)
+        .map(|bit| reach.received_at(new, cell, bit).unwrap_or(f32::INFINITY))
+        .reduce(f32::max)
 }
 
 /// Calls `f(cell, side, at, bit)` for each moving head of the sweep at `view`, `at` the head's
@@ -436,19 +489,28 @@ pub(crate) fn for_each_line(mut f: impl FnMut(usize, usize)) {
     }
 }
 
-/// Spec §9.2: each cell's distance, in cells, from a laser along the beams. A sweep's front
-/// reaches a strand at `at + (reach − r_min) / speed`. `guessed` counts lit cells no laser or
-/// teleporter accounts for (given 0); the original levels have none.
+/// Spec §9.2: how far, in cells, light has come from a laser along its own beams, per channel
+/// (cell, direction, colour bit). `leaving` is each lit outbound channel's: light of that bit
+/// leaving `cell` travelling `dir` starts at the cell's centre then. Light entering a cell takes
+/// the reach of the channel it left its neighbour by, and is at the centre one cell on. `cells`
+/// is the earliest light at each cell's centre (0 when unlit). A sweep's front reaches a strand
+/// at `at + (reach − r_min) / speed`. `guessed` counts lit cells no laser or teleporter accounts
+/// for (given 0); the original levels have none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reach {
     pub cells: [u16; BOARD_CELLS],
+    leaving: [Channels; BOARD_CELLS],
     pub guessed: u16,
 }
+
+/// One cell's reach per direction and colour bit (blue, green, red).
+type Channels = [[u16; 3]; 8];
 
 impl Default for Reach {
     fn default() -> Reach {
         Reach {
             cells: [0; BOARD_CELLS],
+            leaving: [[[0; 3]; 8]; BOARD_CELLS],
             guessed: 0,
         }
     }
@@ -457,77 +519,142 @@ impl Default for Reach {
 /// Not reached yet.
 const FAR: u16 = u16::MAX;
 
-fn lit_out(field: &BeamField, cell: usize) -> bool {
-    field.outbound[cell].iter().any(|&m| m != 0)
+/// The colour bits, in channel order.
+const BITS: [Colour; 3] = [1, 2, 4];
+
+/// The channel of colour bit `bit` (one of `BITS`).
+fn channel(bit: Colour) -> usize {
+    bit.trailing_zeros() as usize
 }
 
 impl Reach {
-    /// A BFS from the lasers (0), with the rules of `board`'s game. Its edges are the lit
-    /// neighbour steps `c → n = c + DIR[s]` with `outbound[c][s] & inbound[n][s] ≠ 0`, and the
-    /// teleport jumps: a dequeued teleporter that took light travelling `s` reaches the next
-    /// teleport target along `s` (lumen's tracer jumps it there) where that light leaves. So
-    /// `reach[n] ≤ reach[c] + 1` along every edge. A cell that emits light and is still
-    /// unreached takes 0 (counted in `guessed`), lowest index first, and the search goes on from
-    /// it. Fixed arrays.
+    /// A BFS over channels from the lasers' lit outbound channels (0), with the rules of
+    /// `board`'s game. Light of bit `k` leaving `c` travelling `s` at reach `r` enters
+    /// `n = c + DIR[s]` at `r + 1`, and there leaves as lumen sends it, at `r + 1`:
+    /// - most pieces by the channels lumen's `transfer` gives bit `k` (those lit in `field`; one
+    ///   an entangled twin recoloured after it entered counts by its direction: every lit bit
+    ///   that way);
+    /// - a teleporter jumps it (as lumen's `enter_cell`): it leaves the next teleport target
+    ///   along `s` one step later, `r + 2`;
+    /// - a complementor sends the complement of what enters it travelling `s` on along `s`,
+    ///   once all of that has entered;
+    /// - a gate sends bit `k` on along its direction once both its inputs have it.
+    ///
+    /// So along every beam step `reach(n, s', k') ≤ reach(c, s, k) + 1`, and every channel has a
+    /// step that meets it. A cell that emits light no beam accounts for takes 0 on those
+    /// channels (counted in `guessed`), lowest index first, and the search goes on from it.
+    /// Fixed arrays.
     pub fn compute(board: &Board, field: &BeamField) -> Reach {
         let rules = board.rules();
         let mut search = Search::new();
         let mut guessed = 0;
         for c in 0..BOARD_CELLS {
-            if board.cells[c].piece == Piece::Laser && lit_out(field, c) {
-                search.reach(c, 0);
+            if board.cells[c].piece == Piece::Laser {
+                search.seed(field, c);
             }
         }
-        // Every cell below `unguessed` is reached or emits nothing.
+        // Every cell below `unguessed` has each lit outbound channel reached.
         let mut unguessed = 0;
         loop {
-            while let Some(c) = search.next() {
-                let next = search.cells[c] + 1;
-                let (x, y) = ((c % SIDE) as i32, (c / SIDE) as i32);
-                // As lumen's `enter_cell`: either kind of teleporter jumps what enters it.
-                let teleporter = matches!(
-                    board.cells[c].piece,
-                    Piece::Teleporter | Piece::MobileTeleporter
-                );
-                for s in 0..8 {
-                    let (nx, ny) = (x + i32::from(DX[s]), y + i32::from(DY[s]));
-                    if on_board(nx, ny) {
-                        let n = ny as usize * SIDE + nx as usize;
-                        if field.outbound[c][s] & field.inbound[n][s] != 0 {
-                            search.reach(n, next);
-                        }
+            while let Some(step) = search.next() {
+                match step {
+                    Step::Leaving(c, s, k) => {
+                        search.enter(board, rules, field, c, s, k);
                     }
-                    let entered = field.inbound[c][s];
-                    if teleporter
-                        && entered != 0
-                        && let Some(n) = teleport_landing(board, rules, c, s)
-                        && field.outbound[n][s] & entered != 0
-                    {
-                        search.reach(n, next);
+                    Step::Jumping(t, s, k) => {
+                        // The jump lands one step after the light entered the teleporter.
+                        let r = search.jumping[t][s][k] + 1;
+                        if let Some(n) = teleport_landing(board, rules, t, s) {
+                            search.leave_by(field, n, s, BITS[k], r);
+                        }
                     }
                 }
             }
-            let Some(c) =
-                (unguessed..BOARD_CELLS).find(|&c| search.cells[c] == FAR && lit_out(field, c))
-            else {
+            let Some(c) = (unguessed..BOARD_CELLS).find(|&c| {
+                (0..8).any(|s| {
+                    BITS.iter().enumerate().any(|(k, &bit)| {
+                        field.outbound[c][s] & bit != 0 && search.leaving[c][s][k] == FAR
+                    })
+                })
+            }) else {
                 break;
             };
             unguessed = c + 1;
             guessed += 1;
-            search.reach(c, 0);
+            search.seed(field, c);
+        }
+        let leaving = search
+            .leaving
+            .map(|dirs| dirs.map(|bits| bits.map(|r| if r == FAR { 0 } else { r })));
+        let mut cells = [0; BOARD_CELLS];
+        for (c, at) in cells.iter_mut().enumerate() {
+            let mut first = FAR;
+            for s in 0..8 {
+                for (k, &bit) in BITS.iter().enumerate() {
+                    if field.outbound[c][s] & bit != 0 {
+                        first = first.min(leaving[c][s][k]);
+                    }
+                    if field.inbound[c][s] & bit != 0
+                        && let Some(r) = entering(&leaving, c, s, k)
+                    {
+                        first = first.min(r + 1);
+                    }
+                }
+            }
+            *at = if first == FAR { 0 } else { first };
         }
         Reach {
-            cells: search.cells.map(|r| if r == FAR { 0 } else { r }),
+            cells,
+            leaving,
             guessed,
         }
     }
+
+    /// The reach of light `bit` leaving `cell` travelling `dir` (0 when none does).
+    pub fn leaving(&self, cell: usize, dir: usize, bit: Colour) -> u16 {
+        self.leaving[cell][dir][channel(bit)]
+    }
+
+    /// When light `bit` of `field` first reaches `cell`'s centre from one of its sides, in reach
+    /// units; none when none enters it.
+    pub fn received_at(&self, field: &BeamField, cell: usize, bit: Colour) -> Option<f32> {
+        (0..8)
+            .filter(|&s| field.inbound[cell][s] & bit != 0)
+            .filter_map(|s| entering(&self.leaving, cell, s, channel(bit)))
+            .min()
+            .map(|r| f32::from(r) + 1.0)
+    }
 }
 
-/// `Reach::compute`'s breadth-first frontier. Every cell is queued at most once, when first
-/// reached, so `BOARD_CELLS` slots hold the whole search.
+/// The reach of light of channel `k` entering `cell` travelling `dir`: that of the channel it
+/// left its neighbour by (none off the board, which a traced field never lights).
+fn entering(leaving: &[Channels; BOARD_CELLS], cell: usize, dir: usize, k: usize) -> Option<u16> {
+    let (x, y) = (
+        (cell % SIDE) as i32 - i32::from(DX[dir]),
+        (cell / SIDE) as i32 - i32::from(DY[dir]),
+    );
+    on_board(x, y).then(|| leaving[y as usize * SIDE + x as usize][dir][k])
+}
+
+/// A channel on `Reach::compute`'s frontier: light leaving a cell, or light inside a teleporter
+/// about to jump; cell, direction, channel.
+#[derive(Clone, Copy)]
+enum Step {
+    Leaving(usize, usize, usize),
+    Jumping(usize, usize, usize),
+}
+
+/// Queue slots: every channel queued at most once as leaving and once as jumping.
+const QUEUE: usize = 2 * 3 * 8 * BOARD_CELLS;
+
+/// `Reach::compute`'s breadth-first frontier over channels. A channel's first reach is its
+/// least: every step is one, so the queue stays in reach order, and every channel of one reach
+/// is set before the first of them is taken (a gate or complementor sees all it waits for).
 struct Search {
-    cells: [u16; BOARD_CELLS],
-    queue: [u16; BOARD_CELLS],
+    leaving: [Channels; BOARD_CELLS],
+    jumping: [Channels; BOARD_CELLS],
+    /// `((cell × 8 + dir) × 3 + channel) × 2`, + 1 for a jump.
+    queue: [u16; QUEUE],
     head: usize,
     tail: usize,
 }
@@ -535,34 +662,138 @@ struct Search {
 impl Search {
     fn new() -> Search {
         Search {
-            cells: [FAR; BOARD_CELLS],
-            queue: [0; BOARD_CELLS],
+            leaving: [[[FAR; 3]; 8]; BOARD_CELLS],
+            jumping: [[[FAR; 3]; 8]; BOARD_CELLS],
+            queue: [0; QUEUE],
             head: 0,
             tail: 0,
         }
     }
 
-    /// Gives `cell` reach `r` and queues it, unless it is already reached.
-    fn reach(&mut self, cell: usize, r: u16) {
-        if self.cells[cell] == FAR {
-            self.cells[cell] = r;
-            self.queue[self.tail] = cell as u16;
-            self.tail += 1;
+    fn push(&mut self, cell: usize, dir: usize, k: usize, jump: bool) {
+        self.queue[self.tail] = (((cell * 8 + dir) * 3 + k) * 2 + usize::from(jump)) as u16;
+        self.tail += 1;
+    }
+
+    /// Gives each channel of `bits` leaving `cell` travelling `dir` reach `r` and queues it,
+    /// unless reached.
+    fn leave(&mut self, cell: usize, dir: usize, bits: Colour, r: u16) {
+        for (k, &bit) in BITS.iter().enumerate() {
+            if bits & bit != 0 && self.leaving[cell][dir][k] == FAR {
+                self.leaving[cell][dir][k] = r;
+                self.push(cell, dir, k, false);
+            }
         }
     }
 
-    fn next(&mut self) -> Option<usize> {
+    /// Light `bits` sent on from `cell` travelling `dir` at `r`: the lit ones, or, when an
+    /// entangled twin was recoloured after it entered (none of them lit that way), every lit
+    /// bit that way.
+    fn leave_by(&mut self, field: &BeamField, cell: usize, dir: usize, bits: Colour, r: u16) {
+        let out = field.outbound[cell][dir];
+        let lit = bits & out;
+        self.leave(cell, dir, if lit != 0 { lit } else { out }, r);
+    }
+
+    /// Every lit outbound channel of `cell` not yet reached starts at 0.
+    fn seed(&mut self, field: &BeamField, cell: usize) {
+        for dir in 0..8 {
+            self.leave(cell, dir, field.outbound[cell][dir], 0);
+        }
+    }
+
+    /// Whether light of channel `k` entering `n` travelling `dir` is at its centre by `r` (it
+    /// left the neighbour before `r`).
+    fn entered_by(&self, n: usize, dir: usize, k: usize, r: u16) -> bool {
+        entering(&self.leaving, n, dir, k).is_some_and(|e| e < r)
+    }
+
+    /// Light of channel `k` leaving `c` travelling `s` enters the next cell, one step on, and
+    /// leaves it as that cell's piece sends it.
+    fn enter(
+        &mut self,
+        board: &Board,
+        rules: &RuleSet,
+        field: &BeamField,
+        c: usize,
+        s: usize,
+        k: usize,
+    ) {
+        let (x, y) = (
+            (c % SIDE) as i32 + i32::from(DX[s]),
+            (c / SIDE) as i32 + i32::from(DY[s]),
+        );
+        let bit = BITS[k];
+        if !on_board(x, y) {
+            return;
+        }
+        let n = y as usize * SIDE + x as usize;
+        let entered = field.inbound[n][s];
+        if entered & bit == 0 {
+            return;
+        }
+        let r = self.leaving[c][s][k] + 1;
+        let cell = board.cells[n];
+        match cell.piece {
+            Piece::Teleporter | Piece::MobileTeleporter => {
+                if self.jumping[n][s][k] == FAR {
+                    self.jumping[n][s][k] = r;
+                    self.push(n, s, k, true);
+                }
+            }
+            // lumen's `emit_complementors`: the complement of what entered travelling `s` goes
+            // on along `s`, once all of it has entered.
+            Piece::Complementor => {
+                let all = (0..3).all(|j| entered & BITS[j] == 0 || self.entered_by(n, s, j, r));
+                if all {
+                    self.leave(n, s, field.outbound[n][s], r);
+                }
+            }
+            // `emit_gates`: a gate pointing `p` sends on the bits both its inputs (light
+            // travelling `p ± 1`) share, once both have them.
+            Piece::LogicGate | Piece::PrimaryLogicGate => {
+                let p = usize::from(cell.dir & 7);
+                let other = match s {
+                    _ if s == (p + 1) & 7 => (p + 7) & 7,
+                    _ if s == (p + 7) & 7 => (p + 1) & 7,
+                    _ => return,
+                };
+                if self.entered_by(n, other, k, r) {
+                    self.leave(n, p, field.outbound[n][p] & bit, r);
+                }
+            }
+            _ => {
+                // The tag only picks a doppler's colour and numbers a tangler's pairs: the
+                // directions don't depend on it.
+                let mut tag = 0;
+                for e in transfer(rules, cell, s as Dir, bit, 0, &mut tag).as_slice() {
+                    let dir = usize::from(e.dir & 7);
+                    if field.outbound[n][dir] != 0 {
+                        self.leave_by(field, n, dir, e.colour, r);
+                    }
+                }
+            }
+        }
+    }
+
+    fn next(&mut self) -> Option<Step> {
         (self.head < self.tail).then(|| {
+            let v = usize::from(self.queue[self.head]);
             self.head += 1;
-            usize::from(self.queue[self.head - 1])
+            let (k, dir, cell) = (v / 2 % 3, v / 6 % 8, v / 48);
+            if v % 2 == 1 {
+                Step::Jumping(cell, dir, k)
+            } else {
+                Step::Leaving(cell, dir, k)
+            }
         })
     }
 }
 
 /// Where bit `bit` of half-segment (`cell`, `side`) starts being drawn by a sweep, in reach
-/// units (cells from the lasers): light leaving the cell starts at its centre at the cell's
-/// reach; light entering it starts at its edge half a cell after the neighbour it comes from.
-/// `true` when it enters.
+/// units (cells from the lasers): light leaving the cell starts at its centre at its channel's
+/// reach; light entering it starts at its edge half a cell after the channel it left its
+/// neighbour by. `true` when it enters.
 pub fn strand_start(
     field: &BeamField,
     reach: &Reach,
@@ -570,18 +801,11 @@ pub fn strand_start(
     side: usize,
     bit: Colour,
 ) -> (f32, bool) {
+    let k = channel(bit);
     if field.outbound[cell][side] & bit != 0 {
-        return (f32::from(reach.cells[cell]), false);
+        return (f32::from(reach.leaving[cell][side][k]), false);
     }
-    let (x, y) = (
-        (cell % SIDE) as i32 + i32::from(DX[side]),
-        (cell / SIDE) as i32 + i32::from(DY[side]),
-    );
-    let from = if on_board(x, y) {
-        reach.cells[y as usize * SIDE + x as usize]
-    } else {
-        reach.cells[cell]
-    };
+    let from = entering(&reach.leaving, cell, (side + 4) & 7, k).unwrap_or(reach.cells[cell]);
     (f32::from(from) + 0.5, true)
 }
 
@@ -611,6 +835,12 @@ fn teleport_landing(board: &Board, rules: &RuleSet, cell: usize, dir: usize) -> 
 }
 
 fn glint_at(board: &Board, field: &BeamField, cell: usize, hidden: Option<usize>) -> Option<Glint> {
+    let piece = board.cells[cell].piece;
+    // No sparkle on targets (user decision): a bright centre always means a lit target, never
+    // beams crossing a spoilt one. (A target only passes light on, so it never bounces either.)
+    if piece == Piece::Pinwheel {
+        return None;
+    }
     let (inbound, outbound) = (&field.inbound[cell], &field.outbound[cell]);
     let (mut axes, mut dot) = (0u8, 0u8);
     for s in 0..8 {
@@ -631,7 +861,6 @@ fn glint_at(board: &Board, field: &BeamField, cell: usize, hidden: Option<usize>
             kind: GlintKind::Crossing,
         });
     }
-    let piece = board.cells[cell].piece;
     if matches!(piece, Piece::Empty | Piece::Laser | Piece::Wall) || hidden == Some(cell) {
         return None;
     }
@@ -649,9 +878,21 @@ fn glint_at(board: &Board, field: &BeamField, cell: usize, hidden: Option<usize>
 mod tests {
     use super::*;
     use lumen::{Cell, board_index, trace};
+    use spectrograph::Game;
 
     fn board(pieces: &[(usize, usize, Piece, u8, u8)]) -> (Board, BeamField) {
-        let mut b = Board::default();
+        board_of(Board::default(), pieces)
+    }
+
+    /// As `board`, on an empty board of `game`.
+    fn board_in(
+        game: spectrograph::Game,
+        pieces: &[(usize, usize, Piece, u8, u8)],
+    ) -> (Board, BeamField) {
+        board_of(Board::new(game), pieces)
+    }
+
+    fn board_of(mut b: Board, pieces: &[(usize, usize, Piece, u8, u8)]) -> (Board, BeamField) {
         for &(x, y, piece, colour, dir) in pieces {
             b.cells[board_index(x, y)] = Cell { piece, colour, dir };
         }
@@ -792,6 +1033,25 @@ mod tests {
     }
 
     #[test]
+    fn a_target_never_glints_so_a_bright_centre_always_means_lit() {
+        // Red east and blue south cross on a red target: spoilt (it takes red and blue), so its
+        // centre stays dark, with no crossing glint where a lit target's core would be.
+        let (b, field) = board(&[
+            (0, 5, Piece::Laser, 4, 2),
+            (5, 0, Piece::Laser, 1, 4),
+            (5, 5, Piece::Pinwheel, 4, 0),
+        ]);
+        assert_eq!(field.received(board_index(5, 5)), 5, "red and blue");
+        let mut line = Beamline::new();
+        line.rebuild(&b, &field, None);
+        assert!(
+            line.glints().iter().all(|g| g.cell != board_index(5, 5)),
+            "{:?}",
+            line.glints()
+        );
+    }
+
+    #[test]
     fn an_absorbed_beam_beside_a_straight_one_still_glints_as_in_classic() {
         // Red runs east into a red filter turned so it passes; blue runs south into the same
         // cell edge-on and is absorbed. Classic draws the dot (the absorbed side has in == out == 0).
@@ -816,20 +1076,91 @@ mod tests {
         );
     }
 
-    /// `reach[n] ≤ reach[c] + 1` along every lit edge `c → n` between neighbours.
-    fn assert_edges_hold(field: &BeamField, reach: &Reach) {
-        for c in 0..BOARD_CELLS {
-            for s in 0..8 {
-                let (x, y) = (
-                    (c % SIDE) as i32 + i32::from(DX[s]),
-                    (c / SIDE) as i32 + i32::from(DY[s]),
-                );
-                if !on_board(x, y) {
-                    continue;
-                }
-                let n = y as usize * SIDE + x as usize;
-                if field.outbound[c][s] & field.inbound[n][s] != 0 {
-                    assert!(reach.cells[n] <= reach.cells[c] + 1, "{c} → {n}");
+    /// When light of `bit` entering `n` travelling `s` is at its centre: one step after it left.
+    fn entered_at(reach: &Reach, n: usize, s: usize, bit: Colour) -> u16 {
+        let (x, y) = (
+            (n % SIDE) as i32 - i32::from(DX[s]),
+            (n / SIDE) as i32 - i32::from(DY[s]),
+        );
+        reach.leaving(y as usize * SIDE + x as usize, s, bit) + 1
+    }
+
+    /// Spec §15's invariant, both ways: every lit channel's reach is exactly the earliest its
+    /// producers (lumen's own rules, per bit) give it, so no step from `(c, s)` makes
+    /// `reach(n, s')` more than `reach(c, s) + 1` (a jump + 2), and every channel has a witness
+    /// at that bound. A laser's own light is 0.
+    fn assert_exact(b: &Board, field: &BeamField, reach: &Reach) {
+        let rules = b.rules();
+        for n in 0..BOARD_CELLS {
+            let cell = b.cells[n];
+            for d in 0..8 {
+                for bit in [1u8, 2, 4] {
+                    let out = field.outbound[n][d];
+                    if out & bit == 0 {
+                        continue;
+                    }
+                    let mut best = u16::MAX;
+                    match cell.piece {
+                        Piece::Laser => best = 0,
+                        Piece::Complementor => {
+                            let k = field.inbound[n][d];
+                            best = [1u8, 2, 4]
+                                .into_iter()
+                                .filter(|&e| k & e != 0)
+                                .map(|e| entered_at(reach, n, d, e))
+                                .max()
+                                .unwrap_or(u16::MAX);
+                        }
+                        Piece::LogicGate | Piece::PrimaryLogicGate => {
+                            let (a, z) =
+                                (usize::from(cell.dir + 1) & 7, usize::from(cell.dir + 7) & 7);
+                            assert_eq!(d, usize::from(cell.dir & 7));
+                            best = entered_at(reach, n, a, bit).max(entered_at(reach, n, z, bit));
+                        }
+                        _ => {
+                            for s in 0..8 {
+                                for k in [1u8, 2, 4] {
+                                    if field.inbound[n][s] & k == 0 {
+                                        continue;
+                                    }
+                                    let mut tag = 0;
+                                    for e in
+                                        transfer(rules, cell, s as Dir, k, 0, &mut tag).as_slice()
+                                    {
+                                        let lit = e.colour & out;
+                                        if usize::from(e.dir) == d && (lit & bit != 0 || lit == 0) {
+                                            best = best.min(entered_at(reach, n, s, k));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // A jump from the teleporter behind that lands here.
+                    let (mut x, mut y) = ((n % SIDE) as i32, (n / SIDE) as i32);
+                    loop {
+                        (x, y) = (x - i32::from(DX[d]), y - i32::from(DY[d]));
+                        if !on_board(x, y) {
+                            break;
+                        }
+                        let t = y as usize * SIDE + x as usize;
+                        let k = field.inbound[t][d];
+                        if matches!(
+                            b.cells[t].piece,
+                            Piece::Teleporter | Piece::MobileTeleporter
+                        ) && teleport_landing(b, rules, t, d) == Some(n)
+                        {
+                            for e in [1u8, 2, 4] {
+                                if k & e != 0 && (e == bit || out & e == 0) {
+                                    best = best.min(entered_at(reach, t, d, e) + 1);
+                                }
+                            }
+                        }
+                        if rules.teleport_targets.contains(&b.cells[t].piece) {
+                            break;
+                        }
+                    }
+                    assert_eq!(reach.leaving(n, d, bit), best, "cell {n} dir {d} bit {bit}");
                 }
             }
         }
@@ -856,7 +1187,7 @@ mod tests {
             (12, 2, Piece::Mirror, 0, 2),
         ]);
         let reach = Reach::compute(&b, &field);
-        assert_edges_hold(&field, &reach);
+        assert_exact(&b, &field, &reach);
         assert_eq!(reach.guessed, 0);
     }
 
@@ -874,14 +1205,15 @@ mod tests {
         assert_eq!(at(7), 0, "jumped over, unlit");
         assert_eq!(at(10), at(4) + 1, "the landing");
         assert_eq!(at(11), at(10) + 1, "and on from it");
+        assert_exact(&b, &field, &reach);
         assert_eq!(reach.guessed, 0);
     }
 
     #[test]
     fn reach_relaxes_where_a_teleported_beam_joins_a_longer_path() {
         // Green east from (0, 7) jumps (2, 7) → (5, 7) and runs on through (8, 7), which blue,
-        // south from (8, 0), reaches only seven cells on. The jump is an edge in the search, so
-        // (8, 7) takes the shorter reach and every edge holds.
+        // south from (8, 0), reaches only seven cells on. The jump is a step in the search, so
+        // green's light past (8, 7) takes the shorter reach; blue's, going on south, keeps its own.
         let (b, field) = board(&[
             (0, 7, Piece::Laser, 2, 2),
             (2, 7, Piece::Teleporter, 0, 0),
@@ -893,9 +1225,155 @@ mod tests {
         assert_eq!(at(5, 7), 3, "the landing");
         assert_eq!(at(8, 7), 6, "by the jump, not the blue beam's 7");
         assert_eq!(at(8, 6), 6, "blue, six cells on");
-        assert_eq!(at(8, 8), 7, "reach is per cell: one on from (8, 7)");
-        assert_edges_hold(&field, &reach);
+        assert_eq!(reach.leaving(board_index(8, 7), 2, 2), 6, "green on east");
+        assert_eq!(at(8, 8), 8, "blue's light, eight cells on");
+        assert_exact(&b, &field, &reach);
         assert_eq!(reach.guessed, 0);
+    }
+
+    #[test]
+    fn light_past_an_empty_crossing_keeps_its_own_beams_reach() {
+        // Blue east from (4, 5) crosses (5, 5) one cell on; green south from (5, 0) reaches it
+        // five cells on. Below the crossing the light is green's: it leaves (5, 5) at 5 and
+        // enters (5, 6) half a cell later, not at blue's early reach.
+        let (b, field) = board(&[(4, 5, Piece::Laser, 1, 2), (5, 0, Piece::Laser, 2, 4)]);
+        let reach = Reach::compute(&b, &field);
+        let (crossing, below) = (board_index(5, 5), board_index(5, 6));
+        assert_eq!(strand_start(&field, &reach, crossing, 2, 1), (1.0, false));
+        assert_eq!(strand_start(&field, &reach, crossing, 4, 2), (5.0, false));
+        assert_eq!(strand_start(&field, &reach, below, 0, 2), (5.5, true));
+        assert_eq!(strand_start(&field, &reach, below, 4, 2), (6.0, false));
+        assert_eq!(
+            strand_start(&field, &reach, board_index(6, 5), 6, 1),
+            (1.5, true),
+            "blue goes on east at its own reach"
+        );
+        assert_eq!(reach.cells[crossing], 1, "first touched by blue");
+        assert_eq!(reach.cells[below], 6);
+        assert_eq!(reach.guessed, 0);
+        // Green new to a board blue already crossed: the crossing (its glint) waits for green.
+        let (_, old) = board(&[(4, 5, Piece::Laser, 1, 2)]);
+        let view = |front| SweepView {
+            old: &old,
+            reach: &reach,
+            front,
+        };
+        assert!(!view(4.9).arrived(&field, crossing), "green not there yet");
+        assert!(view(5.0).arrived(&field, crossing));
+        assert!(
+            view(0.0).arrived(&field, board_index(6, 5)),
+            "nothing new east"
+        );
+    }
+
+    #[test]
+    fn light_a_splitter_merges_keeps_each_colours_reach() {
+        // Green east from (6, 5) passes the splitter at (7, 5) one cell on; red south from
+        // (7, 0) reflects east there five cells on. The yellow beam east is green's from 1 and
+        // red's only from 5, on to the yellow target at (12, 5).
+        let (b, field) = board_in(
+            Game::C1,
+            &[
+                (6, 5, Piece::Laser, 2, 2),
+                (7, 5, Piece::Splitter, 0, 3),
+                (7, 0, Piece::Laser, 4, 4),
+                (12, 5, Piece::Pinwheel, 6, 0),
+            ],
+        );
+        let reach = Reach::compute(&b, &field);
+        let splitter = board_index(7, 5);
+        assert_eq!(strand_start(&field, &reach, splitter, 2, 2), (1.0, false));
+        assert_eq!(strand_start(&field, &reach, splitter, 2, 4), (5.0, false));
+        let target = board_index(12, 5);
+        assert_eq!(strand_start(&field, &reach, target, 6, 4), (9.5, true));
+        assert_exact(&b, &field, &reach);
+        assert_eq!(reach.guessed, 0);
+    }
+
+    #[test]
+    fn a_gate_sends_its_light_once_both_inputs_have_it() {
+        // C3's gate at (7, 7) pointing north: red travelling north-east enters it two cells on,
+        // red travelling north-west six cells on. It sends red north at 6, not 2.
+        let (b, field) = board_in(
+            Game::C3,
+            &[
+                (5, 9, Piece::Laser, 4, 1),
+                (7, 7, Piece::LogicGate, 0, 0),
+                (7, 2, Piece::Pinwheel, 4, 0),
+                (13, 13, Piece::Laser, 4, 7),
+            ],
+        );
+        let gate = board_index(7, 7);
+        assert_eq!(field.outbound[gate][0], 4, "red north");
+        let reach = Reach::compute(&b, &field);
+        assert_eq!(strand_start(&field, &reach, gate, 0, 4), (6.0, false));
+        assert_eq!(reach.leaving(gate, 0, 4), 6);
+        assert_exact(&b, &field, &reach);
+        assert_eq!(reach.guessed, 0);
+    }
+
+    #[test]
+    fn a_complementor_sends_each_complement_when_its_own_input_arrives() {
+        // C2's complementor at (7, 7): red east from (6, 7) enters it one cell on, so cyan goes
+        // on east from 1; green south from (7, 0) enters seven cells on, so magenta goes on south
+        // only from 7.
+        let (b, field) = board_in(
+            Game::C2,
+            &[
+                (6, 7, Piece::Laser, 4, 2),
+                (7, 7, Piece::Complementor, 0, 0),
+                (7, 0, Piece::Laser, 2, 4),
+            ],
+        );
+        let c = board_index(7, 7);
+        assert_eq!((field.outbound[c][2], field.outbound[c][4]), (3, 5));
+        let reach = Reach::compute(&b, &field);
+        assert_eq!(strand_start(&field, &reach, c, 2, 1), (1.0, false));
+        assert_eq!(strand_start(&field, &reach, c, 4, 4), (7.0, false));
+        assert_eq!(strand_start(&field, &reach, c, 4, 1), (7.0, false));
+        assert_exact(&b, &field, &reach);
+        // Red and green merged at a splitter enter it on one side: their complement, blue, goes
+        // on once both have, the later green's nine cells on.
+        let (b, field) = board_in(
+            Game::C2,
+            &[
+                (4, 7, Piece::Laser, 4, 2),
+                (5, 7, Piece::Splitter, 0, 3),
+                (5, 0, Piece::Laser, 2, 4),
+                (7, 7, Piece::Complementor, 0, 0),
+            ],
+        );
+        assert_eq!((field.inbound[c][2], field.outbound[c][2]), (6, 1));
+        let reach = Reach::compute(&b, &field);
+        assert_eq!(strand_start(&field, &reach, c, 2, 1), (9.0, false));
+        assert_exact(&b, &field, &reach);
+        assert_eq!(reach.guessed, 0);
+    }
+
+    #[test]
+    fn a_target_shows_each_new_colour_once_it_lands() {
+        // A yellow target at (5, 5): red from (4, 5) lands one cell on, green from (5, 14) nine.
+        // Its arcs fill as each lands, and it is lit (shows yellow) only at 9.
+        let (_, old) = board(&[(5, 5, Piece::Pinwheel, 6, 0)]);
+        let (b, new) = board(&[
+            (5, 5, Piece::Pinwheel, 6, 0),
+            (4, 5, Piece::Laser, 4, 2),
+            (5, 14, Piece::Laser, 2, 0),
+        ]);
+        let reach = Reach::compute(&b, &new);
+        let target = board_index(5, 5);
+        let shows = |front| {
+            SweepView {
+                old: &old,
+                reach: &reach,
+                front,
+            }
+            .received(&new, target)
+        };
+        assert_eq!(shows(0.5), 0);
+        assert_eq!(shows(1.0), 4, "red has landed");
+        assert_eq!(shows(8.9), 4);
+        assert_eq!(shows(9.0), 6, "and green: lit");
     }
 
     #[test]

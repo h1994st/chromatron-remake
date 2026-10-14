@@ -74,7 +74,7 @@ impl Playbill {
                 CellLight {
                     shown,
                     cell,
-                    received: field.received(i),
+                    received: view.map_or(field.received(i), |v| v.received(scene.field, i)),
                     emitting: field.outbound[i][usize::from(cell.dir & 7)] != 0,
                     spin: pose.turn.filter(|t| t.0 == i).map_or(0.0, |t| t.1),
                     offset,
