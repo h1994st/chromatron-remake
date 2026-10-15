@@ -98,7 +98,7 @@ impl Target for Planes {
             let d = f32::from(plane[i]);
             let out = match blend {
                 Blend::Add => d + add,
-                Blend::Over => d * (1.0 - c.a) + add,
+                Blend::Over | Blend::Multiply => d * (1.0 - c.a) + add,
             };
             plane[i] = out.round().clamp(0.0, 65_535.0) as u16;
         }
@@ -211,9 +211,58 @@ pub fn blur(planes: &mut Planes, sigma: f32, scratch: &mut Vec<u16>) {
     }
 }
 
-/// `blur` for one `width × height` u16 plane (the walls' shadow mask uses it too).
-pub fn blur_plane(
-    plane: &mut [u16],
+/// A plane's value as the box passes hold it: u16 light (dark), or u8 premultiplied paint
+/// (`gouache`), widened into the u16 lanes and narrowed back (a box mean of u8 stays a u8).
+pub trait Lane: Copy + Into<u16> {
+    fn narrow(v: u16) -> Self;
+    /// `dst = src`, widened (a block of columns into the scratch).
+    fn load(dst: &mut [u16], src: &[Self]);
+    /// `dst = src`, narrowed (the block back into the plane).
+    fn store(dst: &mut [Self], src: &[u16]);
+}
+
+impl Lane for u16 {
+    #[inline(always)]
+    fn narrow(v: u16) -> u16 {
+        v
+    }
+
+    #[inline(always)]
+    fn load(dst: &mut [u16], src: &[u16]) {
+        dst.copy_from_slice(src);
+    }
+
+    #[inline(always)]
+    fn store(dst: &mut [u16], src: &[u16]) {
+        dst.copy_from_slice(src);
+    }
+}
+
+impl Lane for u8 {
+    #[inline(always)]
+    fn narrow(v: u16) -> u8 {
+        v as u8
+    }
+
+    #[inline(always)]
+    fn load(dst: &mut [u16], src: &[u8]) {
+        for (d, &s) in dst.iter_mut().zip(src) {
+            *d = u16::from(s);
+        }
+    }
+
+    #[inline(always)]
+    fn store(dst: &mut [u8], src: &[u16]) {
+        for (d, &s) in dst.iter_mut().zip(src) {
+            *d = s as u8;
+        }
+    }
+}
+
+/// `blur` for one `width × height` plane of u16 light (the walls' shadow mask uses it too) or
+/// u8 paint.
+pub fn blur_plane<P: Lane>(
+    plane: &mut [P],
     width: usize,
     height: usize,
     sigma: f32,
@@ -230,41 +279,112 @@ pub fn blur_plane(
         scratch.resize(2 * n, 0);
     }
     let (a, b) = scratch.split_at_mut(n);
+    // The rows holding any light (first, end): only they, and 3r rows round them, can be lit
+    // after the column passes.
+    let mut lit_rows = (height, 0);
+    // At box radius 1 or 2 the row pass blurs each row as it lies (`row_boxes`) instead of
+    // transposing blocks of rows into lanes: the same sums and means, in less time (u8 paint and
+    // u16 light alike).
+    let direct = radius <= 2;
+    if direct {
+        let (a, b) = (&mut a[..width + 4], &mut b[..width + 4]);
+        // Each row as it lies (no transpose); a dark row stays dark.
+        for (y, row) in plane.chunks_exact_mut(width).enumerate() {
+            if row.iter().all(|&v| v.into() == 0u16) {
+                continue;
+            }
+            lit_rows = (lit_rows.0.min(y), y + 1);
+            if radius == 1 {
+                row_boxes::<P, 1>(row, a, b);
+            } else {
+                row_boxes::<P, 2>(row, a, b);
+            }
+        }
+    }
     // A block of dark lines stays dark: it is skipped.
-    for rows in plane.chunks_mut(LANES * width) {
-        if rows.iter().all(|&v| v == 0) {
+    for (k, rows) in plane
+        .chunks_mut(LANES * width)
+        .enumerate()
+        .filter(|_| !direct)
+    {
+        if rows.iter().all(|&v| v.into() == 0u16) {
             continue;
         }
         let lanes = rows.len() / width;
+        lit_rows = (lit_rows.0.min(k * LANES), k * LANES + lanes);
         let len = width * lanes;
         for (lane, row) in rows.chunks_exact(width).enumerate() {
             for (cell, &v) in a[..len].chunks_exact_mut(lanes).zip(row) {
-                cell[lane] = v;
+                cell[lane] = v.into();
             }
         }
         three_boxes(&mut a[..len], &mut b[..len], radius, lanes);
         for (lane, row) in rows.chunks_exact_mut(width).enumerate() {
             for (dst, cell) in row.iter_mut().zip(b[..len].chunks_exact(lanes)) {
-                *dst = cell[lane];
+                *dst = P::narrow(cell[lane]);
             }
         }
     }
+    if lit_rows.0 >= lit_rows.1 {
+        return;
+    }
+    // Zero padding at these rows' ends is the zero rows past them, at every pass.
+    let (y0, y1) = (
+        lit_rows.0.saturating_sub(3 * radius),
+        (lit_rows.1 + 3 * radius).min(height),
+    );
     for x0 in (0..width).step_by(LANES) {
         let lanes = LANES.min(width - x0);
-        let len = height * lanes;
+        let len = (y1 - y0) * lanes;
         let mut lit = 0;
-        for (y, block) in a[..len].chunks_exact_mut(lanes).enumerate() {
-            block.copy_from_slice(&plane[y * width + x0..][..lanes]);
+        for (y, block) in (y0..).zip(a[..len].chunks_exact_mut(lanes)) {
+            P::load(block, &plane[y * width + x0..][..lanes]);
             lit |= block.iter().fold(0, |m, &v| m | v);
         }
         if lit == 0 {
             continue;
         }
         three_boxes(&mut a[..len], &mut b[..len], radius, lanes);
-        for (y, block) in b[..len].chunks_exact(lanes).enumerate() {
-            plane[y * width + x0..][..lanes].copy_from_slice(block);
+        for (y, block) in (y0..).zip(b[..len].chunks_exact(lanes)) {
+            P::store(&mut plane[y * width + x0..][..lanes], block);
         }
     }
+}
+
+/// `three_boxes` of radius `R` (1 or 2) along one row as it lies, through `a` and `b` (each
+/// `row.len() + 4`): the row widened between zero pads, then three box means, each the sum of
+/// the `2R + 1` values round a px (the pads standing for the zero padding) through `BoxMean`,
+/// which is what `box_block`'s running sums hold there.
+fn row_boxes<P: Lane, const R: usize>(row: &mut [P], a: &mut [u16], b: &mut [u16]) {
+    let w = row.len();
+    for p in [&mut *a, &mut *b] {
+        p[..2].fill(0);
+        p[2 + w..].fill(0);
+    }
+    P::load(&mut a[2..2 + w], row);
+    let mean = BoxMean::new((2 * R + 1) as u32);
+    let pass = |s: &[u16], d: &mut [u16]| {
+        let d = &mut d[2..2 + w];
+        let at = |k: usize| &s[k..k + w];
+        if R == 1 {
+            for (((o, &x), &y), &z) in d.iter_mut().zip(at(1)).zip(at(2)).zip(at(3)) {
+                *o = mean.of(u32::from(x) + u32::from(y) + u32::from(z));
+            }
+        } else {
+            let lanes = at(0).iter().zip(at(1)).zip(at(2)).zip(at(3)).zip(at(4));
+            for (o, ((((&v, &w), &x), &y), &z)) in d.iter_mut().zip(lanes) {
+                *o = mean.of(u32::from(v)
+                    + u32::from(w)
+                    + u32::from(x)
+                    + u32::from(y)
+                    + u32::from(z));
+            }
+        }
+    };
+    pass(a, b);
+    pass(b, a);
+    pass(a, b);
+    P::store(row, &b[2..2 + w]);
 }
 
 /// `a → b → a → b`, each a running box mean of radius `radius`, zero-padded, over `lanes`
@@ -305,9 +425,12 @@ impl BoxMean {
         }
     }
 
+    /// The quotient is at most 65 535.5 (a sum of `w` values up to 65 535, plus w/2, over w), so
+    /// its truncation fits a u16 and goes through u32: the same value as a saturating `as u16`,
+    /// in a conversion wasm SIMD has (`i32x4.trunc_sat_f32x4_u`; `as u16` is done lane by lane).
     #[inline(always)]
     fn of(self, sum: u32) -> u16 {
-        ((sum + self.half) as f32 / self.width) as u16
+        ((sum + self.half) as f32 / self.width) as u32 as u16
     }
 }
 
@@ -689,6 +812,128 @@ mod tests {
             }
         }
         assert!(p.r == q.r);
+    }
+
+    /// The σ whose box radius is `r`.
+    fn sigma_of(r: usize) -> f32 {
+        let s = (((2 * r + 1) * (2 * r + 1) - 1) as f32).sqrt() / 2.0;
+        assert_eq!(box_radius(s), r);
+        s
+    }
+
+    /// Rows lit only where `y % 17 < 6` (so whole row blocks and runs of rows are dark).
+    fn banded(w: usize, h: usize) -> Vec<u8> {
+        (0..w * h)
+            .map(|i| {
+                let y = i / w;
+                if y % 17 < 6 || y > h / 2 && y < h / 2 + 2 {
+                    ((i * 7919) % 256) as u8
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
+    /// `blur_plane` as plainly as it can be put: each row, then each column, through the lanes
+    /// code with one lane.
+    fn single_lines(p: &[u16], w: usize, h: usize, r: usize) -> Vec<u16> {
+        let mut q = p.to_vec();
+        let mut b = vec![0u16; w];
+        for row in q.chunks_exact_mut(w) {
+            three_boxes(row, &mut b, r, 1);
+            row.copy_from_slice(&b);
+        }
+        let (mut a, mut b) = (vec![0u16; h], vec![0u16; h]);
+        for x in 0..w {
+            for (y, v) in a.iter_mut().enumerate() {
+                *v = q[y * w + x];
+            }
+            three_boxes(&mut a, &mut b, r, 1);
+            for (y, &v) in b.iter().enumerate() {
+                q[y * w + x] = v;
+            }
+        }
+        q
+    }
+
+    /// u16 light blurs its rows as they lie at radius 1 and 2, in blocks of lanes past that:
+    /// both as single lines do, up to the largest values (the means' bound).
+    #[test]
+    fn u16_planes_blur_like_single_lines() {
+        for (w, h) in [(70, 40), (5, 3), (130, 77), (33, 200)] {
+            for r in 1..=4 {
+                let lit: Vec<u16> = banded(w, h)
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &v)| if v == 0 { 0 } else { 65_535 - (i % 997) as u16 })
+                    .collect();
+                let mut p = lit.clone();
+                let mut scratch = Vec::new();
+                blur_plane(&mut p, w, h, sigma_of(r), &mut scratch);
+                assert!(p == single_lines(&lit, w, h, r), "{w}×{h} r {r}");
+            }
+        }
+    }
+
+    /// u8 planes blur as single lines of their values widened do (review T13b M2: not against
+    /// the u16 path, which shares `row_boxes` with them at radius 1 and 2).
+    #[test]
+    fn u8_planes_blur_like_single_lines() {
+        for (w, h) in [(70, 40), (5, 3), (130, 77), (33, 200)] {
+            for r in 1..=4 {
+                let mut p8 = banded(w, h);
+                let wide: Vec<u16> = p8.iter().map(|&v| u16::from(v)).collect();
+                let mut scratch = Vec::new();
+                blur_plane(&mut p8, w, h, sigma_of(r), &mut scratch);
+                let want = single_lines(&wide, w, h, r);
+                assert!(
+                    p8.iter().zip(&want).all(|(&a, &b)| u16::from(a) == b),
+                    "{w}×{h} r {r}"
+                );
+            }
+        }
+    }
+
+    /// Rows of a sparse plane far from its light are left out of the column pass, exactly.
+    #[test]
+    fn a_sparse_plane_blurs_like_single_lines() {
+        // Light from a block's first row, and to a block's last (the rows go in blocks of 32).
+        let cases = [
+            (70, 150, 60..66),
+            (40, 150, 64..70),
+            (40, 150, 26..32),
+            (40, 90, 0..3),
+            (40, 90, 85..90),
+        ];
+        for (w, h, lit) in cases {
+            let mut p = Planes::new(w, h);
+            for y in lit.clone() {
+                for x in 0..w {
+                    p.r[y * w + x] = ((x * 7919 + y) % 5000) as u16;
+                }
+            }
+            let mut q = p.r.clone();
+            let mut scratch = Vec::new();
+            blur(&mut p, 3.0, &mut scratch);
+            let r = box_width(3.0) / 2;
+            let mut b = vec![0u16; w];
+            for row in q.chunks_exact_mut(w) {
+                three_boxes(row, &mut b, r, 1);
+                row.copy_from_slice(&b);
+            }
+            let (mut a, mut b) = (vec![0u16; h], vec![0u16; h]);
+            for x in 0..w {
+                for (y, v) in a.iter_mut().enumerate() {
+                    *v = q[y * w + x];
+                }
+                three_boxes(&mut a, &mut b, r, 1);
+                for (y, &v) in b.iter().enumerate() {
+                    q[y * w + x] = v;
+                }
+            }
+            assert!(p.r == q, "{w}×{h} lit {lit:?}");
+        }
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod darkroom;
 pub mod easel;
 pub mod etch;
 pub mod flourish;
+pub(crate) mod gouache;
 pub mod lettering;
 pub mod lightbox;
 pub mod masonry;
@@ -28,7 +29,9 @@ pub use darkroom::{Output, Scene};
 pub use easel::{Easel, Insets};
 pub use lightbox::{Lightbox, MAX_DAMAGE, Painted, Route};
 pub use patchwork::Patchwork;
-pub use spectrum::{LightMode, Palette, Rgb, Rgba, Theme, Tone};
+pub use spectrum::{
+    BoardPanel, ChipRim, Glaze, LightMode, LitTone, Palette, Ramp, Rgb, Rgba, Shadow, Theme, Tone,
+};
 pub use tableau::{
     Arrangement, CardParts, Control, Sheet, Steps, Tableau, render_scale, stage_height,
 };

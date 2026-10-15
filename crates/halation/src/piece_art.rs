@@ -9,7 +9,7 @@ use spectrograph::Game;
 
 use crate::DeviceRect;
 use crate::etch::{Blend, Paint, Pt, Shape, Stops, Target, clip_rect, fill, heading, pt};
-use crate::spectrum::{Palette, Rgb, Rgba};
+use crate::spectrum::{LightMode, Palette, Rgba};
 
 const S: f32 = std::f32::consts::FRAC_1_SQRT_2;
 /// cos and sin of k·22.5°, k = 0..16 (fixed, so every platform draws the same pixels).
@@ -363,23 +363,23 @@ pub fn draw_body_spun(
 }
 
 /// A mirror-like slab (§7.4 Mirror and Bender): `len` × 0.15u, bowed `bow` toward local +x in
-/// the middle (concave toward the silvered −x face), its glass in `tint`.
+/// the middle (concave toward the silvered −x face), its glass's two stops from `glass`.
 #[derive(Clone, Copy)]
 struct Reflector {
     len: f32,
     bow: f32,
-    tint: fn(&Palette) -> Rgb,
+    glass: fn(&Palette) -> [Rgba; 2],
 }
 
 const MIRROR: Reflector = Reflector {
     len: 0.86,
     bow: 0.0,
-    tint: |p| p.mirror_tint,
+    glass: |p| p.mirror_glass,
 };
 const BENDER: Reflector = Reflector {
     len: 0.62,
     bow: 0.06,
-    tint: |p| p.bender_tint,
+    glass: |p| p.bender_glass,
 };
 /// The reflector slab's thickness.
 const SLAB: f32 = 0.15;
@@ -488,14 +488,9 @@ impl Art<'_, '_> {
     /// matte ink line on the other; `both` silvers both sides.
     fn reflector(&mut self, pen: Pen, kind: Reflector, both: bool) {
         let pal = self.palette;
-        let tint = (kind.tint)(pal);
+        let g = (kind.glass)(pal);
         let (len, half, b) = (kind.len, SLAB / 2.0, kind.bow);
-        let glass = linear(
-            &pen,
-            (-half, 0.0),
-            (half, 0.0),
-            &[(0.0, tint.alpha(0.3)), (1.0, tint.alpha(0.08))],
-        );
+        let glass = linear(&pen, (-half, 0.0), (half, 0.0), &[(0.0, g[0]), (1.0, g[1])]);
         let rim = pal.rim.at(0.35);
         let rim_w = pen.width(0.012);
         // The centre line: x = −b/2 at the ends, +b/2 in the middle (the comps' quadratic).
@@ -909,9 +904,9 @@ impl Art<'_, '_> {
             (-0.3, 0.0),
             (0.3, 0.0),
             &[
-                (0.0, pal.metal[0].opaque()),
-                (0.45, pal.metal[1].opaque()),
-                (1.0, pal.metal[2].opaque()),
+                (0.0, pal.gate_metal[0].opaque()),
+                (0.45, pal.gate_metal[1].opaque()),
+                (1.0, pal.gate_metal[2].opaque()),
             ],
         );
         self.paint(&[half(1.0), half(-1.0)], &metal);
@@ -1089,6 +1084,14 @@ fn bowed(out: &mut [Shape], pen: &Pen, f: impl Fn(f32) -> (f32, f32), width: f32
     }
 }
 
+/// How a palette's lights land: added into a light tile (dark), painted over (light, L3).
+pub fn light_blend(palette: &Palette) -> Blend {
+    match palette.light_mode {
+        LightMode::Additive => Blend::Add,
+        LightMode::Over => Blend::Over,
+    }
+}
+
 /// A piece's lights (§7.4 "Light" column): `draw_light_spun` at no spin.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_light(
@@ -1129,7 +1132,7 @@ pub fn draw_light_spun(
         t,
         clip,
         palette,
-        blend: Blend::Add,
+        blend: light_blend(palette),
         spin,
     };
     let pal = palette;
@@ -1141,7 +1144,8 @@ pub fn draw_light_spun(
         Geometry::Aperture { toward: d } => {
             let pen = toward(d);
             let at = pen.at(0.0, -0.25);
-            art.solid(&[Shape::disc(at, pen.len(0.075))], pal.mix(c).opaque());
+            // The halo colour (dark: the mix, as `halo` is the mix there; light white: blue-grey).
+            art.solid(&[Shape::disc(at, pen.len(0.075))], pal.halo(c).opaque());
             art.solid(&[Shape::disc(at, pen.len(0.04))], pal.core(c).opaque());
         }
         Geometry::Reflector { bar, faces } => {
@@ -1165,8 +1169,16 @@ pub fn draw_light_spun(
             }
         }
         Geometry::Tangler { arms, .. } => {
-            let tip = |d: Dir| Shape::disc(toward(d).at(0.0, -0.36), flat.len(0.03));
-            art.solid(&[tip(arms[0]), tip(arms[1])], white(0.9));
+            let tip = |d: Dir, r: f32| Shape::disc(toward(d).at(0.0, -0.36), flat.len(r));
+            if pal.light_mode == LightMode::Over {
+                // Light: white's halo round a white core, as the aperture (white on a white
+                // tile is nothing).
+                let halo = pal.halo(WHITE).opaque();
+                art.solid(&[tip(arms[0], 0.03), tip(arms[1], 0.03)], halo);
+                art.solid(&[tip(arms[0], 0.016), tip(arms[1], 0.016)], white(1.0));
+            } else {
+                art.solid(&[tip(arms[0], 0.03), tip(arms[1], 0.03)], white(0.9));
+            }
         }
         Geometry::Gate { toward: d, .. } if emitting => {
             let pen = toward(d);
@@ -1183,6 +1195,17 @@ pub fn draw_light_spun(
                 0.15,
                 &[(0.0, white(0.3)), (1.0, pal.teleport_ice.alpha(0.0))],
             ),
+            // Light: white's halo under a white core (white on a glass centre is nothing).
+            Piece::Starburst if pal.light_mode == LightMode::Over => {
+                let halo = pal.halo(WHITE);
+                art.glow(
+                    &flat,
+                    centre,
+                    0.12,
+                    &[(0.0, halo.alpha(0.5)), (1.0, halo.alpha(0.0))],
+                );
+                art.solid(&[Shape::disc(centre, flat.len(0.04))], white(1.0));
+            }
             Piece::Starburst => art.glow(
                 &flat,
                 centre,
@@ -1214,10 +1237,32 @@ impl Art<'_, '_> {
     }
 
     /// Per required channel received, its arc (dimmed when spoilt); when lit, a core and a ring
-    /// in the target's colour (black: a white rim).
+    /// in the target's colour (black: an `fg(0.5)` rim), all from the palette's `lit` tone; the
+    /// light theme first lays a halo under the arcs.
     fn target_light(&mut self, pen: Pen, c: Colour, received: Colour) {
         let pal = self.palette;
+        let lit = pal.lit;
         let centre = pen.centre;
+        let complete = received == c;
+        // Light: a halo under the arcs (spec §7.4), in the lit tone (below).
+        if let (true, Some((a, r))) = (complete && c != 0, lit.halo) {
+            let tone = pal.halo(c);
+            self.glow(
+                &pen,
+                centre,
+                r,
+                &[(0.0, tone.alpha(a)), (1.0, tone.alpha(0.0))],
+            );
+        }
+        // Light: a spoilt black target is shaded in ink, not left a bare white disc.
+        if let (true, Some((shade, r))) = (c == 0 && !complete, lit.spoilt_shade) {
+            self.glow(
+                &pen,
+                centre,
+                r,
+                &[(0.0, shade), (1.0, Rgba { a: 0.0, ..shade })],
+            );
+        }
         let n = [RED, GREEN, BLUE].iter().filter(|&&b| c & b != 0).count();
         let gap = if n > 1 { 0.22 } else { 0.0 };
         let alpha = if received & !c & WHITE != 0 { 0.4 } else { 1.0 };
@@ -1233,36 +1278,46 @@ impl Art<'_, '_> {
             let arc = Shape::arc(
                 centre,
                 pen.len(0.3),
-                pen.width(0.045),
+                pen.width(lit.arc_width),
                 pen.angle(k as f32 * share + gap / 2.0),
                 share - gap,
             );
             self.solid(&[arc], pal.channel(bit).alpha(alpha));
         }
-        if received != c {
+        if !complete {
             return;
         }
         if c == 0 {
             self.solid(
                 &[Shape::ring(centre, pen.len(0.35), pen.width(0.02))],
-                pal.white.alpha(0.5),
+                pal.fg.at(0.5),
             );
             return;
         }
-        let mix = pal.mix(c);
+        // The lit light's tone: the mix, but white's halo for white (light: blue-grey, as white
+        // on a white disc reads as nothing; dark: white, the mix).
+        let tone = pal.halo(c);
+        let mid = match lit.yellow_mid {
+            Some(y) if c == RED | GREEN => y.opaque(),
+            _ => tone.alpha(lit.core_mid),
+        };
         self.glow(
             &pen,
             centre,
-            0.225,
+            lit.core_radius,
             &[
                 (0.0, pal.white.opaque()),
-                (0.35, mix.alpha(0.95)),
-                (1.0, mix.alpha(0.0)),
+                (0.35, mid),
+                (1.0, tone.alpha(lit.core_end)),
             ],
         );
         self.solid(
-            &[Shape::ring(centre, pen.len(0.186), pen.width(0.02))],
-            mix.alpha(0.9),
+            &[Shape::ring(
+                centre,
+                pen.len(0.186),
+                pen.width(lit.ring_width),
+            )],
+            tone.alpha(lit.ring_alpha),
         );
     }
 }
@@ -1272,10 +1327,185 @@ mod tests {
     use super::*;
 
     use crate::etch::Layer;
+    use crate::spectrum::Theme;
     use lumen::{
         BeamField, Board, DX, DY, RuleSet, board_index, doppler_backward, doppler_forward, trace,
         transfer,
     };
+
+    /// Spec §7.4 light lit target: a white core, the ring in the mix at r 0.186u, and a halo in
+    /// the mix out past the arcs (r 0.45u is between the arcs and the halo's 0.62u edge).
+    #[test]
+    fn a_lit_light_target_glows_white_in_its_colour() {
+        let mut px = vec![0x00ff_ffffu32; 128 * 128];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 128,
+            height: 128,
+        };
+        let cell = Cell {
+            piece: Piece::Pinwheel,
+            colour: RED,
+            dir: 0,
+        };
+        draw_light(
+            &mut layer,
+            DeviceRect::new(0, 0, 128, 128),
+            &Palette::LIGHT,
+            Game::C1,
+            cell,
+            RED,
+            false,
+            pt(64.0, 64.0),
+            100.0,
+        );
+        let rgb = |x: usize, y: usize| {
+            let p = px[y * 128 + x];
+            [
+                (p >> 16 & 0xff) as i32,
+                (p >> 8 & 0xff) as i32,
+                (p & 0xff) as i32,
+            ]
+        };
+        let core = rgb(64, 64);
+        assert!(core.iter().all(|&c| c >= 235), "core {core:?}");
+        let ring = rgb(64 + 19, 64); // 0.186u
+        assert!(ring[0] > 200 && ring[1] < 140, "ring {ring:?}");
+        let halo = rgb(64 + 45, 64); // 0.45u
+        assert!(halo[0] - halo[1] >= 25, "halo {halo:?}");
+    }
+
+    /// Spec §7.4 light laser aperture: the halo colour (white: blue-grey) at r 0.075u around a
+    /// white centre.
+    #[test]
+    fn a_white_lasers_light_aperture_has_a_blue_grey_halo() {
+        let mut px = vec![0u32; 128 * 128];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 128,
+            height: 128,
+        };
+        let cell = Cell {
+            piece: Piece::Laser,
+            colour: WHITE,
+            dir: 0,
+        };
+        draw_light(
+            &mut layer,
+            DeviceRect::new(0, 0, 128, 128),
+            &Palette::LIGHT,
+            Game::C1,
+            cell,
+            0,
+            true,
+            pt(64.0, 64.0),
+            100.0,
+        );
+        // The aperture sits 0.25u north; 0.06u east of it is inside the halo, outside the core.
+        let p = px[(64 - 25) * 128 + 64 + 6];
+        let (r, b) = ((p >> 16 & 0xff) as i32, (p & 0xff) as i32);
+        assert!(b > r + 40, "{p:06x}");
+        let centre = px[(64 - 25) * 128 + 64];
+        assert_eq!(centre, 0x00ff_ffff, "a white core");
+    }
+
+    /// `cell`'s light-theme lights, receiving `received` and emitting, on a white 256 × 256 canvas
+    /// (u = 200, centred): an [r, g, b] reader of the result.
+    fn light_on_white(cell: Cell, received: Colour) -> impl Fn(usize, usize) -> [i32; 3] {
+        let mut px = vec![0x00ff_ffffu32; 256 * 256];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 256,
+            height: 256,
+        };
+        draw_light(
+            &mut layer,
+            DeviceRect::new(0, 0, 256, 256),
+            &Palette::LIGHT,
+            Game::C1,
+            cell,
+            received,
+            true,
+            pt(128.0, 128.0),
+            200.0,
+        );
+        move |x, y| {
+            let p = px[y * 256 + x];
+            [
+                (p >> 16 & 0xff) as i32,
+                (p >> 8 & 0xff) as i32,
+                (p & 0xff) as i32,
+            ]
+        }
+    }
+
+    /// Still review finding 3: a spoilt black target is shaded in ink (`rgba(27,35,64,.12)` → 0
+    /// over 0.45u), not left a bare white disc that reads half lit.
+    #[test]
+    fn a_spoilt_black_target_is_shaded_in_ink_in_light() {
+        let black = Cell {
+            piece: Piece::Pinwheel,
+            colour: 0,
+            dir: 0,
+        };
+        let rgb = light_on_white(black, WHITE);
+        let centre = rgb(128, 128);
+        assert!(
+            centre[1] <= 235 && centre[2] > centre[0],
+            "ink at its centre: {centre:?}"
+        );
+        let mid = rgb(128 + 40, 128); // 0.2u
+        assert!(mid[1] <= 247, "the shade at 0.2u: {mid:?}");
+        assert_eq!(rgb(128 + 92, 128), [255; 3], "nothing past 0.45u");
+    }
+
+    /// Still review finding 4: the tangler's arm tips are `halo(WHITE)` discs (r 0.03u) round a
+    /// white core (r 0.016u), so they show on a white tile.
+    #[test]
+    fn the_tanglers_arm_tips_are_blue_grey_round_white_in_light() {
+        let tangler = Cell {
+            piece: Piece::Tangler,
+            colour: 0,
+            dir: 0,
+        };
+        let rgb = light_on_white(tangler, WHITE);
+        // The north arm's tip is 0.36u up, at (128, 56): r 6 px of halo round r 3.2 px of white.
+        // All round the tip, between the core and the halo's edge (review T16 M3: not one px).
+        for k in 0..16 {
+            let a = k as f32 * std::f32::consts::TAU / 16.0;
+            let (x, y) = (128.0 + 4.6 * a.cos(), 56.0 + 4.6 * a.sin());
+            let rim = rgb(x.round() as usize, y.round() as usize);
+            assert!(
+                rim[2] - rim[0] >= 50,
+                "the tip's blue-grey at {k}/16: {rim:?}"
+            );
+        }
+        for (x, y) in [(128, 56), (127, 56), (129, 56), (128, 55), (128, 57)] {
+            assert!(
+                rgb(x, y).iter().all(|&c| c >= 245),
+                "its white core at ({x}, {y}): {:?}",
+                rgb(x, y)
+            );
+        }
+    }
+
+    /// Still review finding 7: the starburst's glint is a `halo(WHITE)` glow (α 0.5 → 0 over
+    /// 0.12u) under a white core (r 0.04u).
+    #[test]
+    fn the_starbursts_glint_is_blue_grey_round_white_in_light() {
+        let star = Cell {
+            piece: Piece::Starburst,
+            colour: 0,
+            dir: 0,
+        };
+        let rgb = light_on_white(star, 0);
+        let glow = rgb(128 + 10, 128);
+        assert!(
+            glow[0] <= 235 && glow[2] - glow[0] >= 15,
+            "the glow: {glow:?}"
+        );
+        assert!(rgb(128, 128).iter().all(|&c| c >= 250), "the white core");
+    }
 
     /// The travel direction of a beam travelling `d` after reflecting off a bar at `bar` sixteenths.
     fn reflect(bar: u8, d: Dir) -> Dir {
@@ -1640,31 +1870,33 @@ mod tests {
 
     #[test]
     fn bodies_take_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(crate::Rgb(255, 0, 255));
-        for piece in Piece::ALL {
-            for colour in [0, 1, 2, 4, 5, 7] {
-                for dir in [0, 3, 6] {
-                    let mut px = vec![0u32; 64 * 64];
-                    let mut layer = Layer {
-                        px: &mut px,
-                        width: 64,
-                        height: 64,
-                    };
-                    draw_body(
-                        &mut layer,
-                        DeviceRect::new(0, 0, 64, 64),
-                        &sentinel,
-                        Game::C4,
-                        Cell { piece, colour, dir },
-                        pt(32.0, 32.0),
-                        64.0,
-                    );
-                    for &p in &px {
-                        let (r, g, b) = (p >> 16 & 0xff, p >> 8 & 0xff, p & 0xff);
-                        assert!(
-                            g == 0 && r.abs_diff(b) <= 1,
-                            "{piece:?} colour {colour} dir {dir}: {p:06x}"
+        for theme in Theme::ALL {
+            let sentinel = theme.palette().recoloured(crate::Rgb(255, 0, 255));
+            for piece in Piece::ALL {
+                for colour in [0, 1, 2, 4, 5, 7] {
+                    for dir in [0, 3, 6] {
+                        let mut px = vec![0u32; 64 * 64];
+                        let mut layer = Layer {
+                            px: &mut px,
+                            width: 64,
+                            height: 64,
+                        };
+                        draw_body(
+                            &mut layer,
+                            DeviceRect::new(0, 0, 64, 64),
+                            &sentinel,
+                            Game::C4,
+                            Cell { piece, colour, dir },
+                            pt(32.0, 32.0),
+                            64.0,
                         );
+                        for &p in &px {
+                            let (r, g, b) = (p >> 16 & 0xff, p >> 8 & 0xff, p & 0xff);
+                            assert!(
+                                g == 0 && r.abs_diff(b) <= 1,
+                                "{theme:?} {piece:?} colour {colour} dir {dir}: {p:06x}"
+                            );
+                        }
                     }
                 }
             }
@@ -1796,31 +2028,33 @@ mod tests {
 
     #[test]
     fn lights_take_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(crate::Rgb(255, 0, 255));
-        for piece in Piece::ALL {
-            for colour in [0, 1, 4, 7] {
-                for received in [0, colour, 7] {
-                    let mut planes = crate::bloom::Planes::new(64, 64);
-                    draw_light(
-                        &mut planes,
-                        DeviceRect::new(0, 0, 64, 64),
-                        &sentinel,
-                        Game::C4,
-                        Cell {
-                            piece,
-                            colour,
-                            dir: 3,
-                        },
-                        received,
-                        true,
-                        pt(32.0, 32.0),
-                        64.0,
-                    );
-                    for i in 0..64 * 64 {
-                        assert!(
-                            planes.g[i] == 0 && planes.r[i].abs_diff(planes.b[i]) <= 1,
-                            "{piece:?} {colour} {received}"
+        for theme in Theme::ALL {
+            let sentinel = theme.palette().recoloured(crate::Rgb(255, 0, 255));
+            for piece in Piece::ALL {
+                for colour in [0, 1, 4, 7] {
+                    for received in [0, colour, 7] {
+                        let mut planes = crate::bloom::Planes::new(64, 64);
+                        draw_light(
+                            &mut planes,
+                            DeviceRect::new(0, 0, 64, 64),
+                            &sentinel,
+                            Game::C4,
+                            Cell {
+                                piece,
+                                colour,
+                                dir: 3,
+                            },
+                            received,
+                            true,
+                            pt(32.0, 32.0),
+                            64.0,
                         );
+                        for i in 0..64 * 64 {
+                            assert!(
+                                planes.g[i] == 0 && planes.r[i].abs_diff(planes.b[i]) <= 1,
+                                "{theme:?} {piece:?} {colour} {received}"
+                            );
+                        }
                     }
                 }
             }

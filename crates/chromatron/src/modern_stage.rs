@@ -110,6 +110,9 @@ impl ModernStage {
         self.key = None;
     }
 
+    /// A new theme (the window's appearance, ruling L12): the next paint is cold (whole-canvas
+    /// damage), so every caption is inked again in the new palette's text tones. The caption
+    /// cache holds alpha masks, not colours, so it is kept.
     pub fn set_theme(&mut self, theme: Theme) {
         if theme != self.theme {
             self.theme = theme;
@@ -590,6 +593,43 @@ mod tests {
         assert!(!stage.sheet_open() && stage.caption_rects().count() > 0);
         stage.paint(&st, SETTLED, &mut px);
         assert_eq!(stage.damage(), &[], "nothing to recompose or re-ink");
+    }
+
+    /// Ruling L12: a theme change repaints the stage cold; the frame equals a fresh light stage's,
+    /// captions inked in the light text tones.
+    #[test]
+    fn a_theme_change_repaints_the_stage_cold_in_the_new_tones() {
+        let e = easel(1280, 800, 1.0);
+        let st = state(0);
+        let mut stage = ModernStage::new(e, Theme::Dark, false);
+        let mut px = canvas(e);
+        stage.paint(&st, SETTLED, &mut px);
+        stage.set_theme(Theme::Light);
+        stage.paint(&st, SETTLED, &mut px);
+        let mut light = ModernStage::new(e, Theme::Light, false);
+        let mut want = canvas(e);
+        light.paint(&st, SETTLED, &mut want);
+        assert!(px == want, "equal to a fresh light stage");
+        // Inside the captions' rects only (the light walls are dark too): the ink is dark, and
+        // darker than the same rects of the bare light lightbox (no captions).
+        let mut bare = canvas(e);
+        Lightbox::new(e, Theme::Light, false).paint(&st, SETTLED, Output::Xrgb(&mut bare));
+        let lum = |p: u32| (p >> 16 & 0xff) + (p >> 8 & 0xff) + (p & 0xff);
+        let darkest = |img: &[u32]| {
+            stage
+                .caption_rects()
+                .flat_map(|r| {
+                    (r.top..r.bottom).flat_map(move |y| (r.left..r.right).map(move |x| (x, y)))
+                })
+                .map(|(x, y)| lum(img[y as usize * 1280 + x as usize]))
+                .min()
+                .unwrap()
+        };
+        assert!(darkest(&px) < 3 * 110, "light ink: {}", darkest(&px));
+        assert!(
+            darkest(&px) + 150 < darkest(&bare),
+            "the ink is the captions'"
+        );
     }
 
     #[test]

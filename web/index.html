@@ -6,7 +6,31 @@
   <title>Chromatron — laser puzzles in your browser</title>
   <meta name="description" content="Play Sean Barrett's Chromatron 1–4 laser puzzle games in your browser: bend, split and mix coloured beams to light every target. An independent port.">
   <link rel="canonical" href="https://shengtuo.me/chromatron-remake/">
-  <meta name="theme-color" content="#06070b">
+  <meta name="theme-color" content="#06070b" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#eef1f6" media="(prefers-color-scheme: light)">
+  <script>
+    // The look and theme before the first paint, so a light system never sees the dark page while
+    // the wasm loads (spec §11, §12): ?look= wins (never stored), then the stored choice, then
+    // modern; light only in the modern look under a light system, whose address bar follows
+    // (modern #06070b or #eef1f6, classic #25272a). main.js starts from this look and calls
+    // chromatronTheme on every later change.
+    window.chromatronTheme = (look) => {
+      const light = look === "modern" && !matchMedia("(prefers-color-scheme: dark)").matches;
+      document.documentElement.dataset.theme = light ? "light" : "dark";
+      const color = look === "modern" ? (light ? "#eef1f6" : "#06070b") : "#25272a";
+      for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.content = color;
+    };
+    (() => {
+      let stored = null;
+      try {
+        stored = localStorage.getItem("chromatron.look");
+      } catch {}
+      const forced = new URLSearchParams(location.search).get("look");
+      const look = forced === "classic" || forced === "modern" ? forced : stored === "classic" ? "classic" : "modern";
+      document.documentElement.dataset.look = look;
+      chromatronTheme(look);
+    })();
+  </script>
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Chromatron">
   <meta property="og:title" content="Chromatron — laser puzzles in your browser">

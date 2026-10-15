@@ -14,7 +14,6 @@ use lumen::{GameState, InputEvent, Redraw};
 use spectrograph::GameData;
 
 use crate::modern_stage::ModernStage;
-use crate::window_shape::theme_for;
 
 /// A modern snapshot's canvas when `CHROMATRON_SNAPSHOT_SIZE` is unset (spec §13).
 pub const DEFAULT_SNAPSHOT_SIZE: &str = "1280x800@2";
@@ -28,7 +27,7 @@ pub struct ModernShot {
 
 impl ModernShot {
     /// `size` (`WxH@S` in pt and px per pt; unset or empty: 1280x800@2) and `theme` (`dark`,
-    /// the default, or `light`, which paints dark until phase 5 through `theme_for`).
+    /// the default, or `light`, which paints the light theme).
     pub fn parse(size: Option<&str>, theme: Option<&str>) -> Result<ModernShot, String> {
         let size = size
             .map(str::trim)
@@ -38,11 +37,8 @@ impl ModernShot {
             format!("CHROMATRON_SNAPSHOT_SIZE {size:?} is not WxH@S, such as 1280x800@2")
         })?;
         let theme = match theme.map(str::trim) {
-            None | Some("") | Some("dark") => theme_for(Some(winit::window::Theme::Dark)),
-            Some("light") => {
-                log::warn!("the light theme comes in phase 5; the snapshot is dark");
-                theme_for(Some(winit::window::Theme::Light))
-            }
+            None | Some("") | Some("dark") => Theme::Dark,
+            Some("light") => Theme::Light,
             Some(other) => {
                 return Err(format!(
                     "CHROMATRON_THEME {other:?}: expected dark or light"
@@ -311,9 +307,13 @@ mod tests {
     }
 
     #[test]
-    fn modern_shots_paint_light_as_dark_until_phase_5() {
+    fn modern_shots_paint_light_when_asked() {
         assert_eq!(
             ModernShot::parse(None, Some("light")).unwrap().theme,
+            Theme::Light
+        );
+        assert_eq!(
+            ModernShot::parse(None, Some(" dark ")).unwrap().theme,
             Theme::Dark
         );
     }

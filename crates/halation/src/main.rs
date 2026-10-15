@@ -10,7 +10,7 @@ use lumen::{
 };
 use spectrograph::{Game, decode, write_rgb_png};
 
-const USAGE: &str = "usage: halation shot <game 1-4> <level 1-50> <out.png> [stored | <copied solution>] [--easel WxH@S] [--touch] [--sheet] [--hold <from>,<to>] [--cue turn:<cell>|move:<from>,<to>|lift:<from>,<to>|win|level|sheet [--at ms]]\n       halation pieces <out-prefix> [--easel WxH@S] [--touch]";
+const USAGE: &str = "usage: halation shot <game 1-4> <level 1-50> <out.png> [stored | <copied solution>] [--easel WxH@S] [--touch] [--theme dark|light] [--sheet] [--hold <from>,<to>] [--cue turn:<cell>|move:<from>,<to>|lift:<from>,<to>|win|level|sheet [--at ms]]\n       halation pieces <out-prefix> [--easel WxH@S] [--touch] [--theme dark|light]";
 const DEFAULT_EASEL: &str = "1280x800@2";
 /// The board's cells and the visible tray slots: what `--hold` and `--cue` can name.
 const VISIBLE_CELLS: usize = BOARD_CELLS + VISIBLE_TOOLBOX_SLOTS;
@@ -54,11 +54,12 @@ fn parse_cue(arg: &str) -> Option<Cue> {
     }
 }
 
-/// What the flags ask for: the easel (touch or not), whether the level sheet is open, a piece
-/// held in the air (pressed at one cell index's centre and dragged to another's), and a cue
-/// with the time after it (ms) to paint at.
+/// What the flags ask for: the easel (touch or not), the theme, whether the level sheet is open,
+/// a piece held in the air (pressed at one cell index's centre and dragged to another's), and a
+/// cue with the time after it (ms) to paint at.
 struct Options {
     easel: Easel,
+    theme: Theme,
     sheet: bool,
     hold: Option<(usize, usize)>,
     cue: Option<Cue>,
@@ -81,6 +82,7 @@ fn options(args: &[String]) -> Result<(Vec<&str>, Options), String> {
     let mut positional = Vec::new();
     let mut options = Options {
         easel: Easel::parse(DEFAULT_EASEL).unwrap(),
+        theme: Theme::Dark,
         sheet: false,
         hold: None,
         cue: None,
@@ -107,6 +109,13 @@ fn options(args: &[String]) -> Result<(Vec<&str>, Options), String> {
                 options.cue = Some(rest.next().and_then(|v| parse_cue(v)).ok_or(
                     "--cue takes turn:<cell>, move:<from>,<to>, lift:<from>,<to>, win, level or sheet",
                 )?);
+            }
+            "--theme" => {
+                options.theme = match rest.next().map(String::as_str) {
+                    Some("dark") => Theme::Dark,
+                    Some("light") => Theme::Light,
+                    _ => return Err("--theme takes dark or light".into()),
+                };
             }
             "--sheet" => options.sheet = true,
             "--touch" => touch = true,
@@ -136,15 +145,15 @@ fn run(args: &[String]) -> Result<(), String> {
             shot(game, level, out, rest.first().copied(), &options)
         }
         ["pieces", prefix] if !options.sheet && options.hold.is_none() && options.cue.is_none() => {
-            pieces(prefix, options.easel)
+            pieces(prefix, options.easel, options.theme)
         }
         _ => Err(USAGE.into()),
     }
 }
 
-/// A cold, settled paint of `scene` into `out`.
-fn paint(easel: Easel, scene: Scene, out: &str) -> Result<(), String> {
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+/// A cold, settled paint of `scene` in `theme` into `out`.
+fn paint(easel: Easel, theme: Theme, scene: Scene, out: &str) -> Result<(), String> {
+    let mut lightbox = Lightbox::new(easel, theme, false);
     let mut px = vec![0u32; (easel.width * easel.height) as usize];
     lightbox.paint_scene(scene, SETTLED, Output::Xrgb(&mut px));
     write_rgb_png(Path::new(out), easel.width, easel.height, &px).map_err(|e| format!("{out}: {e}"))
@@ -157,6 +166,7 @@ fn shot(
     solution: Option<&str>,
     &Options {
         easel,
+        theme,
         sheet,
         hold,
         cue,
@@ -185,7 +195,7 @@ fn shot(
             return Err(format!("{text:?} is not a solution for level {}", slot + 1));
         }
     }
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut lightbox = Lightbox::new(easel, theme, false);
     if let Some((from, to)) = hold {
         lift(&mut state, &lightbox, from, to).map_err(|e| format!("--hold {from},{to}: {e}"))?;
     }
@@ -300,11 +310,11 @@ fn play(
     Ok(())
 }
 
-fn pieces(prefix: &str, easel: Easel) -> Result<(), String> {
+fn pieces(prefix: &str, easel: Easel, theme: Theme) -> Result<(), String> {
     for (k, page) in specimen::pages().iter().enumerate() {
         let out = format!("{prefix}-{}.png", k + 1);
         let scene = Scene::bare(&page.board, &page.field, page.game);
-        paint(easel, scene, &out)?;
+        paint(easel, theme, scene, &out)?;
         println!("{out}");
     }
     Ok(())
@@ -367,6 +377,23 @@ mod tests {
             run(&args(&["pieces", "x", "--cue", "win"])),
             Err(USAGE.into())
         );
+        for bad in [&["--theme", "sepia"][..], &["--theme"]] {
+            let mut list = vec!["shot", "1", "5", "x.png"];
+            list.extend_from_slice(bad);
+            assert!(
+                run(&args(&list)).unwrap_err().contains("--theme"),
+                "{bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reads_the_theme() {
+        let args = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let theme = |list: &[&str]| options(&args(list)).map(|(_, o)| o.theme);
+        assert_eq!(theme(&["shot"]), Ok(Theme::Dark), "dark by default");
+        assert_eq!(theme(&["shot", "--theme", "light"]), Ok(Theme::Light));
+        assert_eq!(theme(&["shot", "--theme", "dark"]), Ok(Theme::Dark));
     }
 
     #[test]

@@ -138,7 +138,7 @@ pub struct Session {
     lightbox: Option<Lightbox>,
     /// The modern canvas as RGBA, sized by `resize` only.
     canvas: Vec<u8>,
-    /// What `resize` gives each new lightbox (phases 4–5 set them).
+    /// What `resize` gives each new lightbox: the theme and reduced motion.
     theme: Theme,
     reduced_motion: bool,
     /// The card's captions from the last modern `render_at`, which the page typesets.
@@ -313,6 +313,28 @@ impl Session {
             return 0;
         };
         lightbox.set_reduced_motion(on);
+        if self.look == Look::Modern {
+            Flag::Redraw as u32
+        } else {
+            0
+        }
+    }
+
+    /// Spec §11–12: the visitor's `prefers-color-scheme` (`dark`: true for dark). Kept for every
+    /// lightbox (it survives `resize`, and a classic page keeps it for modern). The modern canvas
+    /// repaints cold in the new theme, with no cue; a held piece stays held (ruling L10).
+    /// `Flag::Redraw` when the modern canvas must paint again; 0 when nothing changes (the same
+    /// scheme, or the classic look, whose page stays dark).
+    pub fn set_theme(&mut self, dark: bool) -> u32 {
+        let theme = if dark { Theme::Dark } else { Theme::Light };
+        if theme == self.theme {
+            return 0;
+        }
+        self.theme = theme;
+        let Some(lightbox) = &mut self.lightbox else {
+            return 0;
+        };
+        lightbox.set_theme(theme);
         if self.look == Look::Modern {
             Flag::Redraw as u32
         } else {

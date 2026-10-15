@@ -9,12 +9,12 @@
 use lumen::layout::STRIP_SLOTS;
 use lumen::{
     BOARD_CELLS, BeamField, Board, Cell, Colour, DX, DY, Dir, Drag, GameState, Piece, SlotState,
-    VISIBLE_TOOLBOX_SLOTS,
+    VISIBLE_TOOLBOX_SLOTS, WHITE,
 };
 use spectrograph::Game;
 
-use crate::backdrop::Backdrop;
-use crate::beamline::{Beamline, GlintKind, Partial, SweepView};
+use crate::backdrop::{Backdrop, Casting, Ground, MAX_CASTINGS, PanelFill};
+use crate::beamline::{Beamline, GlintKind, Partial, Run, SweepView};
 use crate::bloom::{
     ONE, Planes, add_upsampled, block_mean, blur, blur_plane, blur_scratch, box_radius, downsample,
     scale, upsampled_at,
@@ -24,12 +24,15 @@ use crate::etch::{
     Blend, Layer, Paint, Pt, RgbaBytes, Shape, SpriteCanvas, Stops, Target, blit_sprite, clip_rect,
     fill, pt,
 };
+use crate::gouache::{
+    BOUNCE_DOT, CROSSING_DOT, ITEM_SLACK, MARGIN, STROKE_REACH, Stroked, Wash, mix_dot, passes,
+};
 use crate::lettering;
 use crate::masonry::{WallScratch, draw_grid, draw_tile, draw_walls};
 use crate::patchwork::{Patchwork, area, hull, is_empty};
 use crate::piece_art::{draw_body, draw_body_spun, draw_light_spun, has_tile, sprite_dir};
 use crate::playbill::{Change, Playbill};
-use crate::spectrum::{Palette, Rgba};
+use crate::spectrum::{LightMode, Palette, Rgba, Shadow};
 use crate::tableau::{
     CARD_PAD, HEADER_H, HEADER_TRACK, LEVEL_CAP, NEXT_PILL, SHEET_CAP, Tableau, WIN_CAP,
 };
@@ -39,6 +42,10 @@ use crate::{DeviceRect, fit_buffer, make_room};
 /// The level sheet's title, lettered at `SHEET_CAP` with this intensity (spec §7.5, dark).
 const SHEET_TITLE: &str = "LEVELS";
 const SHEET_INTENSITY: f32 = 0.8;
+/// Ink lettering's strand widths in the light theme (pt; the comps' `stroke`, ruling L6).
+const LEVEL_INK_PT: f32 = 1.0;
+const WIN_INK_PT: f32 = 1.3;
+const SHEET_INK_PT: f32 = 1.0;
 /// The sheet's panel radius, its shadow's blur and its drop (pt, spec §7.1).
 const SHEET_RADIUS: f32 = 14.0;
 pub(crate) const SHEET_SHADOW_BLUR: f32 = 40.0;
@@ -169,17 +176,17 @@ pub(crate) fn grow(r: DeviceRect, by: i32) -> DeviceRect {
 }
 
 /// The part of `r` inside `canvas`, or the empty default.
-fn within(r: DeviceRect, canvas: DeviceRect) -> DeviceRect {
+pub(crate) fn within(r: DeviceRect, canvas: DeviceRect) -> DeviceRect {
     clip_rect(r, canvas).unwrap_or_default()
 }
 
 /// `r` inside `[0, w) × [0, h)`, or the empty default.
-fn clip_to(r: DeviceRect, w: i32, h: i32) -> DeviceRect {
+pub(crate) fn clip_to(r: DeviceRect, w: i32, h: i32) -> DeviceRect {
     within(r, DeviceRect::new(0, 0, w, h))
 }
 
 /// The hull of `a` and `b`, an empty one standing for nothing.
-fn union(a: DeviceRect, b: DeviceRect) -> DeviceRect {
+pub(crate) fn union(a: DeviceRect, b: DeviceRect) -> DeviceRect {
     match (is_empty(a), is_empty(b)) {
         (true, _) => b,
         (_, true) => a,
@@ -483,12 +490,12 @@ impl ChromeSprites {
 
 /// A bilinear tap pair: padded indices of the two source pixels (0 and `len + 1` are zero pads
 /// outside the plane) and the second one's weight in 1/256.
-type Tap = (u32, u32, u16);
+pub(crate) type Tap = (u32, u32, u16);
 
 /// The taps of `n` device px: device px `i`'s centre sits at `(i + 0.5)·s − 0.5` in `sharp`, and
 /// (`halve`) at half that plus ¼ less in `half`, whose length is `len`.
 #[inline(never)]
-fn bake_taps(taps: &mut Vec<Tap>, n: usize, s: f32, halve: bool, len: usize) {
+pub(crate) fn bake_taps(taps: &mut Vec<Tap>, n: usize, s: f32, halve: bool, len: usize) {
     let pad = |k: f32| (k + 1.0).clamp(0.0, (len + 1) as f32) as u32;
     make_room(taps, n);
     taps.extend((0..n).map(|i| {
@@ -502,14 +509,14 @@ fn bake_taps(taps: &mut Vec<Tap>, n: usize, s: f32, halve: bool, len: usize) {
 }
 
 /// Row `p` (padded) of `plane`, columns `lo..=hi` (padded, inside the plane), or `None` for a pad.
-fn plane_row(
-    plane: &[u16],
+pub(crate) fn plane_row<T>(
+    plane: &[T],
     width: usize,
     height: usize,
     p: u32,
     lo: usize,
     hi: usize,
-) -> Option<&[u16]> {
+) -> Option<&[T]> {
     let p = p as usize;
     (1..=height)
         .contains(&p)
@@ -552,7 +559,7 @@ fn blend_rows(planes: &Planes, (ra, rb, w): Tap, lo: u32, hi: u32, row: &mut [u3
 
 /// One horizontal tap of a vertically blended row, back in plane units (1/65 536 overall).
 #[inline(always)]
-fn tap(row: &[u32], (a, b, w): Tap) -> u32 {
+pub(crate) fn tap(row: &[u32], (a, b, w): Tap) -> u32 {
     (row[a as usize] * (256 - u32::from(w)) + row[b as usize] * u32::from(w) + 32_768) >> 16
 }
 
@@ -598,7 +605,7 @@ fn expose_run<P: Texel>(
 }
 
 /// An output pixel: `0x00RRGGBB` or RGBA bytes.
-trait Texel: Sized {
+pub(crate) trait Texel: Sized {
     fn put(&mut self, rgb: u32);
     /// The pixel as `0x00RRGGBB`.
     fn get(&self) -> u32;
@@ -765,7 +772,7 @@ impl Target for Exposure<'_> {
 /// Where the board's light items sit: the board's origin and cell `u` (device px), and the
 /// tile's origin and scale (light px = (device px − origin) × s).
 #[derive(Clone, Copy, Debug)]
-struct LightMap {
+pub(crate) struct LightMap {
     board: Pt,
     u: f32,
     origin: Pt,
@@ -773,12 +780,13 @@ struct LightMap {
 }
 
 impl LightMap {
-    fn of(tableau: &Tableau, tile: &LightTile) -> LightMap {
+    /// The map of a tile at `rect` (device px) rendered at `scale`.
+    pub(crate) fn of(tableau: &Tableau, rect: DeviceRect, scale: f32) -> LightMap {
         LightMap {
             board: pt(tableau.board.left as f32, tableau.board.top as f32),
             u: tableau.cell as f32,
-            origin: pt(tile.rect.left as f32, tile.rect.top as f32),
-            s: tile.scale,
+            origin: pt(rect.left as f32, rect.top as f32),
+            s: scale,
         }
     }
 
@@ -803,15 +811,16 @@ impl LightMap {
         )
     }
 
-    /// Where `change` draws: a run's or a partial's line (0.064u wide), a glint (0.3u), a piece
+    /// Where `change` draws: a run's or a partial's line (`line`·u either side: 0.032 for the
+    /// dark 0.064u line, `STROKE_REACH` for the light bloom stroke), a glint (0.3u), a piece
     /// light (within 1u of its centre, at its size: the prism's fan reaches 0.8u, a corner exit
     /// plus its ticks; a landing piece's light is off its cell's centre and scaled).
-    fn change_box(&self, tableau: &Tableau, change: &Change) -> DeviceRect {
+    fn change_box(&self, tableau: &Tableau, change: &Change, line: f32) -> DeviceRect {
         match *change {
-            Change::Run(run) => self.around(self.at(run.from), self.at(run.to), 0.032),
+            Change::Run(run) => self.around(self.at(run.from), self.at(run.to), line),
             Change::Partial(p) => {
                 let (a, b) = partial_ends(tableau, &p);
-                self.around(a, b, 0.032)
+                self.around(a, b, line)
             }
             Change::Glint(g) => {
                 let c = tableau.cell_centre(g.cell);
@@ -836,6 +845,20 @@ pub(crate) fn half_ends(tableau: &Tableau, cell: usize, side: usize) -> (Pt, Pt)
 fn partial_ends(tableau: &Tableau, p: &Partial) -> (Pt, Pt) {
     let (c, e) = half_ends(tableau, usize::from(p.cell), usize::from(p.side));
     (c + (e - c) * p.from, c + (e - c) * p.to)
+}
+
+/// A dark run's or partial's change box reach (u): its 0.064u line's half width.
+const DARK_LINE_REACH: f32 = 0.032;
+
+/// Run `run`'s drawn ends in light px: its ends inset at an aperture or a wall face.
+pub(crate) fn run_ends(map: &LightMap, run: &Run) -> (Pt, Pt) {
+    let (a, b) = (map.at(run.from), map.at(run.to));
+    let along = (b - a) * (map.u / (b - a).len());
+    let diagonal = run.from.0 != run.to.0 && run.from.1 != run.to.1;
+    (
+        map.map(a + along * run.from_end.inset(diagonal)),
+        map.map(b - along * run.to_end.inset(diagonal)),
+    )
 }
 
 /// A beam's stroke (spec §7.3), the one recipe every beam drawing shares: its line, 0.064u wide
@@ -882,19 +905,13 @@ fn draw_bill(
         planes: &mut light.sharp,
         bounds: [usize::MAX, usize::MAX, 0, 0],
     };
-    let skip = |c: &Change| clip_rect(map.change_box(tableau, c), clip).is_none();
+    let skip = |c: &Change| clip_rect(map.change_box(tableau, c, DARK_LINE_REACH), clip).is_none();
     for run in bill.line.runs() {
         if skip(&Change::Run(*run)) {
             continue;
         }
-        let (a, b) = (map.at(run.from), map.at(run.to));
-        let along = (b - a) * (u / (b - a).len());
-        let diagonal = run.from.0 != run.to.0 && run.from.1 != run.to.1;
-        let (a, b) = (
-            map.map(a + along * run.from_end.inset(diagonal)),
-            map.map(b - along * run.to_end.inset(diagonal)),
-        );
-        beam_stroke(&mut t, clip, palette, (a, b), run.mask, (u, s), 1.0);
+        let ends = run_ends(map, run);
+        beam_stroke(&mut t, clip, palette, ends, run.mask, (u, s), 1.0);
     }
     for p in bill.line.partials() {
         if skip(&Change::Partial(*p)) {
@@ -953,6 +970,109 @@ fn draw_bill(
     }
     let [x0, y0, x1, y1] = t.bounds;
     (x0 < x1).then(|| DeviceRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32))
+}
+
+/// Paints `bill` into the wash (ruling L3), only inside `clip` (sharp px), which the caller
+/// wiped. Each layer, at `f` sharp px per its px (bloom 4, glow 2, sharp 1), draws every item
+/// whose box (grown by `ITEM_SLACK`) meets the sharp-px extent of `coarser(clip, f)`: each mask's
+/// strokes as one union, masks 1 to 7; then, in the sharp layer, the mix dots and the piece
+/// lights. Returns the bounds of every px each layer painted (bloom, glow, sharp), in sharp px
+/// (each layer's px scaled up).
+fn draw_wash(
+    wash: &mut Wash,
+    map: &LightMap,
+    tableau: &Tableau,
+    palette: &Palette,
+    game: Game,
+    bill: &Playbill,
+    clip: DeviceRect,
+) -> [DeviceRect; 3] {
+    let Wash {
+        sharp,
+        glow,
+        bloom_raw,
+        shapes,
+        ..
+    } = wash;
+    let (u, s) = (map.u, map.s);
+    let mut drawn = [DeviceRect::default(); 3];
+    for (layer, (f, plane)) in [(4, bloom_raw), (2, glow), (1, sharp)]
+        .into_iter()
+        .enumerate()
+    {
+        let lclip = clip_to(coarser(clip, f), plane.width as i32, plane.height as i32);
+        if is_empty(lclip) {
+            continue;
+        }
+        let extent = DeviceRect::new(
+            lclip.left * f,
+            lclip.top * f,
+            lclip.right * f,
+            lclip.bottom * f,
+        );
+        let reach = grow(extent, ITEM_SLACK);
+        let meets =
+            |c: &Change| clip_rect(map.change_box(tableau, c, STROKE_REACH), reach).is_some();
+        let k = 1.0 / f as f32;
+        let mut plane = Stroked::new(plane);
+        let plane = &mut plane;
+        for mask in 1..=WHITE {
+            for (width, colour) in passes(palette, mask, f).into_iter().flatten() {
+                shapes.clear();
+                for run in bill.line.runs().iter().filter(|r| r.mask == mask) {
+                    if meets(&Change::Run(*run)) {
+                        let (a, b) = run_ends(map, run);
+                        shapes.push(Shape::line(a * k, b * k, width * u * s * k));
+                    }
+                }
+                for p in bill.line.partials().iter().filter(|p| p.mask == mask) {
+                    if meets(&Change::Partial(*p)) {
+                        let (a, b) = partial_ends(tableau, p);
+                        let w = width * u * s * k;
+                        shapes.push(Shape::line(map.map(a) * k, map.map(b) * k, w));
+                    }
+                }
+                if !shapes.is_empty() {
+                    let paint = Paint::Solid(colour);
+                    fill(plane, lclip, shapes, &paint, 1.0, Blend::Over);
+                }
+            }
+        }
+        if f == 1 {
+            for glint in bill.line.glints() {
+                if !meets(&Change::Glint(*glint)) {
+                    continue;
+                }
+                let radius = match glint.kind {
+                    GlintKind::Crossing => CROSSING_DOT,
+                    GlintKind::Bounce => BOUNCE_DOT,
+                } * u
+                    * s;
+                let centre = map.map(tableau.cell_centre(glint.cell));
+                mix_dot(plane, lclip, palette, centre, radius, u * s, glint.mask);
+            }
+            for (i, cl) in bill.lights.iter().enumerate() {
+                if !cl.shown || !meets(&Change::Light(i, *cl)) {
+                    continue;
+                }
+                let centre = map.map(tableau.cell_centre(i) + cl.offset);
+                draw_light_spun(
+                    plane,
+                    lclip,
+                    palette,
+                    game,
+                    cl.cell,
+                    cl.received,
+                    cl.emitting,
+                    centre,
+                    u * s * cl.size,
+                    cl.spin,
+                );
+            }
+        }
+        drawn[layer] = plane.drawn(f);
+    }
+    drawn
 }
 
 #[derive(Default)]
@@ -1035,7 +1155,7 @@ impl Lettering {
 }
 
 /// The `halo_cols` tap of device column `c` at scale 1.
-fn half_tap(c: usize) -> Tap {
+pub(crate) fn half_tap(c: usize) -> Tap {
     let a = c.div_ceil(2) as u32;
     (a, a + 1, if c.is_multiple_of(2) { 192 } else { 64 })
 }
@@ -1065,16 +1185,16 @@ fn halved_light(row: &[u32], c0: usize, sharp: &[u16], light: &mut [u32]) {
 }
 
 /// Rows of `half` a patched develop blurs at a time (each with its margins).
-const BAND: usize = 64;
+pub(crate) const BAND: usize = 64;
 
 /// Most rects a light tile's changes and windows are kept in.
 pub const LIGHT_PATCHES: usize = 16;
 
 /// A frame's develop windows covering more than 1 / this of `half` develop whole instead.
-const WHOLE_PAST: i64 = 8;
+pub(crate) const WHOLE_PAST: i64 = 8;
 
 /// The px of a plane `factor` times smaller that hold any of `r`'s.
-fn coarser(r: DeviceRect, factor: i32) -> DeviceRect {
+pub(crate) fn coarser(r: DeviceRect, factor: i32) -> DeviceRect {
     let up = |v: i32| (v + factor - 1).div_euclid(factor);
     DeviceRect::new(
         r.left.div_euclid(factor),
@@ -1082,6 +1202,40 @@ fn coarser(r: DeviceRect, factor: i32) -> DeviceRect {
         up(r.right),
         up(r.bottom),
     )
+}
+
+/// The device px whose compose reads ½ px window `w` of a tile at `tile`, `scale`: ½ px p feeds
+/// device px within one ½ px of p·2/s, so 2·left − 2 … 2·right + 2 over s, one more px each
+/// side; in the tile.
+pub(crate) fn device_of_half(tile: DeviceRect, scale: f32, w: DeviceRect) -> DeviceRect {
+    let s = scale;
+    let lo = |v: i32| ((2 * v - 2) as f32 / s).floor() as i32 - 1;
+    let hi = |v: i32| ((2 * v + 2) as f32 / s).ceil() as i32 + 1;
+    let (x, y) = (tile.left, tile.top);
+    let r = DeviceRect::new(
+        x + lo(w.left),
+        y + lo(w.top),
+        x + hi(w.right),
+        y + hi(w.bottom),
+    );
+    within(r, tile)
+}
+
+/// The device px whose compose reads sharp px `d` of a tile at `tile`, `scale`: sharp px p feeds
+/// device px within one sharp px of p over s (exactly p at scale 1), one more px each side; in
+/// the tile.
+pub(crate) fn device_of_sharp(tile: DeviceRect, scale: f32, d: DeviceRect) -> DeviceRect {
+    let s = scale;
+    let lo = |v: i32| ((v - 1) as f32 / s).floor() as i32 - 1;
+    let hi = |v: i32| ((v + 1) as f32 / s).ceil() as i32 + 1;
+    let (x, y) = (tile.left, tile.top);
+    let r = DeviceRect::new(
+        x + lo(d.left),
+        y + lo(d.top),
+        x + hi(d.right),
+        y + hi(d.bottom),
+    );
+    within(r, tile)
 }
 
 /// `coarse` at (`x`, `y`): the 4×4 mean of `sharp`'s 2×2 means, each rounded as `downsample` rounds.
@@ -1333,37 +1487,14 @@ impl LightTile {
         }
     }
 
-    /// The device px whose compose reads `half` inside `w` (½ px): ½ px p feeds device px within
-    /// one ½ px of p·2/s, so 2·left − 2 … 2·right + 2 over s, one more px each side; in the tile.
+    /// The device px whose compose reads `half` inside `w` (½ px): see `device_of_half`.
     fn device_of_half(&self, w: DeviceRect) -> DeviceRect {
-        let s = self.scale;
-        let lo = |v: i32| ((2 * v - 2) as f32 / s).floor() as i32 - 1;
-        let hi = |v: i32| ((2 * v + 2) as f32 / s).ceil() as i32 + 1;
-        let (x, y) = (self.rect.left, self.rect.top);
-        let r = DeviceRect::new(
-            x + lo(w.left),
-            y + lo(w.top),
-            x + hi(w.right),
-            y + hi(w.bottom),
-        );
-        within(r, self.rect)
+        device_of_half(self.rect, self.scale, w)
     }
 
-    /// The device px whose compose reads `sharp` inside `d` (sharp px): sharp px p feeds device
-    /// px within one sharp px of p over s (exactly p at scale 1), one more px each side; in the
-    /// tile.
+    /// The device px whose compose reads `sharp` inside `d` (sharp px): see `device_of_sharp`.
     fn device_of_sharp(&self, d: DeviceRect) -> DeviceRect {
-        let s = self.scale;
-        let lo = |v: i32| ((v - 1) as f32 / s).floor() as i32 - 1;
-        let hi = |v: i32| ((v + 1) as f32 / s).ceil() as i32 + 1;
-        let (x, y) = (self.rect.left, self.rect.top);
-        let r = DeviceRect::new(
-            x + lo(d.left),
-            y + lo(d.top),
-            x + hi(d.right),
-            y + hi(d.bottom),
-        );
-        within(r, self.rect)
+        device_of_sharp(self.rect, self.scale, d)
     }
 
     /// Composes light row `ly`, light columns `c0..c1`, over `base` into `out`: in runs of
@@ -1477,6 +1608,9 @@ pub struct Darkroom {
     backdrop: Backdrop,
     base: Vec<u32>,
     light: LightTile,
+    /// The light theme's light (`Over`); empty in the dark theme, as `light` is in the light
+    /// one (ruling L2).
+    wash: Wash,
     letters: Letters,
     sprites: SpriteCache,
     chrome: ChromeSprites,
@@ -1499,6 +1633,22 @@ pub struct Darkroom {
     /// room is made in `reshape`; it is empty until a level cue keeps a frame.
     fade: Vec<[u8; 3]>,
     fade_rect: DeviceRect,
+    /// How this theme's light reaches the picture: the last `reshape`'s palette's.
+    mode: LightMode,
+    /// Where the light theme's brand is lettered in `base` (ruling L6), set by `paint_brand`.
+    brand_ink: Option<BrandInk>,
+}
+
+/// The light brand's wordmark arguments and the px its ink can reach.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BrandInk {
+    left: f32,
+    top: f32,
+    height: f32,
+    col: f32,
+    game: u8,
+    ppp: f32,
+    reach: DeviceRect,
 }
 
 impl Darkroom {
@@ -1509,6 +1659,7 @@ impl Darkroom {
             backdrop: Backdrop::new(),
             base: Vec::new(),
             light: LightTile::default(),
+            wash: Wash::default(),
             letters: Letters::default(),
             sprites: SpriteCache {
                 board: SpritePool::new(),
@@ -1528,6 +1679,8 @@ impl Darkroom {
             laid: None,
             fade: Vec::new(),
             fade_rect: DeviceRect::default(),
+            mode: LightMode::Additive,
+            brand_ink: None,
         };
         room.reshape(tableau, palette);
         room
@@ -1542,6 +1695,7 @@ impl Darkroom {
         (self.width, self.height) = (w, h);
         fit_buffer(&mut self.base, w * h, 0);
         self.laid = None;
+        self.brand_ink = None;
         // A box around a piece up to `UNDERLAY_SCALE` × the larger of a cell and a tray piece,
         // `UNDERLAY_REACH` of its side each way, plus 2 px and the centre's own.
         let side = UNDERLAY_SCALE * (tableau.cell as f32).max(tableau.tray_piece_px() as f32);
@@ -1552,9 +1706,53 @@ impl Darkroom {
             (board.left + board.right) as f32 / 2.0,
             (board.top + board.bottom) as f32 / 2.0,
         );
-        self.backdrop.reshape(palette, w, h, focus);
+        // Ruling L7: the light page's shadows and the board panel's fill are baked here, so
+        // every region's repaint (which starts with the backdrop) keeps them.
+        let ppp = tableau.px_per_pt();
+        let unit = tableau.cell as f32;
+        let edges = |r: DeviceRect| [r.left as f32, r.top as f32, r.right as f32, r.bottom as f32];
+        let casting = |rect: DeviceRect, radius: f32, s: Shadow| Casting {
+            rect: edges(rect),
+            radius,
+            drop: s.drop_pt * ppp,
+            sigma: s.blur_pt / 2.0 * ppp,
+            colour: s.colour,
+        };
+        // At most three castings: the board panel's, the card's and the tray's (review T4 M4).
+        const { assert!(MAX_CASTINGS >= 3) };
+        let mut castings = [Casting::default(); MAX_CASTINGS];
+        let mut n = 0;
+        let slab = tableau.board_panel();
+        if let Some(bp) = palette.board_panel {
+            castings[n] = casting(slab, 0.35 * unit, bp.shadow);
+            n += 1;
+        }
+        if let Some(s) = palette.panel_shadow {
+            for r in [
+                tableau.device(tableau.card),
+                tableau.device(tableau.tray.rect),
+            ] {
+                castings[n] = casting(r, 14.0 * ppp, s);
+                n += 1;
+            }
+        }
+        let panel = palette.board_panel.map(|bp| PanelFill {
+            rect: edges(slab),
+            radius: 0.35 * unit,
+            centre: focus,
+            reach: 0.75 * (board.right - board.left) as f32,
+            stops: bp.fill,
+        });
+        let ground = Ground {
+            focus,
+            castings: &castings[..n],
+            panel,
+        };
+        self.backdrop.reshape(palette, w, h, &ground);
         let u = tableau.cell;
         self.regions = Regions::of(tableau);
+        self.mode = palette.light_mode;
+        let over = self.mode == LightMode::Over;
         self.fade_rect = self.regions.board;
         let f = self.fade_rect;
         // Room only: `keep_for_fade` fills it before a fade reads it, so a resize skips the fill.
@@ -1564,8 +1762,23 @@ impl Darkroom {
         );
         self.walls.reshape(self.regions.board, u as f32);
         let margin = (2.0 * BLOOM_SIGMA * u as f32).ceil() as i32;
-        self.light
-            .reshape(within(grow(board, margin), canvas), MAX_LIGHT_PX);
+        // Ruling L2: one theme's light planes at a time, the outgoing theme's given back before
+        // the incoming theme's are sized. In `Over` the dark lettering tiles go empty first, then
+        // the dark board tile, then the wash is sized; in `Additive` the wash goes empty first,
+        // then the dark board tile and the lettering tiles are sized.
+        if over {
+            self.reshape_letters(tableau, canvas);
+        }
+        let wash_rect = within(grow(board, (MARGIN * u as f32).ceil() as i32), canvas);
+        if over {
+            self.light.reshape(DeviceRect::default(), MAX_LIGHT_PX);
+            self.wash.reshape(wash_rect, MAX_LIGHT_PX, u as f32);
+        } else {
+            self.wash
+                .reshape(DeviceRect::default(), MAX_LIGHT_PX, u as f32);
+            self.light
+                .reshape(within(grow(board, margin), canvas), MAX_LIGHT_PX);
+        }
         // Only the board's tile develops by patches; the lettering tiles reserve no band.
         let s = self.light.scale;
         self.light
@@ -1573,7 +1786,9 @@ impl Darkroom {
         // The tile may have lost its light: the next frame compares with nothing (and `paint_all`
         // draws it whole).
         self.shown.clear();
-        self.reshape_letters(tableau, canvas);
+        if !over {
+            self.reshape_letters(tableau, canvas);
+        }
         self.sprites.board.reshape(u.max(1) as usize, palette);
         self.sprites
             .tray
@@ -1629,6 +1844,13 @@ impl Darkroom {
         } else {
             DeviceRect::default()
         };
+        // The light theme letters in ink, in `base` (ruling L6): no lettering tiles, so their
+        // planes are given back (L2).
+        let (brand, header, next, sheet) = if self.mode == LightMode::Over {
+            Default::default()
+        } else {
+            (brand, header, next, sheet)
+        };
         let letters = &mut self.letters;
         letters.brand.reshape(brand, f32::INFINITY);
         letters.header.reshape(header, f32::INFINITY);
@@ -1671,8 +1893,26 @@ impl Darkroom {
     }
 
     /// Re-adds every static lettering tile's light to `rect` of `base` (ruling 8). A tile that
-    /// drew nothing is skipped, so its stale glow is never composed.
-    fn relight(&mut self, rect: DeviceRect) {
+    /// drew nothing is skipped, so its stale glow is never composed. In the light theme there
+    /// are no tiles: the brand's ink is drawn into `rect` instead (ruling L6), so `rect` must be
+    /// one whose `base` was just refilled (its multiply is never applied twice).
+    fn relight(&mut self, palette: &Palette, rect: DeviceRect) {
+        if self.mode == LightMode::Over {
+            if let Some(b) = self.brand_ink
+                && let Some(clip) = clip_rect(rect, b.reach)
+            {
+                let mut layer = Layer {
+                    px: &mut self.base,
+                    width: self.width,
+                    height: self.height,
+                };
+                let (left, top, height, col) = (b.left, b.top, b.height, b.col);
+                lettering::wordmark(
+                    &mut layer, clip, palette, left, top, height, col, b.game, b.ppp,
+                );
+            }
+            return;
+        }
         let Ok(lut) = <&[u8; SHOULDER_TOP + 1]>::try_from(self.lut.as_slice()) else {
             return;
         };
@@ -1709,12 +1949,28 @@ impl Darkroom {
         let ppp = tableau.px_per_pt();
         let Some(b) = tableau.brand else {
             self.letters.brand.wipe();
+            self.brand_ink = None;
             return;
         };
         let d = tableau.device(b);
         let col = (d.right - d.left) as f32;
         let cap = lettering::wordmark_cap(0.74 * col);
         let game = scene.game.number();
+        if self.mode == LightMode::Over {
+            // Ruling L6: the ink itself is drawn by `relight` (the canvas's, at the end of
+            // `paint_all_at`, once; then each refilled region's).
+            let canvas = tableau.canvas();
+            self.brand_ink = Some(BrandInk {
+                left: d.left as f32,
+                top: d.top as f32,
+                height: (d.bottom - d.top) as f32,
+                col,
+                game,
+                ppp,
+                reach: within(grow(d, (0.5 * cap).ceil() as i32), canvas),
+            });
+            return;
+        }
         let tile = &mut self.letters.brand;
         let (left, top, height) = (d.left as f32, d.top as f32, (d.bottom - d.top) as f32);
         // The wordmark's origin in the tile: the same on a canvas that only moved the column.
@@ -1772,7 +2028,7 @@ impl Darkroom {
         self.paint_picker_region(tableau, palette, scene, true);
         self.paint_card_region(tableau, palette, scene, true);
         self.paint_brand(tableau, palette, scene);
-        self.relight(canvas);
+        self.relight(palette, canvas);
     }
 
     /// The board region of `base` (floor, grid, tiles, walls, bodies): `base` only, the light is
@@ -1781,7 +2037,7 @@ impl Darkroom {
     pub fn paint_board(&mut self, tableau: &Tableau, palette: &Palette, scene: &Scene) {
         self.paint_board_base(tableau, palette, scene, self.regions.board);
         for k in 0..self.regions.board_part_count {
-            self.relight(self.regions.board_parts[k]);
+            self.relight(palette, self.regions.board_parts[k]);
         }
     }
 
@@ -1803,7 +2059,7 @@ impl Darkroom {
         for (i, _) in stale.iter().enumerate().filter(|&(_, &s)| s) {
             for k in 0..self.regions.board_part_count {
                 if let Some(r) = clip_rect(tableau.cell_rect(i), self.regions.board_parts[k]) {
-                    self.relight(r);
+                    self.relight(palette, r);
                 }
             }
         }
@@ -1833,6 +2089,17 @@ impl Darkroom {
                 continue;
             };
             self.backdrop.fill(&mut layer, part);
+            // The light board panel's crisp 1-px rim (its fill is in the backdrop, ruling L7).
+            if let Some(bp) = palette.board_panel {
+                let rim = Panel {
+                    rect: tableau.board_panel(),
+                    radius: 0.35 * tableau.cell as f32,
+                    fill: Rgba::CLEAR,
+                    rim: [bp.rim, bp.rim],
+                    rim_width: 1.0,
+                };
+                vitrine::panel_edges(&mut layer, part, &rim);
+            }
             draw_grid(
                 &mut layer,
                 part,
@@ -1919,11 +2186,14 @@ impl Darkroom {
         whole: bool,
     ) -> &[DeviceRect] {
         self.lit.clear();
+        if self.mode == LightMode::Over {
+            return self.wash_frame(tableau, palette, scene, view, whole);
+        }
         if is_empty(self.light.rect) {
             return self.lit.as_slice();
         }
         self.bill.build(scene, view, &self.pose);
-        let map = LightMap::of(tableau, &self.light);
+        let map = LightMap::of(tableau, self.light.rect, self.light.scale);
         let plane = DeviceRect::new(
             0,
             0,
@@ -1951,7 +2221,7 @@ impl Darkroom {
             let mut dirty = Patchwork::<LIGHT_PATCHES>::new();
             self.bill.changes(&self.shown, |c| {
                 dirty.add(clip_to(
-                    map.change_box(tableau, &c),
+                    map.change_box(tableau, &c, DARK_LINE_REACH),
                     plane.right,
                     plane.bottom,
                 ));
@@ -1971,10 +2241,77 @@ impl Darkroom {
         self.lit.as_slice()
     }
 
+    /// The light theme's `light_frame` (rulings L3, L4): the playbill of `scene` mid-sweep at
+    /// `view`, at the pose, painted into the wash: whole when `whole`, else wiped and painted
+    /// again only inside the items that differ from the last frame's, and developed in windows.
+    /// Returns the device rects whose light changed.
+    fn wash_frame(
+        &mut self,
+        tableau: &Tableau,
+        palette: &Palette,
+        scene: &Scene,
+        view: Option<&SweepView>,
+        whole: bool,
+    ) -> &[DeviceRect] {
+        if is_empty(self.wash.rect) {
+            return self.lit.as_slice();
+        }
+        self.bill.build(scene, view, &self.pose);
+        let map = LightMap::of(tableau, self.wash.rect, self.wash.scale);
+        let plane = DeviceRect::new(
+            0,
+            0,
+            self.wash.sharp.width as i32,
+            self.wash.sharp.height as i32,
+        );
+        let painted =
+            |layers: [DeviceRect; 3]| layers.into_iter().fold(DeviceRect::default(), union);
+        if whole {
+            self.wash.wipe(self.wash.drawn);
+            let layers = draw_wash(
+                &mut self.wash,
+                &map,
+                tableau,
+                palette,
+                scene.game,
+                &self.bill,
+                plane,
+            );
+            self.wash.drawn = painted(layers);
+            self.wash.develop();
+            self.lit.add(self.wash.rect);
+        } else {
+            let mut dirty = Patchwork::<LIGHT_PATCHES>::new();
+            self.bill.changes(&self.shown, |c| {
+                dirty.add(clip_to(
+                    map.change_box(tableau, &c, STROKE_REACH),
+                    plane.right,
+                    plane.bottom,
+                ));
+            });
+            for &d in dirty.as_slice() {
+                self.wash.wipe(d);
+                let layers = draw_wash(
+                    &mut self.wash,
+                    &map,
+                    tableau,
+                    palette,
+                    scene.game,
+                    &self.bill,
+                    d,
+                );
+                self.wash.drawn = union(self.wash.drawn, painted(layers));
+            }
+            self.wash.develop_changed(dirty.as_slice(), &mut self.lit);
+        }
+        std::mem::swap(&mut self.bill, &mut self.shown);
+        self.lit.as_slice()
+    }
+
     /// The tray region of `base` after its cells changed: see `paint_tray_region`.
     pub fn paint_tray(&mut self, tableau: &Tableau, palette: &Palette, scene: &Scene) {
         self.paint_tray_region(tableau, palette, scene, false);
-        self.relight(self.regions.tray);
+        self.relight(palette, self.regions.tray);
     }
 
     /// The tray region of `base`: its glass panel, a well under each of the 24 visible slots,
@@ -2054,7 +2391,7 @@ impl Darkroom {
     /// What a whole board paint changes: the board region of `base` (`paint_board`) ∪ the light
     /// tile (`light_frame`, whole).
     pub fn board_damage(&self) -> DeviceRect {
-        union(self.regions.board, self.light.rect)
+        union(self.regions.board, self.light_rect())
     }
 
     pub fn tray_damage(&self) -> DeviceRect {
@@ -2064,7 +2401,7 @@ impl Darkroom {
     /// The picker region of `base` after the slots' states changed: see `paint_picker_region`.
     pub fn paint_picker(&mut self, tableau: &Tableau, palette: &Palette, scene: &Scene) {
         self.paint_picker_region(tableau, palette, scene, false);
-        self.relight(self.regions.picker);
+        self.relight(palette, self.regions.picker);
     }
 
     /// The inline picker's region of `base`: the 50 chip sprites by state, and their digits.
@@ -2111,7 +2448,7 @@ impl Darkroom {
     /// `paint_card_region`.
     pub fn paint_card(&mut self, tableau: &Tableau, palette: &Palette, scene: &Scene) {
         self.paint_card_region(tableau, palette, scene, false);
-        self.relight(self.regions.card);
+        self.relight(palette, self.regions.card);
     }
 
     /// The card (spec §7.5): its glass panel, the Levels pill when the picker is a sheet, and
@@ -2133,6 +2470,14 @@ impl Darkroom {
         let ppp = tableau.px_per_pt();
         let px = |p: f32| p * ppp;
         let whole = |p: f32| px(p).round() as i32;
+        // Next ▶'s label origin, for the card's right and bottom edges where it is drawn (its
+        // dark tile's coordinates, or the canvas's in light).
+        let next_at = |right: i32, bottom: i32| {
+            pt(
+                (right - whole(CARD_PAD + NEXT_PILL.0 - 16.0)) as f32,
+                (bottom - whole(CARD_PAD + (NEXT_PILL.1 + 11.0) / 2.0)) as f32,
+            )
+        };
         let parts = tableau.card_parts;
         let c = tableau.device(tableau.card);
         // The header: "LEVEL n", or a letterable win text (ruling 7: else a typeset caption).
@@ -2150,49 +2495,34 @@ impl Darkroom {
         // A win writes the header on (`pose.reveal`), or fades it in under reduced motion
         // (`pose.header_alpha`); settled, the key is phase 2's, so the lettered tile is kept.
         let (reveal, fade) = (self.pose.reveal, self.pose.header_alpha);
-        let tile = &mut self.letters.header;
-        let (x, y) = tableau.header_lettering_at(cap_pt);
-        let at = pt((x - tile.rect.left) as f32, (y - tile.rect.top) as f32);
-        let sizes = [px(cap_pt), intensity * fade, 1.0 - reveal];
-        let key = Lettering::new(text, at, sizes, ppp, palette);
-        Self::letter(tile, key, px(cap_pt), |t, clip, _| {
-            if !text.is_empty() {
-                let beam = lettering::Beam::new(px(cap_pt), ppp, intensity * fade);
-                let track = HEADER_TRACK;
-                lettering::beam_line_revealed(
-                    t, clip, palette, text, at, track, &beam, None, reveal,
-                );
-            }
-        });
-        // Next ▶: "NEXT" and the triangle as light (white α 0.97), so they glow.
         let next_open = scene.next_open();
-        let tile = &mut self.letters.next;
-        let (right, bottom) = (c.right - tile.rect.left, c.bottom - tile.rect.top);
-        let at = pt(
-            (right - whole(CARD_PAD + NEXT_PILL.0 - 16.0)) as f32,
-            (bottom - whole(CARD_PAD + (NEXT_PILL.1 + 11.0) / 2.0)) as f32,
-        );
-        let label = if next_open { "NEXT" } else { "" };
-        let key = Lettering::new(label, at, [px(11.0), 0.0, 0.0], ppp, palette);
-        Self::letter(tile, key, px(11.0), |t, clip, _| {
-            if next_open {
-                let ink = palette.next_ink;
-                let (cap, track, stroke) = (px(11.0), 0.3, px(1.3));
-                let (left, add) = (lettering::Align::Left, Blend::Add);
-                let w =
-                    lettering::flat_line(t, clip, label, at, cap, track, stroke, ink, left, add);
-                let (tx, ty) = (at.x + w + px(10.0), at.y + px(5.5));
-                let tri = Shape::polygon(
-                    &[
-                        pt(tx, ty - px(5.5)),
-                        pt(tx + px(9.0), ty),
-                        pt(tx, ty + px(5.5)),
-                    ],
-                    0.0,
-                );
-                fill(t, clip, &[tri], &Paint::Solid(ink), 1.0, Blend::Add);
-            }
-        });
+        // The light theme has no lettering tiles (Task 2): its header is ink, below.
+        if self.mode != LightMode::Over {
+            let tile = &mut self.letters.header;
+            let (x, y) = tableau.header_lettering_at(cap_pt);
+            let at = pt((x - tile.rect.left) as f32, (y - tile.rect.top) as f32);
+            let sizes = [px(cap_pt), intensity * fade, 1.0 - reveal];
+            let key = Lettering::new(text, at, sizes, ppp, palette);
+            Self::letter(tile, key, px(cap_pt), |t, clip, _| {
+                if !text.is_empty() {
+                    let beam = lettering::Beam::new(px(cap_pt), ppp, intensity * fade);
+                    let track = HEADER_TRACK;
+                    lettering::beam_line_revealed(
+                        t, clip, palette, text, at, track, &beam, None, reveal,
+                    );
+                }
+            });
+            // Next ▶: "NEXT" and the triangle as light (white α 0.97), so they glow.
+            let tile = &mut self.letters.next;
+            let at = next_at(c.right - tile.rect.left, c.bottom - tile.rect.top);
+            let label = if next_open { "NEXT" } else { "" };
+            let key = Lettering::new(label, at, [px(11.0), 0.0, 0.0], ppp, palette);
+            Self::letter(tile, key, px(11.0), |t, clip, _| {
+                if next_open {
+                    next_label(t, clip, palette.next_ink, at, ppp, Blend::Add);
+                }
+            });
+        }
         let mut layer = Layer {
             px: &mut self.base,
             width: self.width,
@@ -2216,12 +2546,49 @@ impl Darkroom {
         }
         if next_open {
             let rect = tableau.next_pill();
+            // Light: the pill's shadow first (spec §7.5: blur 10 pt, 3 pt down).
+            if let Some(s) = palette.next_shadow {
+                let drop = s.drop_pt * ppp;
+                let r = (rect[3] - rect[1]) / 2.0;
+                let cast = Shape::round_rect(rect[0], rect[1] + drop, rect[2], rect[3] + drop, r);
+                vitrine::soft_shape(
+                    &mut layer,
+                    region,
+                    &cast,
+                    s.blur_pt / 2.0 * ppp,
+                    s.colour,
+                    None,
+                );
+            }
             let glass = Paint::Linear {
                 from: pt(rect[0], rect[1]),
                 to: pt(rect[2], rect[3]),
                 stops: Stops::new(&[(0.0, palette.next_fill[0]), (1.0, palette.next_fill[1])]),
             };
             vitrine::pill(&mut layer, region, rect, &glass, palette.next_rim, rim);
+            // Light: "NEXT" and ▶ as flat white strokes on the pill, in `base` (ruling L6).
+            if self.mode == LightMode::Over {
+                let at = next_at(c.right, c.bottom);
+                next_label(&mut layer, region, palette.next_ink, at, ppp, Blend::Over);
+            }
+        }
+        // Light: the header in ink, into `base`, written on at the win's `reveal` (ruling L6).
+        if self.mode == LightMode::Over && !text.is_empty() {
+            let (x, y) = tableau.header_lettering_at(cap_pt);
+            let t_pt = if scene.won { WIN_INK_PT } else { LEVEL_INK_PT };
+            let ink = lettering::Ink::new(px(cap_pt), ppp, px(t_pt), fade);
+            let at = pt(x as f32, y as f32);
+            lettering::ink_line(
+                &mut layer,
+                region,
+                palette,
+                text,
+                at,
+                HEADER_TRACK,
+                &ink,
+                None,
+                reveal,
+            );
         }
     }
 
@@ -2317,8 +2684,28 @@ impl Darkroom {
             }
         }
         vitrine::panel_edges(&mut posed(px, (w, h), alpha), clip, &panel);
-        self.letter_sheet(tableau, palette);
-        self.relight_sheet(px, clip, alpha, dy);
+        if self.mode == LightMode::Over {
+            // Light: "LEVELS" in ink on the output, at the pose's alpha and rise (ruling L6).
+            let (x, y) = tableau.sheet_lettering_at(SHEET_CAP);
+            let ink = lettering::Ink::new(SHEET_CAP * ppp, ppp, SHEET_INK_PT * ppp, 1.0);
+            let at = pt(x as f32, (y + dy) as f32);
+            let mut target = posed(px, (w, h), alpha);
+            let track = HEADER_TRACK;
+            lettering::ink_line(
+                &mut target,
+                clip,
+                palette,
+                SHEET_TITLE,
+                at,
+                track,
+                &ink,
+                None,
+                1.0,
+            );
+        } else {
+            self.letter_sheet(tableau, palette);
+            self.relight_sheet(px, clip, alpha, dy);
+        }
         let close = pt(
             tableau.easel_px_x(sheet.close.x + sheet.close.w / 2.0),
             tableau.easel_px_y(sheet.close.y + sheet.close.h / 2.0) + dy as f32,
@@ -2428,8 +2815,10 @@ impl Darkroom {
         let Ok(lut) = <&[u8; SHOULDER_TOP + 1]>::try_from(self.lut.as_slice()) else {
             return;
         };
+        let over = self.mode == LightMode::Over;
         let light = &mut self.light;
-        let lit = light.rect;
+        let wash = &mut self.wash;
+        let lit = if over { wash.rect } else { light.rect };
         let w = self.width;
         let (x0, x1) = (r.left as usize, r.right as usize);
         for y in r.top..r.bottom {
@@ -2450,13 +2839,12 @@ impl Darkroom {
             copy(&base[x0..lx0], &mut row[x0..lx0]);
             copy(&base[lx1..x1], &mut row[lx1..x1]);
             let left = lit.left as usize;
-            light.compose_span(
-                (y - lit.top) as usize,
-                (lx0 - left, lx1 - left),
-                &base[lx0..lx1],
-                &mut row[lx0..lx1],
-                lut,
-            );
+            let (ly, span) = ((y - lit.top) as usize, (lx0 - left, lx1 - left));
+            if over {
+                wash.compose_span(ly, span, &base[lx0..lx1], &mut row[lx0..lx1]);
+            } else {
+                light.compose_span(ly, span, &base[lx0..lx1], &mut row[lx0..lx1], lut);
+            }
         }
     }
 
@@ -2502,14 +2890,23 @@ impl Darkroom {
         }
     }
 
-    /// The light tile's device rect (empty when the board is off the canvas).
+    /// The active light tile's device rect, the dark tile's or the wash's (empty when the board
+    /// is off the canvas).
     pub fn light_rect(&self) -> DeviceRect {
-        self.light.rect
+        if self.mode == LightMode::Over {
+            self.wash.rect
+        } else {
+            self.light.rect
+        }
     }
 
-    /// Light px per device px in the light tile.
+    /// Light px per device px in the active light tile.
     pub fn light_scale(&self) -> f32 {
-        self.light.scale
+        if self.mode == LightMode::Over {
+            self.wash.scale
+        } else {
+            self.light.scale
+        }
     }
 
     /// The light tile's glow and bloom developed again from the light it holds, after a paint:
@@ -2520,13 +2917,26 @@ impl Darkroom {
     #[doc(hidden)]
     pub fn develop_light(&mut self, dirty: Option<&[DeviceRect]>) -> Patchwork<LIGHT_PATCHES> {
         let mut device = Patchwork::new();
+        let over = self.mode == LightMode::Over;
+        if over && is_empty(self.wash.rect) {
+            return device;
+        }
         let Some(dirty) = dirty else {
-            let (glow, bloom) = self.light.sigmas;
-            self.light.develop(glow, bloom);
-            device.add(self.light.rect);
+            if over {
+                self.wash.develop();
+                device.add(self.wash.rect);
+            } else {
+                let (glow, bloom) = self.light.sigmas;
+                self.light.develop(glow, bloom);
+                device.add(self.light.rect);
+            }
             return device;
         };
-        let (o, s) = (self.light.rect, self.light.scale);
+        let (o, s) = if over {
+            (self.wash.rect, self.wash.scale)
+        } else {
+            (self.light.rect, self.light.scale)
+        };
         let at = |v: i32, o: i32| (v - o) as f32 * s;
         let mut light = Patchwork::<LIGHT_PATCHES>::new();
         for &r in dirty {
@@ -2537,7 +2947,11 @@ impl Darkroom {
                 at(r.bottom, o.top).ceil() as i32,
             ));
         }
-        self.light.develop_patches(light.as_slice(), &mut device);
+        if over {
+            self.wash.develop_patches(light.as_slice(), &mut device);
+        } else {
+            self.light.develop_patches(light.as_slice(), &mut device);
+        }
         device
     }
 
@@ -2546,6 +2960,7 @@ impl Darkroom {
         self.base.capacity() * size_of::<u32>()
             + self.backdrop.bytes()
             + self.light.bytes()
+            + self.wash.bytes()
             + self.letters.bytes()
             + self.sprites.board.bytes()
             + self.sprites.tray.bytes()
@@ -2596,6 +3011,25 @@ impl Darkroom {
             self.base[y * w..][x0..x1].copy_from_slice(&self.underlay[k * span..][..span]);
         }
     }
+}
+
+/// Next ▶'s label (spec §7.5): "NEXT" as flat glyphs (cap 11 pt, stroke 1.3 pt), then a ▶
+/// 9 × 11 pt, 10 pt after it, in `ink`; `at` is the cap line's left end.
+fn next_label(t: &mut dyn Target, clip: DeviceRect, ink: Rgba, at: Pt, ppp: f32, blend: Blend) {
+    let px = |p: f32| p * ppp;
+    let (cap, track, stroke) = (px(11.0), 0.3, px(1.3));
+    let left = lettering::Align::Left;
+    let w = lettering::flat_line(t, clip, "NEXT", at, cap, track, stroke, ink, left, blend);
+    let (tx, ty) = (at.x + w + px(10.0), at.y + px(5.5));
+    let tri = Shape::polygon(
+        &[
+            pt(tx, ty - px(5.5)),
+            pt(tx + px(9.0), ty),
+            pt(tx, ty + px(5.5)),
+        ],
+        0.0,
+    );
+    fill(t, clip, &[tri], &Paint::Solid(ink), 1.0, blend);
 }
 
 /// A cell's body sprite: its kind, colour byte and direction folded by symmetry.
@@ -3043,26 +3477,114 @@ mod tests {
     /// the shown sheet.
     #[test]
     fn the_sheet_mid_fade_takes_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(crate::Rgb(255, 0, 255));
-        for pose in MID_POSES {
-            let (shown, px, tableau) = sheets_on_black(&sentinel, pose);
-            let p = tableau.device(tableau.sheet.panel);
-            let inside = ((p.bottom - 4) * 780 + (p.left + p.right) / 2) as usize;
-            let red = |p: u32| p >> 16 & 0xff;
-            assert!(
-                red(px[inside]) < red(shown[inside]),
-                "{pose:?}: the panel fades ({:06x} against {:06x} shown)",
-                px[inside],
-                shown[inside]
-            );
-            assert!(
-                px.iter().filter(|&&p| p != 0).count() > 100_000,
-                "{pose:?}: drawn"
-            );
+        for theme in Theme::ALL {
+            let sentinel = theme.palette().recoloured(crate::Rgb(255, 0, 255));
+            for pose in MID_POSES {
+                let (shown, px, tableau) = sheets_on_black(&sentinel, pose);
+                let p = tableau.device(tableau.sheet.panel);
+                let inside = ((p.bottom - 4) * 780 + (p.left + p.right) / 2) as usize;
+                let red = |p: u32| p >> 16 & 0xff;
+                assert!(
+                    red(px[inside]) < red(shown[inside]),
+                    "{theme:?} {pose:?}: the panel fades ({:06x} against {:06x} shown)",
+                    px[inside],
+                    shown[inside]
+                );
+                assert!(
+                    px.iter().filter(|&&p| p != 0).count() > 100_000,
+                    "{theme:?} {pose:?}: drawn"
+                );
+                for &p in &px {
+                    let (r, g, b) = (p >> 16 & 0xff, p >> 8 & 0xff, p & 0xff);
+                    assert!(g == 0 && r.abs_diff(b) <= 1, "{theme:?} {pose:?}: {p:06x}");
+                }
+            }
+        }
+    }
+
+    /// Global Constraints: a whole light scene (a lit board with crossing beams and lit pieces,
+    /// a won card with Next ▶ and the ink header, the brand, the open sheet) takes every colour
+    /// from the palette: painted with a sentinel, every pixel is the sentinel's hue.
+    #[test]
+    fn a_light_scene_takes_every_colour_from_the_palette() {
+        let sentinel = Palette::LIGHT.recoloured(crate::Rgb(255, 0, 255));
+        let mut board = Board::default();
+        for (x, y, piece, colour, dir) in [
+            (2, 7, Piece::Laser, 4, 2),
+            (7, 12, Piece::Laser, 2, 0),
+            (11, 7, Piece::Pinwheel, 4, 0),
+            (7, 3, Piece::Mirror, 0, 1),
+        ] {
+            board.cells[board_index(x, y)] = Cell { piece, colour, dir };
+        }
+        let mut field = BeamField::default();
+        trace(&board, &mut field);
+        for (easel, sheet) in [
+            (Easel::new(1280, 800, 1.0), false),
+            (Easel::new(780, 1480, 2.0).with_touch(true), true),
+        ] {
+            let tableau = Tableau::arrange(&easel);
+            let mut room = Darkroom::new(&tableau, &sentinel);
+            let mut scene = Scene::bare(&board, &field, Game::C1);
+            (scene.won, scene.you_win) = (true, "YOU WIN!");
+            scene.strip[1] = SlotState::Unlocked; // Next ▶ shows
+            room.paint_all(&tableau, &sentinel, &scene);
+            let (w, h) = (easel.width as usize, easel.height as usize);
+            let mut px = vec![0u32; w * h];
+            let canvas = tableau.canvas();
+            room.compose(canvas, &mut Output::Xrgb(&mut px));
+            if sheet {
+                let mut out = Output::Xrgb(&mut px);
+                room.draw_sheet(
+                    &tableau,
+                    &sentinel,
+                    &scene.strip,
+                    &mut out,
+                    canvas,
+                    SheetPose::SHOWN,
+                );
+            }
+            let mut lit = 0;
             for &p in &px {
                 let (r, g, b) = (p >> 16 & 0xff, p >> 8 & 0xff, p & 0xff);
-                assert!(g == 0 && r.abs_diff(b) <= 1, "{pose:?}: {p:06x}");
+                assert!(g == 0 && r.abs_diff(b) <= 1, "{easel:?}: {p:06x}");
+                lit += usize::from(p != 0);
             }
+            assert!(lit > w * h / 2, "{easel:?}: painted ({lit} px)");
+        }
+    }
+
+    /// Ruling L2 (Task 2 review): in `Over` the four dark lettering tiles are emptied and their
+    /// planes given back; back in `Additive` they are sized again.
+    #[test]
+    fn the_light_theme_gives_back_the_lettering_tiles() {
+        for easel in [
+            Easel::new(1280, 800, 1.0),
+            Easel::new(780, 1480, 2.0).with_touch(true),
+        ] {
+            let tableau = Tableau::arrange(&easel);
+            let mut room = Darkroom::new(&tableau, &Palette::DARK);
+            let tiles = |room: &Darkroom| {
+                let l = &room.letters;
+                [&l.brand, &l.header, &l.next, &l.sheet].map(|t| (t.rect, t.bytes()))
+            };
+            let dark = tiles(&room);
+            let (lit, dark_bytes) = (
+                dark.iter().filter(|(r, _)| !is_empty(*r)).count(),
+                dark.iter().map(|t| t.1).sum::<usize>(),
+            );
+            // 1280 × 800 has the brand, header and Next ▶ (an inline picker, no sheet); the
+            // phone has the header, Next ▶ and the sheet's "LEVELS".
+            assert_eq!(lit, 3, "{easel:?}: the dark tiles");
+            room.reshape(&tableau, &Palette::LIGHT);
+            let light = tiles(&room);
+            for (k, (rect, bytes)) in light.into_iter().enumerate() {
+                assert!(is_empty(rect), "{easel:?}: tile {k} emptied");
+                assert!(bytes <= 256, "{easel:?}: tile {k} holds {bytes} B");
+            }
+            assert!(dark_bytes > 100_000, "{easel:?}: dark tiles {dark_bytes} B");
+            room.reshape(&tableau, &Palette::DARK);
+            assert_eq!(tiles(&room), dark, "{easel:?}: sized again in dark");
         }
     }
 
@@ -3670,6 +4192,62 @@ mod tests {
         }
     }
 
+    /// Every light item of `scene` settled, each piece light also as a landing piece's, and
+    /// pieces of half-segments mid-sweep.
+    fn every_item(scene: &Scene) -> Vec<Change> {
+        let mut bill = Playbill::new();
+        bill.build(scene, None, &Pose::SETTLED);
+        let empty = Playbill::new();
+        let mut items = Vec::new();
+        bill.changes(&empty, |c| items.push(c));
+        // Each piece light as a landing piece's too: off its cell and at the touch lift.
+        let landing: Vec<Change> = items
+            .iter()
+            .filter_map(|c| match *c {
+                Change::Light(i, cl) => Some(Change::Light(
+                    i,
+                    CellLight {
+                        offset: pt(7.5, -5.25),
+                        size: 1.3,
+                        ..cl
+                    },
+                )),
+                _ => None,
+            })
+            .collect();
+        items.extend(landing);
+        // Pieces of half-segments mid-sweep: diagonal ones and a whole straight one, white and
+        // in a colour (the light theme strokes white differently).
+        for (side, from, to, mask) in [
+            (3, 0.2, 0.7, 7),
+            (2, 0.0, 1.0, 7),
+            (1, 0.1, 0.9, 1),
+            (5, 0.0, 0.6, 6),
+        ] {
+            items.push(Change::Partial(Partial {
+                order: 0,
+                cell: board_index(7, 7) as u16,
+                side,
+                from,
+                to,
+                mask,
+            }));
+        }
+        items
+    }
+
+    /// A playbill of item `c` alone.
+    fn alone(c: Change) -> Box<Playbill> {
+        let mut one = Playbill::new();
+        match c {
+            Change::Run(r) => one.line.push_run(r),
+            Change::Partial(p) => one.line.push_partial(p),
+            Change::Glint(g) => one.line.push_glint(g),
+            Change::Light(i, cl) => one.lights[i] = cl,
+        }
+        one
+    }
+
     #[test]
     fn every_light_item_stays_in_its_box() {
         let easel = Easel::new(1280, 800, 1.0);
@@ -3678,54 +4256,16 @@ mod tests {
         let mut room = Darkroom::new(&tableau, palette);
         for page in crate::specimen::pages() {
             let scene = Scene::bare(&page.board, &page.field, page.game);
-            let mut bill = Playbill::new();
-            bill.build(&scene, None, &Pose::SETTLED);
-            let empty = Playbill::new();
-            let map = LightMap::of(&tableau, &room.light);
+            let map = LightMap::of(&tableau, room.light.rect, room.light.scale);
             let plane = DeviceRect::new(
                 0,
                 0,
                 room.light.sharp.width as i32,
                 room.light.sharp.height as i32,
             );
-            let mut items = Vec::new();
-            bill.changes(&empty, |c| items.push(c));
-            // Each piece light as a landing piece's too: off its cell and at the touch lift.
-            let landing: Vec<Change> = items
-                .iter()
-                .filter_map(|c| match *c {
-                    Change::Light(i, cl) => Some(Change::Light(
-                        i,
-                        CellLight {
-                            offset: pt(7.5, -5.25),
-                            size: 1.3,
-                            ..cl
-                        },
-                    )),
-                    _ => None,
-                })
-                .collect();
-            items.extend(landing);
-            // Pieces of half-segments mid-sweep: a diagonal one and a whole straight one.
-            for (side, from, to) in [(3, 0.2, 0.7), (2, 0.0, 1.0)] {
-                items.push(Change::Partial(Partial {
-                    order: 0,
-                    cell: board_index(7, 7) as u16,
-                    side,
-                    from,
-                    to,
-                    mask: 7,
-                }));
-            }
-            for c in items {
+            for c in every_item(&scene) {
                 // The item alone, drawn over the whole plane, stays inside its box.
-                let mut one = Playbill::new();
-                match c {
-                    Change::Run(r) => one.line.push_run(r),
-                    Change::Partial(p) => one.line.push_partial(p),
-                    Change::Glint(g) => one.line.push_glint(g),
-                    Change::Light(i, cl) => one.lights[i] = cl,
-                }
+                let one = alone(c);
                 room.light.wipe_rect(plane);
                 let drawn = draw_bill(
                     &mut room.light,
@@ -3737,7 +4277,7 @@ mod tests {
                     plane,
                 );
                 if let Some(d) = drawn {
-                    let b = map.change_box(&tableau, &c);
+                    let b = map.change_box(&tableau, &c, DARK_LINE_REACH);
                     assert!(
                         d.left >= b.left
                             && d.top >= b.top
@@ -3747,6 +4287,138 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The light twin (ruling L4): each wash item drawn alone paints, in each layer, only the
+    /// layer px that hold some of its change box (`STROKE_REACH`). So a frame that wipes and
+    /// paints again `coarser(box, f)` in each layer reaches every px the item paints, and an
+    /// item that paints a px inside a layer's clip always meets that clip's sharp-px extent.
+    #[test]
+    fn every_wash_item_stays_in_its_box_in_every_layer() {
+        for easel in [
+            Easel::new(1280, 800, 1.0),
+            Easel::new(1281, 800, 1.0),
+            Easel::new(780, 1688, 2.0).with_touch(true),
+            Easel::new(3456, 2234, 2.0),
+        ] {
+            let tableau = Tableau::arrange(&easel);
+            let palette = Theme::Light.palette();
+            let mut room = Darkroom::new(&tableau, palette);
+            let map = LightMap::of(&tableau, room.wash.rect, room.wash.scale);
+            let plane = DeviceRect::new(
+                0,
+                0,
+                room.wash.sharp.width as i32,
+                room.wash.sharp.height as i32,
+            );
+            room.wash.wipe(plane);
+            let mut last = DeviceRect::default();
+            let mut checked = 0;
+            for page in crate::specimen::pages() {
+                let scene = Scene::bare(&page.board, &page.field, page.game);
+                for c in every_item(&scene) {
+                    room.wash.wipe(last);
+                    let one = alone(c);
+                    let layers = draw_wash(
+                        &mut room.wash,
+                        &map,
+                        &tableau,
+                        palette,
+                        scene.game,
+                        &one,
+                        plane,
+                    );
+                    last = layers.into_iter().fold(DeviceRect::default(), union);
+                    let b = map.change_box(&tableau, &c, STROKE_REACH);
+                    for (d, f) in layers.into_iter().zip([4, 2, 1]) {
+                        if is_empty(d) {
+                            continue;
+                        }
+                        let (d, held) = (coarser(d, f), coarser(b, f));
+                        assert!(
+                            d.left >= held.left
+                                && d.top >= held.top
+                                && d.right <= held.right
+                                && d.bottom <= held.bottom,
+                            "{easel:?} {c:?}: layer ×{f} painted {d:?} past its box's {held:?}"
+                        );
+                        checked += 1;
+                    }
+                }
+            }
+            assert!(checked > 100, "{easel:?}: {checked} layers checked");
+        }
+    }
+
+    /// The light twin of `light_after` (ruling L4): cold for `a`, then framed incrementally for
+    /// `b`, against cold for `b`. Every wash layer matches byte for byte. Returns whether it
+    /// developed by windows.
+    fn wash_after(easel: Easel, a: (&Board, &BeamField), b: (&Board, &BeamField)) -> bool {
+        let tableau = Tableau::arrange(&easel);
+        let palette = Theme::Light.palette();
+        let (mut incremental, mut fresh) = (
+            Darkroom::new(&tableau, palette),
+            Darkroom::new(&tableau, palette),
+        );
+        incremental.paint_all(&tableau, palette, &Scene::bare(a.0, a.1, Game::C1));
+        incremental.light_frame(
+            &tableau,
+            palette,
+            &Scene::bare(b.0, b.1, Game::C1),
+            None,
+            false,
+        );
+        fresh.paint_all(&tableau, palette, &Scene::bare(b.0, b.1, Game::C1));
+        let (x, y) = (&incremental.wash, &fresh.wash);
+        for (name, p, q) in [
+            ("sharp", &x.sharp, &y.sharp),
+            ("glow", &x.glow, &y.glow),
+            ("bloom raw", &x.bloom_raw, &y.bloom_raw),
+            ("bloom", &x.bloom, &y.bloom),
+            ("halo", &x.half, &y.half),
+        ] {
+            assert!(p.planes() == q.planes(), "{easel:?}: {name}");
+        }
+        incremental.lit.as_slice() != [incremental.wash.rect]
+    }
+
+    #[test]
+    fn patched_washes_equal_whole_ones() {
+        let laser = (2, 5, Piece::Laser, 7, 2);
+        let boards = [
+            vec![laser, (9, 5, Piece::Mirror, 0, 1)],
+            vec![laser, (9, 5, Piece::Mirror, 0, 3)],
+            vec![
+                laser,
+                (9, 5, Piece::Splitter, 0, 1),
+                (9, 12, Piece::Pinwheel, 7, 0),
+            ],
+            vec![laser],
+            vec![laser, (12, 12, Piece::Mirror, 0, 1)],
+            // Corners and edges: a front in the board's corner, light past the board.
+            vec![
+                (0, 0, Piece::Laser, 4, 3),
+                (14, 14, Piece::Mirror, 0, 2),
+                laser,
+            ],
+            vec![(0, 14, Piece::Laser, 2, 1), (14, 0, Piece::Pinwheel, 2, 0)],
+        ];
+        let parts: Vec<_> = boards.iter().map(|p| lit(p)).collect();
+        for easel in [
+            Easel::new(800, 600, 1.0),
+            Easel::new(780, 1688, 2.0).with_touch(true),
+            Easel::new(2560, 1600, 2.0),
+            Easel::new(3456, 2234, 2.0), // a wash over 1800 px: scale < 1
+        ] {
+            let mut by_windows = 0;
+            for (i, a) in parts.iter().enumerate() {
+                for b in &parts[i + 1..] {
+                    by_windows += usize::from(wash_after(easel, (&a.0, &a.1), (&b.0, &b.1)));
+                    by_windows += usize::from(wash_after(easel, (&b.0, &b.1), (&a.0, &a.1)));
+                }
+            }
+            assert!(by_windows >= 2, "{easel:?}: some edits develop by windows");
         }
     }
 

@@ -20,9 +20,14 @@ pub fn easel() -> Easel {
 
 /// A lightbox and its twin that repaints every frame whole (ruling M6).
 pub fn twin(easel: Easel, reduced: bool) -> (Lightbox, Lightbox) {
-    let mut whole = Lightbox::new(easel, Theme::Dark, reduced);
+    twin_in(Theme::Dark, easel, reduced)
+}
+
+/// `twin` in `theme`.
+pub fn twin_in(theme: Theme, easel: Easel, reduced: bool) -> (Lightbox, Lightbox) {
+    let mut whole = Lightbox::new(easel, theme, reduced);
     whole.set_full_frames(true);
-    (Lightbox::new(easel, Theme::Dark, reduced), whole)
+    (Lightbox::new(easel, theme, reduced), whole)
 }
 
 /// Paints `game` at `now` on both; their pictures must match.
@@ -62,6 +67,19 @@ pub fn run_out_with(
     sheet: bool,
     what: &str,
 ) -> usize {
+    run_out_in(Theme::Dark, pair, outs, game, clock, sheet, what)
+}
+
+/// `run_out_with` for a pair painting in `theme`, held to a cold paint in `theme`.
+pub fn run_out_in(
+    theme: Theme,
+    pair: &mut (Lightbox, Lightbox),
+    outs: &mut (Vec<u32>, Vec<u32>),
+    game: &GameState,
+    clock: &mut Clock,
+    sheet: bool,
+    what: &str,
+) -> usize {
     let easel = *pair.0.easel();
     let mut frames = 0;
     while pair.0.next_wake(clock.now).is_some() {
@@ -71,7 +89,7 @@ pub fn run_out_with(
         frames += 1;
     }
     assert!(
-        outs.0 == common::cold_with(easel, halation::Scene::of(game), sheet),
+        outs.0 == common::cold_with_in(theme, easel, halation::Scene::of(game), sheet),
         "{what}: the settled frame differs from a cold paint"
     );
     frames
@@ -79,10 +97,16 @@ pub fn run_out_with(
 
 #[test]
 fn sweeps_equal_whole_repaints_and_settle_to_cold() {
+    for theme in Theme::ALL {
+        sweeps_equal_whole_repaints_and_settle_to_cold_in(theme);
+    }
+}
+
+fn sweeps_equal_whole_repaints_and_settle_to_cold_in(theme: Theme) {
     for (game, slot) in [(Game::C1, 0), (Game::C2, 0), (Game::C3, 0), (Game::C4, 0)] {
         let easel = easel();
         let mut st = state(game, slot, true);
-        let mut pair = twin(easel, false);
+        let mut pair = twin_in(theme, easel, false);
         let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
         let mut clock = Clock { now: 0.0 };
         step_both(&mut pair, &mut outs, &st, clock.now, "cold");
@@ -91,12 +115,14 @@ fn sweeps_equal_whole_repaints_and_settle_to_cold() {
             turn_a_piece(&mut st, &pair.0);
             let now = clock.later();
             step_both(&mut pair, &mut outs, &st, now, "the turn's first frame");
-            let frames = run_out(
+            let frames = run_out_in(
+                theme,
                 &mut pair,
                 &mut outs,
                 &st,
                 &mut clock,
-                &format!("{game} turn {k}"),
+                false,
+                &format!("{theme:?} {game} turn {k}"),
             );
             // A sweep runs 250–600 ms (15 frames or more); a turn that only takes light away
             // runs its 150 ms turn and 160 ms fade.
@@ -115,12 +141,18 @@ fn sweeps_equal_whole_repaints_and_settle_to_cold() {
 
 #[test]
 fn a_drops_sweep_on_a_phone_equals_whole_repaints_in_rgba() {
+    for theme in Theme::ALL {
+        a_drops_sweep_on_a_phone_equals_whole_repaints_in_rgba_in(theme);
+    }
+}
+
+fn a_drops_sweep_on_a_phone_equals_whole_repaints_in_rgba_in(theme: Theme) {
     // 780 × 1480 @2, touch, into the web's RGBA bytes: C1 level 1 solved, a piece of the solution
     // carried off to the tray and its cues run out, then dropped back where it sends light on:
     // every frame of both, against a whole repaint.
     let easel = Easel::new(780, 1480, 2.0).with_touch(true);
     let mut st = state(Game::C1, 0, true);
-    let mut pair = twin(easel, false);
+    let mut pair = twin_in(theme, easel, false);
     let n = 780 * 1480 * 4;
     let mut outs = (vec![0u8; n], vec![0u8; n]);
     let mut clock = Clock { now: 0.0 };
@@ -163,14 +195,17 @@ fn a_drops_sweep_on_a_phone_equals_whole_repaints_in_rgba() {
     carry(&mut st, &pair.0, slot, cell);
     assert!(gained_light(&lit, st.field()), "the drop sends light on");
     let frames = run(&mut pair, &mut outs, &st);
-    assert!(frames >= 14, "a sweep's frames: {frames}");
-    let cold = common::cold(easel, halation::Scene::of(&st));
+    assert!(frames >= 14, "{theme:?}: a sweep's frames: {frames}");
+    let cold = common::cold_in(theme, easel, halation::Scene::of(&st));
     let rgb: Vec<u32> = outs
         .0
         .chunks(4)
         .map(|p| u32::from(p[0]) << 16 | u32::from(p[1]) << 8 | u32::from(p[2]))
         .collect();
-    assert!(rgb == cold, "the settled frame differs from a cold paint");
+    assert!(
+        rgb == cold,
+        "{theme:?}: the settled frame differs from a cold paint"
+    );
 }
 
 /// Presses at cell `from`'s centre, drags to `to`'s and releases there.
@@ -237,8 +272,14 @@ fn the_sweep_grows_from_the_turned_piece() {
 
 #[test]
 fn a_change_mid_sweep_settles_to_cold() {
+    for theme in Theme::ALL {
+        a_change_mid_sweep_settles_to_cold_in(theme);
+    }
+}
+
+fn a_change_mid_sweep_settles_to_cold_in(theme: Theme) {
     let mut st = state(Game::C2, 0, true);
-    let mut pair = twin(easel(), false);
+    let mut pair = twin_in(theme, easel(), false);
     let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
     let mut clock = Clock { now: 0.0 };
     step_both(&mut pair, &mut outs, &st, 0.0, "cold");
@@ -248,24 +289,32 @@ fn a_change_mid_sweep_settles_to_cold() {
         step_both(&mut pair, &mut outs, &st, now, "mid-sweep");
     }
     turn_a_piece(&mut st, &pair.0);
-    run_out(
+    run_out_in(
+        theme,
         &mut pair,
         &mut outs,
         &st,
         &mut clock,
-        "a second turn mid-sweep",
+        false,
+        &format!("{theme:?}: a second turn mid-sweep"),
     );
 }
 
 #[test]
 fn frames_through_two_schedules_meet() {
+    for theme in Theme::ALL {
+        frames_through_two_schedules_meet_in(theme);
+    }
+}
+
+fn frames_through_two_schedules_meet_in(theme: Theme) {
     // Rendering is a pure function of the state, the cues and `now` (spec §5.3): a frame at
     // t + 200 ms is the same whether 1 or 12 frames led to it.
     let mut a = state(Game::C1, 0, true);
     let mut b = state(Game::C1, 0, true);
     let (mut la, mut lb) = (
-        Lightbox::new(easel(), Theme::Dark, false),
-        Lightbox::new(easel(), Theme::Dark, false),
+        Lightbox::new(easel(), theme, false),
+        Lightbox::new(easel(), theme, false),
     );
     let (mut oa, mut ob) = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
     la.paint(&a, 0.0, Output::Xrgb(&mut oa));
@@ -284,43 +333,88 @@ fn frames_through_two_schedules_meet() {
 
 #[test]
 fn frames_equal_whole_repaints_at_light_scale_below_one() {
+    for theme in Theme::ALL {
+        frames_equal_whole_repaints_at_light_scale_below_one_in(theme);
+    }
+}
+
+fn frames_equal_whole_repaints_at_light_scale_below_one_in(theme: Theme) {
     // 2400 × 2000 @1: the board's light tile is over 1800 px, so its light renders at s < 1.
     let easel = Easel::new(2400, 2000, 1.0);
-    let probe = Lightbox::new(easel, Theme::Dark, false);
-    let lit = probe.tableau().board;
-    assert!(
-        (lit.right - lit.left) as f32 * 17.0 / 15.0 > 1800.0,
-        "a scaled light tile"
-    );
+    let probe = Lightbox::new(easel, theme, false);
+    assert!(probe.darkroom().light_scale() < 1.0, "a scaled light tile");
     let mut st = state(Game::C1, 0, true);
-    let mut pair = twin(easel, false);
+    let mut pair = twin_in(theme, easel, false);
     let mut outs = (vec![0u32; 2400 * 2000], vec![0u32; 2400 * 2000]);
     let mut clock = Clock { now: 0.0 };
     step_both(&mut pair, &mut outs, &st, 0.0, "cold");
     turn_a_piece(&mut st, &pair.0);
     let now = clock.later();
     step_both(&mut pair, &mut outs, &st, now, "first");
-    run_out(&mut pair, &mut outs, &st, &mut clock, "scaled light");
+    run_out_in(
+        theme,
+        &mut pair,
+        &mut outs,
+        &st,
+        &mut clock,
+        false,
+        &format!("{theme:?}: scaled light"),
+    );
 }
 
 #[test]
 fn old_strands_fade_out() {
+    for theme in Theme::ALL {
+        old_strands_fade_out_in(theme);
+    }
+}
+
+fn old_strands_fade_out_in(theme: Theme) {
     let mut st = state(Game::C1, 0, true);
-    let mut lightbox = Lightbox::new(easel(), Theme::Dark, false);
+    let mut lightbox = Lightbox::new(easel(), theme, false);
     let mut out = vec![0u32; 1280 * 800];
     lightbox.paint(&st, 0.0, Output::Xrgb(&mut out));
     let before = out.clone();
-    turn_a_piece(&mut st, &lightbox);
+    let cell = turn_a_piece(&mut st, &lightbox);
     lightbox.paint(&st, 1000.0, Output::Xrgb(&mut out));
-    let end = common::cold(easel(), halation::Scene::of(&st));
-    // A board pixel that was lit only by a strand the turn removed: still lit at the first
-    // frame, as dark as the end picture once 160 ms have passed.
-    let gone = (0..1280 * 800)
-        .find(|&i| before[i] != end[i] && luma(before[i]) > luma(end[i]) + 80)
-        .expect("a strand went out");
-    assert!(luma(out[gone]) > luma(end[gone]) + 40, "fading, not gone");
-    lightbox.paint(&st, 1200.0, Output::Xrgb(&mut out));
-    assert!(luma(out[gone]) <= luma(end[gone]) + 4, "gone after 160 ms");
+    let end = common::cold_in(theme, easel(), halation::Scene::of(&st));
+    match theme {
+        Theme::Dark => {
+            // A board pixel that was lit only by a strand the turn removed: still lit at the
+            // first frame, as dark as the end picture once 160 ms have passed.
+            let gone = (0..1280 * 800)
+                .find(|&i| before[i] != end[i] && luma(before[i]) > luma(end[i]) + 80)
+                .expect("a strand went out");
+            assert!(luma(out[gone]) > luma(end[gone]) + 40, "fading, not gone");
+            lightbox.paint(&st, 1200.0, Output::Xrgb(&mut out));
+            assert!(luma(out[gone]) <= luma(end[gone]) + 4, "gone after 160 ms");
+        }
+        Theme::Light => {
+            // Light (ruling L5): the cue paints over the board, so its box differs from the
+            // settled frame there; it never brightens past the page, it darkens or tints. A board
+            // pixel (off the turned cell) painted only by a strand the turn removed: still
+            // painted at the first frame, the end picture once 160 ms have passed.
+            let r = lightbox.tableau().cell_rect(cell);
+            let off_cell = |i: usize| {
+                let (x, y) = ((i % 1280) as i32, (i / 1280) as i32);
+                !(r.left..r.right).contains(&x) || !(r.top..r.bottom).contains(&y)
+            };
+            let gone = (0..1280 * 800)
+                .find(|&i| off_cell(i) && luma(end[i]) > luma(before[i]) + 80)
+                .expect("a strand went out");
+            assert!(
+                luma(end[gone]) > luma(out[gone]) + 40,
+                "fading, not gone: {:06x} against {:06x}",
+                out[gone],
+                end[gone]
+            );
+            lightbox.paint(&st, 1200.0, Output::Xrgb(&mut out));
+            assert!(
+                luma(out[gone]).abs_diff(luma(end[gone])) <= 4,
+                "gone after 160 ms"
+            );
+        }
+    }
 }
 
 /// Whether `new` has light (a half-segment's channel) that `old` hasn't: a sweep.
@@ -555,12 +649,14 @@ fn lit_kind(game: Game) -> lumen::Cell {
 /// The two boards and fields of a carry: before (the piece at `from`) and after (at `to`).
 type Carry = ((lumen::Board, BeamField), (lumen::Board, BeamField));
 
-/// Carries `piece` from `from` to `to` on `easel` (released `off` px right and down of `to`'s
-/// centre, after its lift ran out), every frame against a whole repaint, and runs the land out to
-/// the cold picture. `land_only`: the held frame already shows the drop's beams, so the land is
-/// all that moves. Calls `seen` with every frame from the drop on: the incremental lightbox,
-/// the frame's time and its picture.
+/// Carries `piece` from `from` to `to` on `easel` in `theme` (released `off` px right and down of
+/// `to`'s centre, after its lift ran out), every frame against a whole repaint, and runs the land
+/// out to the cold picture. `land_only`: the held frame already shows the drop's beams, so the
+/// land is all that moves. Calls `seen` with every frame from the drop on: the incremental
+/// lightbox, the frame's time and its picture.
+#[allow(clippy::too_many_arguments)]
 fn carry_in(
+    theme: Theme,
     easel: Easel,
     game: Game,
     (piece, from, to): (lumen::Cell, usize, usize),
@@ -572,7 +668,7 @@ fn carry_in(
     let ((before, field_before), (after, field_after)) = carry;
     let held_field = if land_only { field_after } else { field_before };
     let n = (easel.width * easel.height) as usize;
-    let mut pair = twin(easel, false);
+    let mut pair = twin_in(theme, easel, false);
     let mut outs = (vec![0u32; n], vec![0u32; n]);
     let mut clock = Clock { now: 0.0 };
     let paint = |pair: &mut (Lightbox, Lightbox),
@@ -583,7 +679,7 @@ fn carry_in(
         pair.1.paint_scene(scene, now, Output::Xrgb(&mut outs.1));
         assert!(
             outs.0 == outs.1,
-            "{game} at {now:.1} ms: an incremental frame differs from a whole one"
+            "{theme:?} {game} at {now:.1} ms: an incremental frame differs from a whole one"
         );
     };
     let c = pair.0.tableau().cell_centre(to);
@@ -622,10 +718,13 @@ fn carry_in(
         landed += usize::from(lands(lightbox, now));
         seen(lightbox, now, out);
     });
-    assert!(landed >= 9, "{game}: the land's frames ({landed})");
     assert!(
-        outs.0 == common::cold(easel, dropped),
-        "{game}: the land settles to the cold picture"
+        landed >= 9,
+        "{theme:?} {game}: the land's frames ({landed})"
+    );
+    assert!(
+        outs.0 == common::cold_in(theme, easel, dropped),
+        "{theme:?} {game}: the land settles to the cold picture"
     );
 }
 
@@ -641,6 +740,12 @@ fn easels() -> [Easel; 2] {
 
 #[test]
 fn a_land_settles_without_a_step() {
+    for theme in Theme::ALL {
+        a_land_settles_without_a_step_in(theme);
+    }
+}
+
+fn a_land_settles_without_a_step_in(theme: Theme) {
     // Each game's lit kind carried from the tray onto (9, 5), in the laser's beam, with the drop's
     // beams already shown so only the land moves: its last frame (150 ms in, 99.98 % of the way)
     // and the settled one differ by no more than the vector body against its sprite — never by
@@ -653,7 +758,7 @@ fn a_land_settles_without_a_step() {
                 lit_board(game, &[(to, piece)]),
             );
             assert!(carry.1.1.received(to) != 0, "{game}: lit where it lands");
-            let t = Lightbox::new(easel, Theme::Dark, false).tableau().clone();
+            let t = Lightbox::new(easel, theme, false).tableau().clone();
             let (c, u) = (t.cell_centre(to), t.cell as f32);
             let r = halation::DeviceRect::new(
                 (c.x - 1.5 * u) as i32,
@@ -664,6 +769,7 @@ fn a_land_settles_without_a_step() {
             // The last land frame, then the step to the first one after it.
             let (mut last, mut step) = (None::<Vec<u32>>, None);
             carry_in(
+                theme,
                 easel,
                 game,
                 (piece, from, to),
@@ -681,7 +787,7 @@ fn a_land_settles_without_a_step() {
             let step = step.expect("a frame after the land");
             assert!(
                 step <= 8,
-                "{game} touch {}: the settle steps by {step}/255",
+                "{theme:?} {game} touch {}: the settle steps by {step}/255",
                 easel.touch
             );
         }
@@ -690,6 +796,12 @@ fn a_land_settles_without_a_step() {
 
 #[test]
 fn lit_pieces_land_as_whole_repaints_in_every_game() {
+    for theme in Theme::ALL {
+        lit_pieces_land_as_whole_repaints_in_every_game_in(theme);
+    }
+}
+
+fn lit_pieces_land_as_whole_repaints_in_every_game_in(theme: Theme) {
     // M2: each game's lit kind carried from the tray into the beam with its sweep (and from the
     // board back onto it), released off its cell's centre: every frame of the land against a
     // whole repaint, on the desktop and the phone, settling to cold.
@@ -701,6 +813,7 @@ fn lit_pieces_land_as_whole_repaints_in_every_game() {
             let off = (if easel.touch { 13 } else { 9 }, 7);
             let carry = (tray, board.clone());
             carry_in(
+                theme,
                 easel,
                 game,
                 (piece, slot, to),
@@ -712,6 +825,7 @@ fn lit_pieces_land_as_whole_repaints_in_every_game() {
             let other = board_index(11, 9);
             let carry = (board, lit_board(game, &[(other, piece)]));
             carry_in(
+                theme,
                 easel,
                 game,
                 (piece, to, other),
@@ -740,6 +854,7 @@ fn a_landing_gate_lights_when_the_sweep_reaches_it() {
     // Each frame from the drop on: landing, the front there, and the gate's light item.
     let mut frames = Vec::new();
     carry_in(
+        Theme::Dark,
         easel(),
         game,
         (gate, a, b),
@@ -1017,9 +1132,15 @@ fn scene(p: &(lumen::Board, BeamField)) -> halation::Scene<'_> {
 
 #[test]
 fn a_target_lit_by_a_change_bursts_then_settles() {
+    for theme in Theme::ALL {
+        a_target_lit_by_a_change_bursts_then_settles_in(theme);
+    }
+}
+
+fn a_target_lit_by_a_change_bursts_then_settles_in(theme: Theme) {
     let (a, b) = (blocked(true), blocked(false));
     let easel = easel();
-    let mut pair = twin(easel, false);
+    let mut pair = twin_in(theme, easel, false);
     let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
     for (lb, out) in [(&mut pair.0, &mut outs.0), (&mut pair.1, &mut outs.1)] {
         lb.paint_scene(scene(&a), 0.0, Output::Xrgb(out));
@@ -1027,14 +1148,17 @@ fn a_target_lit_by_a_change_bursts_then_settles() {
     }
     let burst = pair.0.choreography().bursts()[0];
     assert_eq!(burst.cell, board_index(12, 5));
-    let settled = common::cold(easel, scene(&b));
+    let settled = common::cold_in(theme, easel, scene(&b));
     // 30 ms into the burst its ring is at 1.2u · (0.3 + 1.1 · outExpo(0.05)) ≈ 0.747u, at
     // α 0.45 · (1 − 0.29)² ≈ 0.23: it lights pixels around the target the settled picture leaves dark.
     let t = burst.at + 30.0;
     for (lb, out) in [(&mut pair.0, &mut outs.0), (&mut pair.1, &mut outs.1)] {
         lb.paint_scene(scene(&b), t, Output::Xrgb(out));
     }
-    assert!(outs.0 == outs.1, "a burst frame equals a whole one");
+    assert!(
+        outs.0 == outs.1,
+        "{theme:?}: a burst frame equals a whole one"
+    );
     let c = pair.0.tableau().cell_centre(burst.cell);
     let u = pair.0.tableau().cell as f32;
     let ring = (0..360).step_by(10).filter(|deg| {
@@ -1043,24 +1167,36 @@ fn a_target_lit_by_a_change_bursts_then_settles() {
             (c.x + a.cos() * 0.747 * u) as usize,
             (c.y + a.sin() * 0.747 * u) as usize,
         );
-        luma(outs.0[y * 1280 + x]) > luma(settled[y * 1280 + x]) + 6
+        let (shown, settled) = (luma(outs.0[y * 1280 + x]), luma(settled[y * 1280 + x]));
+        match theme {
+            Theme::Dark => shown > settled + 6,
+            // Light (ruling L5): the cue paints over the board, so its box differs from the
+            // settled frame there; it never brightens past the page, it darkens or tints.
+            Theme::Light => shown + 6 < settled,
+        }
     });
-    assert!(ring.count() >= 12, "the ring shows");
+    assert!(ring.count() >= 12, "{theme:?}: the ring shows");
     let mut clock = Clock { now: t };
     while pair.0.next_wake(clock.now).is_some() {
         let now = clock.tick();
         for (lb, out) in [(&mut pair.0, &mut outs.0), (&mut pair.1, &mut outs.1)] {
             lb.paint_scene(scene(&b), now, Output::Xrgb(out));
         }
-        assert!(outs.0 == outs.1, "at {now:.1} ms");
+        assert!(outs.0 == outs.1, "{theme:?} at {now:.1} ms");
     }
-    assert!(outs.0 == settled, "settles to the cold picture");
+    assert!(outs.0 == settled, "{theme:?}: settles to the cold picture");
 }
 
 #[test]
 fn a_turn_draws_its_piece_in_between_then_settles() {
+    for theme in Theme::ALL {
+        a_turn_draws_its_piece_in_between_then_settles_in(theme);
+    }
+}
+
+fn a_turn_draws_its_piece_in_between_then_settles_in(theme: Theme) {
     let mut st = state(Game::C1, 0, true);
-    let mut pair = twin(easel(), false);
+    let mut pair = twin_in(theme, easel(), false);
     let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
     let mut clock = Clock { now: 0.0 };
     step_both(&mut pair, &mut outs, &st, 0.0, "cold");
@@ -1073,7 +1209,8 @@ fn a_turn_draws_its_piece_in_between_then_settles() {
         step_both(&mut pair, &mut outs, &st, now, "mid-turn");
     }
     let mid = outs.0.clone();
-    run_out(&mut pair, &mut outs, &st, &mut clock, "the turn");
+    let what = format!("{theme:?}: the turn");
+    run_out_in(theme, &mut pair, &mut outs, &st, &mut clock, false, &what);
     let r = pair.0.tableau().cell_rect(cell);
     let differs = |a: &[u32], b: &[u32]| {
         (r.top..r.bottom).any(|y| {
@@ -1297,8 +1434,14 @@ fn a_second_turn_on_another_cell_settles_the_first() {
 
 #[test]
 fn a_win_runs_packets_and_reveals_its_header_then_settles() {
+    for theme in Theme::ALL {
+        a_win_runs_packets_and_reveals_its_header_then_settles_in(theme);
+    }
+}
+
+fn a_win_runs_packets_and_reveals_its_header_then_settles_in(theme: Theme) {
     let mut st = state(Game::C1, 0, false);
-    let mut pair = twin(easel(), false);
+    let mut pair = twin_in(theme, easel(), false);
     let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
     let mut clock = Clock { now: 0.0 };
     step_both(&mut pair, &mut outs, &st, 0.0, "cold");
@@ -1306,7 +1449,7 @@ fn a_win_runs_packets_and_reveals_its_header_then_settles() {
     assert!(st.is_won());
     let start = clock.later();
     step_both(&mut pair, &mut outs, &st, start, "the win starts");
-    let settled = common::cold(easel(), halation::Scene::of(&st));
+    let settled = common::cold_in(theme, easel(), halation::Scene::of(&st));
     // At 120 ms the packets are 7 cells out along the beams and the header is part-revealed
     // (outCubic(120 / 700) ≈ 0.43).
     while clock.now < start + 120.0 {
@@ -1315,21 +1458,27 @@ fn a_win_runs_packets_and_reveals_its_header_then_settles() {
     }
     let board = pair.0.tableau().board;
     let header = pair.0.tableau().device(pair.0.tableau().card);
-    let brighter = |r: halation::DeviceRect| {
+    let shows = |r: halation::DeviceRect| {
         (r.top..r.bottom).any(|y| {
             (r.left..r.right).any(|x| {
                 let i = (y * 1280 + x) as usize;
-                luma(outs.0[i]) > luma(settled[i]) + 30
+                match theme {
+                    Theme::Dark => luma(outs.0[i]) > luma(settled[i]) + 30,
+                    // Light (ruling L5): the packet is painted over the beam in its halo colour,
+                    // so it darkens it (review T9 M2: an added white packet would only brighten).
+                    Theme::Light => luma(outs.0[i]) + 30 < luma(settled[i]),
+                }
             })
         })
     };
-    assert!(brighter(board), "a packet on a beam");
+    assert!(shows(board), "{theme:?}: a packet on a beam");
     let differs = (header.top..header.top + 60).any(|y| {
         (header.left..header.right)
             .any(|x| outs.0[(y * 1280 + x) as usize] != settled[(y * 1280 + x) as usize])
     });
-    assert!(differs, "the header is mid-reveal");
-    run_out(&mut pair, &mut outs, &st, &mut clock, "the win");
+    assert!(differs, "{theme:?}: the header is mid-reveal");
+    let what = format!("{theme:?}: the win");
+    run_out_in(theme, &mut pair, &mut outs, &st, &mut clock, false, &what);
 }
 
 #[test]
@@ -1373,6 +1522,12 @@ enum MidWin {
 
 #[test]
 fn a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles() {
+    for theme in Theme::ALL {
+        a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles_in(theme);
+    }
+}
+
+fn a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles_in(theme: Theme) {
     // C1 level 1 won with the cheat key on a canvas with a sheet picker; 200 ms in (packets
     // running, the header half written) it is restarted (unwon), or the level sheet opens over
     // it, or a tray piece is carried onto the board and lands there. Every frame against a
@@ -1381,7 +1536,7 @@ fn a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles() {
     let n = (easel.width * easel.height) as usize;
     for what in [MidWin::Restart, MidWin::OpenSheet, MidWin::LandElsewhere] {
         let mut st = state(Game::C1, 0, false);
-        let mut pair = twin(easel, false);
+        let mut pair = twin_in(theme, easel, false);
         assert!(!pair.0.has_inline_picker(), "a sheet picker");
         let mut outs = (vec![0u32; n], vec![0u32; n]);
         let mut clock = Clock { now: 0.0 };
@@ -1423,7 +1578,7 @@ fn a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles() {
             }
         }
         let now = clock.tick();
-        let what_now = format!("{what:?} mid-win");
+        let what_now = format!("{theme:?} {what:?} mid-win");
         step_both(&mut pair, &mut outs, &st, now, &what_now);
         let m = pair.0.choreography().moment(now);
         match what {
@@ -1439,8 +1594,11 @@ fn a_win_interrupted_mid_reveal_equals_whole_repaints_and_settles() {
             frames += 1;
         }
         let sheet = pair.0.sheet_open();
-        let cold = common::cold_with(easel, halation::Scene::of(&st), sheet);
-        assert!(outs.0 == cold, "{what:?}: settles to the cold picture");
+        let cold = common::cold_with_in(theme, easel, halation::Scene::of(&st), sheet);
+        assert!(
+            outs.0 == cold,
+            "{theme:?} {what:?}: settles to the cold picture"
+        );
     }
 }
 
@@ -1728,9 +1886,15 @@ fn same_board(f: halation::DeviceRect, a: &[u32], b: &[u32]) -> bool {
 
 #[test]
 fn a_level_change_cross_fades_then_sweeps_and_settles() {
+    for theme in Theme::ALL {
+        a_level_change_cross_fades_then_sweeps_and_settles_in(theme);
+    }
+}
+
+fn a_level_change_cross_fades_then_sweeps_and_settles_in(theme: Theme) {
     for reduced in [false, true] {
         let mut st = state(Game::C2, 0, false);
-        let mut pair = twin(easel(), reduced);
+        let mut pair = twin_in(theme, easel(), reduced);
         let mut outs = (vec![0u32; 1280 * 800], vec![0u32; 1280 * 800]);
         let mut clock = Clock { now: 0.0 };
         step_both(&mut pair, &mut outs, &st, 0.0, "cold");
@@ -1741,9 +1905,9 @@ fn a_level_change_cross_fades_then_sweeps_and_settles() {
         let f = pair.0.darkroom().fade_rect();
         assert!(
             same_board(f, &outs.0, &old),
-            "reduced {reduced}: the first frame shows the old board (k = 0)"
+            "{theme:?} reduced {reduced}: the first frame shows the old board (k = 0)"
         );
-        let new = common::cold(easel(), halation::Scene::of(&st));
+        let new = common::cold_in(theme, easel(), halation::Scene::of(&st));
         while clock.now < start + 75.0 {
             let now = clock.tick();
             step_both(&mut pair, &mut outs, &st, now, "the fade");
@@ -1757,9 +1921,10 @@ fn a_level_change_cross_fades_then_sweeps_and_settles() {
         });
         assert!(
             between,
-            "reduced {reduced}: mid-fade, pixels between the two boards"
+            "{theme:?} reduced {reduced}: mid-fade, pixels between the two boards"
         );
-        let frames = run_out(&mut pair, &mut outs, &st, &mut clock, "the level");
+        let what = format!("{theme:?}: the level");
+        let frames = run_out_in(theme, &mut pair, &mut outs, &st, &mut clock, false, &what);
         if reduced {
             assert!(
                 frames as f64 * halation::FRAME_MS <= 150.0 + halation::FRAME_MS,

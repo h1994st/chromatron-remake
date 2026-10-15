@@ -349,8 +349,16 @@ impl Lightbox {
         self.tableau.control_at(x, y, self.sheet, self.next_shown)
     }
 
-    /// Switches the theme; the next paint is cold and redraws every sprite.
+    /// Switches the theme (ruling L10): the darkroom reshapes in the new palette (the outgoing
+    /// theme's light planes given back before the incoming ones are sized, the sprite pools and
+    /// chrome sprites emptied, the page baked again), and the next paint is cold and settled: no
+    /// cue, every running one ended. The held piece, the sheet and reduced motion carry over.
+    /// It may allocate (a reshape); the paints after it do not. The theme in use again is no
+    /// change: nothing is reshaped, and a running cue runs on.
     pub fn set_theme(&mut self, theme: Theme) {
+        if theme == self.theme {
+            return;
+        }
         self.theme = theme;
         self.darkroom.reshape(&self.tableau, theme.palette());
         self.cold = true;
@@ -591,6 +599,7 @@ impl Lightbox {
         // Passing light over the output (M1): repaint where it was and where it is.
         let stage = flourish::Stage {
             tableau,
+            palette,
             board: scene.board,
             field: scene.field,
             reach: self.choreography.reach(),

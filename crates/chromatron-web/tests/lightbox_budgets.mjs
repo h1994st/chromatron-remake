@@ -23,14 +23,16 @@
 // (it builds a new lightbox: reported, not gated); and a level change from slot 0 (the cheat key,
 // then `=`): its first frame, the best of 5, at the cold cap, and its cross-fade's and sweep's
 // frames' p90 at the animation cap. Noise only ever adds time, hence the bests.
-// Usage: node lightbox_budgets.mjs <dist/web> <tests/solutions>
+// With `light-memory`, it only measures the light stepped live resize's memory, in its own fresh
+// process (wasm memory never shrinks), and exits.
+// Usage: node lightbox_budgets.mjs <dist/web> <tests/solutions> [light-memory]
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const [webDir, solutionsDir] = process.argv.slice(2);
+const [webDir, solutionsDir, mode] = process.argv.slice(2);
 assert.ok(webDir && solutionsDir, "usage: node lightbox_budgets.mjs <dist/web> <tests/solutions>");
 
 // The user's web budgets (2026-10-12), in ms; `anim` is the user's motion budget (2026-10-13).
@@ -84,6 +86,34 @@ const p90 = (times) => (times.length === 0 ? null : [...times].sort((a, b) => a 
 // @2, touch), the level sheet's paint every fourth turn: spec §14's phone row, 20 MiB.
 const MIB = 1 << 20;
 let baseline;
+// A live desktop resize from 1400 × 900 to the 5.5 Mpx limit (2880 × 1910 @1) in 60 steps, then
+// back and forth, as the page would drive it without its resize debounce.
+function steppedResize(session) {
+  const step = (t) => {
+    session.resize(Math.round(1400 + 1480 * t), Math.round(900 + 1010 * t), 1, [0, 0, 0, 0], false);
+    render(session);
+  };
+  for (let k = 0; k <= 60; k++) step(k / 60);
+  for (let k = 0; k <= 120; k++) step((Math.cos(k / 7) + 1) / 2);
+  step(1);
+}
+if (mode === "light-memory") {
+  // Memory never shrinks, so the light stepped resize is told apart only in a fresh process:
+  // its own classic baseline, the stepped desktop resize with the light theme, <= 96 MiB; then exit.
+  const budget = 96 * MIB;
+  const session = new Session();
+  session.select(1, undefined, undefined);
+  render(session);
+  baseline = wasm.memory.buffer.byteLength;
+  session.set_theme(false);
+  session.set_look(Look.Modern);
+  steppedResize(session);
+  const used = wasm.memory.buffer.byteLength - baseline;
+  console.log(`memory: ${(used / MIB).toFixed(1)} MiB over the classic baseline (${(baseline / MIB).toFixed(1)} MiB) after a light stepped live resize`);
+  assert.ok(used <= budget, `a light stepped live resize takes ${(used / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
+  session.free();
+  process.exit(0);
+}
 {
   const budget = 20 * MIB;
   const session = new Session();
@@ -103,28 +133,64 @@ let baseline;
   const used = wasm.memory.buffer.byteLength - baseline;
   console.log(`memory: ${(used / MIB).toFixed(1)} MiB over the classic baseline (${(baseline / MIB).toFixed(1)} MiB) after 40 phone rotations`);
   assert.ok(used <= budget, `40 phone rotations take ${(used / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
+
+  // Ruling L2: 20 in-place flips in portrait, then 20 in landscape, rendering after each, with
+  // no resize between flips: the swap of the dark planes for the wash and back, alone.
+  for (const [width, height] of [[780, 1688], [1688, 780]]) {
+    session.resize(width, height, 2, [0, 0, 0, 0], true);
+    render(session);
+    for (let k = 0; k < 20; k++) {
+      session.set_theme(k % 2 === 1);
+      render(session);
+    }
+  }
+  const inPlace = wasm.memory.buffer.byteLength - baseline;
+  console.log(`memory: ${(inPlace / MIB).toFixed(1)} MiB over the classic baseline after 40 in-place theme flips`);
+  assert.ok(inPlace <= budget, `in-place theme flips take ${(inPlace / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
+
+  // Ruling L2: the theme flipped every third step while the phone keeps turning, in the same
+  // wasm instance (memory never shrinks, so this is the high-water of both loops): <= 20 MiB.
+  for (let k = 0; k < 40; k++) {
+    if (k % 3 === 0) session.set_theme(k % 6 !== 0);
+    const [width, height] = k % 2 === 0 ? [780, 1688] : [1688, 780];
+    session.resize(width, height, 2, [0, 0, 0, 0], true);
+    render(session);
+    if (k % 4 === 3) {
+      session.command("levels");
+      render(session);
+    }
+  }
+  session.set_theme(true);
+  render(session);
+  const flipped = wasm.memory.buffer.byteLength - baseline;
+  console.log(`memory: ${(flipped / MIB).toFixed(1)} MiB over the classic baseline after 40 more rotations with the theme flipped every third`);
+  assert.ok(flipped <= budget, `rotations with theme flips take ${(flipped / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
   session.free();
 }
 
-// Then a live desktop resize from 1400 × 900 to the 5.5 Mpx limit (2880 × 1910 @1) in 60 steps,
-// then back and forth, as the page would drive it without its resize debounce: the classic
-// baseline plus the modern buffers, which spec §14 holds to 96 MiB with the RGBA canvas.
+// Then the stepped live resize (steppedResize): the classic baseline plus the modern buffers,
+// which spec §14 holds to 96 MiB with the RGBA canvas.
 {
   const budget = 96 * MIB;
   const session = new Session();
   session.select(1, undefined, undefined);
   render(session);
   session.set_look(Look.Modern);
-  const step = (t) => {
-    session.resize(Math.round(1400 + 1480 * t), Math.round(900 + 1010 * t), 1, [0, 0, 0, 0], false);
-    render(session);
-  };
-  for (let k = 0; k <= 60; k++) step(k / 60);
-  for (let k = 0; k <= 120; k++) step((Math.cos(k / 7) + 1) / 2);
-  step(1);
+  steppedResize(session);
   const used = wasm.memory.buffer.byteLength - baseline;
   console.log(`memory: ${(used / MIB).toFixed(1)} MiB over the classic baseline (${(baseline / MIB).toFixed(1)} MiB) after a stepped live resize`);
   assert.ok(used <= budget, `a stepped live resize takes ${(used / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
+
+  // Ruling L2: 10 in-place flips at the web reference size, after the stepped resize: <= 96 MiB.
+  session.resize(2450, 1671, 1.75, [0, 0, 0, 0], false);
+  render(session);
+  for (let k = 0; k < 10; k++) {
+    session.set_theme(k % 2 === 1);
+    render(session);
+  }
+  const desk = wasm.memory.buffer.byteLength - baseline;
+  console.log(`memory: ${(desk / MIB).toFixed(1)} MiB over the classic baseline after 10 desktop theme flips`);
+  assert.ok(desk <= budget, `desktop theme flips take ${(desk / MIB).toFixed(1)} MiB, over ${budget / MIB}`);
   session.free();
 }
 
@@ -153,7 +219,7 @@ const lightRepainted = (session) => {
 // moves and turns have swept (a cue of SWEEP_FRAMES frames or more: beams swept on, or a target
 // lit and burst; a piece that only moves, as on C4's level 21, unblocks the beams it leaves).
 // Pushes those cues' frame times onto `into` and returns how many swept.
-function driveSweeps(session, into) {
+function driveSweeps(session, into, dark) {
   const lifts = ([x, y]) => {
     session.pointer_down(x, y, 0, false, false, false);
     session.pointer_move(x + 30, y + 30);
@@ -169,10 +235,14 @@ function driveSweeps(session, into) {
     const width = session.canvas_width();
     const rgba = new Uint8Array(wasm.memory.buffer, session.rgba_ptr(), width * session.canvas_height() * 4);
     const cells = [];
+    // Dark: lit is bright at the centre. Light: the page is bright everywhere, so lit is a beam's
+    // pure white core (the wash tops out near 250) or its saturated colour (far from grey).
     for (let i = 0; i < 225; i++) {
       const [x, y] = boardCell(i);
       const at = (y * width + x) * 4;
-      if (Math.max(rgba[at], rgba[at + 1], rgba[at + 2]) >= 96) cells.push(i);
+      const c = [rgba[at], rgba[at + 1], rgba[at + 2]];
+      const lit = dark ? Math.max(...c) >= 96 : Math.min(...c) >= 253 || Math.max(...c) - Math.min(...c) >= 120;
+      if (lit) cells.push(i);
     }
     return cells;
   };
@@ -229,10 +299,12 @@ function driveSweeps(session, into) {
   return swept;
 }
 
+const THEMES = [["dark", true], ["light", false]];
 const rows = [];
-for (const game of [1, 2, 3, 4]) {
+for (const [theme, dark] of THEMES) for (const game of [1, 2, 3, 4]) {
   for (const slot of [0, 20, 41]) {
     const session = new Session();
+    session.set_theme(dark);
     session.select(game, undefined, undefined);
     const [cheat, ctrl] = CHEATS[game];
     while (session.slot() < slot) {
@@ -349,8 +421,8 @@ for (const game of [1, 2, 3, 4]) {
     // Sweeps, driven (as the bench's `sweep_frames`): the carried pieces' turns above seldom
     // change the beams, so tray pieces are dropped onto the board's lit cells and turned until
     // SWEEP_TURNS turns have swept; every frame of those turns' cues is a sweep frame.
-    const drivenSweeps = driveSweeps(session, sweeps);
-    assert.ok(drivenSweeps >= SWEEP_TURNS, `game ${game} slot ${slot}: only ${drivenSweeps} turns swept`);
+    const drivenSweeps = driveSweeps(session, sweeps, dark);
+    assert.ok(drivenSweeps >= SWEEP_TURNS, `${theme} game ${game} slot ${slot}: only ${drivenSweeps} turns swept`);
     // The pieces back in the tray, the restart's cue run out: the wins below start from rest.
     session.key("r", false, false, false);
     render(session);
@@ -374,7 +446,7 @@ for (const game of [1, 2, 3, 4]) {
     // A carried piece whose turns change no beam and show no turn animates nothing: no rotations'
     // row (as the bench's `sweep_frames`, ruling F12). Every row has sweeps (driveSweeps).
     const animated = anims.length > 0;
-    rows.push({ name: `C${game} slot ${slot}`, cold: Math.min(...colds), coldResize: Math.min(...coldsWithResize), edit: Math.min(...editRuns), drag: median(drags), tray: Math.min(...trayDrops), win: Math.min(...wins), firstWin: wins[0], anim: animated ? p90(anims) : null, animMax: animated ? Math.max(...anims) : null, animFrames: anims.length, sweep: p90(sweeps), sweepMax: Math.max(...sweeps), sweepFrames: sweeps.length, winAnim: p90(winAnims), winAnimMax: Math.max(...winAnims), winAnimFrames: winAnims.length });
+    rows.push({ name: `${theme} C${game} slot ${slot}`, cold: Math.min(...colds), coldResize: Math.min(...coldsWithResize), edit: Math.min(...editRuns), drag: median(drags), tray: Math.min(...trayDrops), win: Math.min(...wins), firstWin: wins[0], anim: animated ? p90(anims) : null, animMax: animated ? Math.max(...anims) : null, animFrames: anims.length, sweep: p90(sweeps), sweepMax: Math.max(...sweeps), sweepFrames: sweeps.length, winAnim: p90(winAnims), winAnimMax: Math.max(...winAnims), winAnimFrames: winAnims.length });
     session.free();
   }
 }
@@ -384,12 +456,13 @@ for (const game of [1, 2, 3, 4]) {
 // wins it: the board, its light and the card (YOU WIN! and Next ▶) repaint in that one frame,
 // timed REPEATS times and judged by the best, against the edit budget.
 const winningDrops = [];
-for (const game of [1, 2, 3, 4]) {
+for (const [theme, dark] of THEMES) for (const game of [1, 2, 3, 4]) {
   const dir = join(solutionsDir, `game${game}`);
   for (const file of readdirSync(dir).filter((f) => /^level-\d\d\.txt$/.test(f)).sort()) {
     const slot = Number(file.slice(6, 8)) - 1;
     const solution = readFileSync(join(dir, file), "utf8").trim();
     const session = new Session();
+    session.set_theme(dark);
     session.select(game, undefined, undefined);
     const [cheat, ctrl] = CHEATS[game];
     while (session.slot() < slot) {
@@ -450,7 +523,7 @@ for (const game of [1, 2, 3, 4]) {
       assert.ok(session.won(), `game ${game} slot ${slot}: the drop wins`);
       drops.push(timed(() => render(session)));
     }
-    winningDrops.push({ name: `C${game} slot ${slot}`, drop: Math.min(...drops), median: median(drops) });
+    winningDrops.push({ name: `${theme} C${game} slot ${slot}`, drop: Math.min(...drops), median: median(drops) });
     session.free();
   }
 }
@@ -464,12 +537,13 @@ const SHEET_SIZES = [
 ];
 const sheetRows = [];
 const resizeRows = [];
-for (const game of [1, 2, 3, 4]) {
+for (const [theme, dark] of THEMES) for (const game of [1, 2, 3, 4]) {
   const session = new Session();
+  session.set_theme(dark);
   session.select(game, undefined, undefined);
   session.set_look(Look.Modern);
   for (const [width, height, scale, touch] of SHEET_SIZES) {
-    const name = `C${game} at ${width} × ${height} @${scale}${touch ? " touch" : ""}`;
+    const name = `${theme} C${game} at ${width} × ${height} @${scale}${touch ? " touch" : ""}`;
     session.resize(width, height, scale, [0, 0, 0, 0], touch);
     render(session);
     assert.ok(!session.has_inline_picker(), `${name}: a sheet picker`);
@@ -496,7 +570,7 @@ for (const game of [1, 2, 3, 4]) {
       }),
     );
   }
-  resizeRows.push({ name: `C${game} slot 0`, best: Math.min(...resizes), typical: median(resizes) });
+  resizeRows.push({ name: `${theme} C${game} slot 0`, best: Math.min(...resizes), typical: median(resizes) });
   session.free();
 }
 
@@ -504,8 +578,9 @@ for (const game of [1, 2, 3, 4]) {
 // its first frame (the old board kept, the new one painted whole; held to the cold cap), then its
 // cross-fade's and sweep's frames (the animation cap), then `-` back to slot 0, past the clock.
 const levelRows = [];
-for (const game of [1, 2, 3, 4]) {
+for (const [theme, dark] of THEMES) for (const game of [1, 2, 3, 4]) {
   const session = new Session();
+  session.set_theme(dark);
   session.select(game, undefined, undefined);
   session.set_look(Look.Modern);
   session.resize(WIDTH, HEIGHT, SCALE, [0, 0, 0, 0], false);
@@ -524,7 +599,7 @@ for (const game of [1, 2, 3, 4]) {
     render(session);
   }
   assert.ok(levelAnims.length > 0, `game ${game}: the level changes animate`);
-  levelRows.push({ name: `C${game} slot 0 → 1`, levelFirst: Math.min(...firsts), levelAnim: p90(levelAnims), levelAnimMax: Math.max(...levelAnims), levelAnimFrames: levelAnims.length });
+  levelRows.push({ name: `${theme} C${game} slot 0 → 1`, levelFirst: Math.min(...firsts), levelAnim: p90(levelAnims), levelAnimMax: Math.max(...levelAnims), levelAnimFrames: levelAnims.length });
   session.free();
 }
 
@@ -545,6 +620,18 @@ for (const { name, best, typical } of resizeRows) {
 }
 for (const { name, levelFirst, levelAnim, levelAnimMax, levelAnimFrames } of levelRows) {
   console.log(`${name} at ${WIDTH} × ${HEIGHT} @${SCALE}: level change first frame ${levelFirst.toFixed(1)} ms, level anim p90 ${levelAnim.toFixed(1)} ms (worst ${levelAnimMax.toFixed(1)} ms, ${levelAnimFrames} frames)`);
+}
+// Ruling L11: each light row against its dark twin; > 1.15 is recorded for phase 6, not failed.
+const twin = (name) => name.replace(/^light /, "dark ");
+for (const list of [rows, winningDrops, sheetRows, levelRows]) {
+  for (const row of list.filter((r) => r.name.startsWith("light "))) {
+    const dark = list.find((r) => r.name === twin(row.name));
+    for (const key of ["cold", "edit", "drag", "anim", "sweep", "winAnim", "drop", "open", "sheetAnim", "levelFirst", "levelAnim"]) {
+      if (typeof row[key] !== "number" || typeof dark?.[key] !== "number" || dark[key] <= 0) continue;
+      const ratio = row[key] / dark[key];
+      console.log(`light/dark ${row.name.slice(6)} ${key}: ${ratio.toFixed(2)}${ratio > 1.15 ? " (over 1.15: recorded for phase 6)" : ""}`);
+    }
+  }
 }
 if (!TIMING) {
   console.log("timing skipped on CI (budgets assert on local runs only)");

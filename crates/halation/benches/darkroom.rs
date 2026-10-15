@@ -9,7 +9,9 @@
 //! fresh, and back onto it solved) against the cold ones; a drop onto a tray slot, a rotation
 //! (its cue's first frame), a win, opening the level sheet and the board light's develop (whole,
 //! and by patches after one cell changed) are reported without a budget. Every other row paints
-//! settled. Exits non-zero if a budget is exceeded or a row that must run cannot.
+//! settled. Every gated row runs in both themes at the same cap, and the light/dark ratio of each
+//! is printed (over 1.15 is recorded for phase 6, not failed). Exits non-zero if a budget is
+//! exceeded or a row that must run cannot.
 
 use std::{
     hint::black_box,
@@ -127,6 +129,86 @@ fn per_call(batches: usize, calls: u32, mut f: impl FnMut()) -> Duration {
         .collect();
     times.sort();
     times[times.len() / 2]
+}
+
+/// A light row slower than this times its dark twin is recorded for phase 6 (spec revision
+/// "phase-5 light theme"), not failed.
+const RATIO_NOTE: f64 = 1.15;
+/// Dark rows faster than this give no meaningful light/dark ratio.
+const RATIO_FLOOR: Duration = Duration::from_micros(1);
+
+fn tag(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Dark => "[dark]",
+        Theme::Light => "[light]",
+    }
+}
+
+/// Every gated row of both themes: each checked at its cap (a light row at its dark twin's), and
+/// kept to report each light row's ratio to its dark twin.
+#[derive(Default)]
+struct Ledger {
+    rows: Vec<(Theme, String, Duration)>,
+}
+
+impl Ledger {
+    fn check(&mut self, theme: Theme, name: &str, took: Duration, budget: Duration) -> bool {
+        self.rows.push((theme, name.to_owned(), took));
+        check(&format!("{} {name}", tag(theme)), took, budget)
+    }
+
+    /// `check_sweep`'s rows (a p90 of frames), kept the same way.
+    fn check_sweep(
+        &mut self,
+        theme: Theme,
+        name: &str,
+        frames: Option<Vec<Duration>>,
+        budget: Duration,
+    ) -> bool {
+        let frames = frames.map(|mut f| {
+            f.sort();
+            f
+        });
+        // Sorted here, not copied (review T11 M4): the p90 is read off it, and `check_sweep`'s
+        // `p90` finds it sorted.
+        if let Some(p) = frames.as_ref().and_then(|f| f.get(f.len() * 9 / 10)) {
+            self.rows.push((theme, name.to_owned(), *p));
+        }
+        check_sweep(&format!("{} {name}", tag(theme)), frames, budget)
+    }
+
+    fn ratios(&self) {
+        let mut noted = Vec::new();
+        for (theme, name, light) in &self.rows {
+            if *theme != Theme::Light {
+                continue;
+            }
+            let dark = self
+                .rows
+                .iter()
+                .find(|(t, n, _)| *t == Theme::Dark && n == name);
+            let Some((_, _, dark)) = dark else { continue };
+            let ratio = light.as_secs_f64() / dark.as_secs_f64().max(1e-12);
+            // Rows under RATIO_FLOOR (the arranges, tens of ns) are timer noise: shown, not
+            // noted (review T11 M2).
+            if *dark < RATIO_FLOOR {
+                println!("light/dark {name}: {ratio:.2} (under {RATIO_FLOOR:?}: noise)");
+                continue;
+            }
+            println!("light/dark {name}: {ratio:.2}");
+            if ratio > RATIO_NOTE {
+                noted.push(format!("{name}: {ratio:.2}"));
+            }
+        }
+        if noted.is_empty() {
+            println!("light/dark: every row within {RATIO_NOTE}");
+        } else {
+            println!("light/dark over {RATIO_NOTE} (recorded for phase 6, not failed):");
+            for n in noted {
+                println!("  {n}");
+            }
+        }
+    }
 }
 
 fn check(name: &str, took: Duration, budget: Duration) -> bool {
@@ -448,9 +530,9 @@ fn win(lightbox: &mut Lightbox, state: &mut GameState, out: &mut [u32]) -> Optio
 /// an inline picker, this a sheet): the whole canvas recomposed with the sheet drawn over it,
 /// reported without a budget (the web's time is gated with `Session::command`); and its opening
 /// and closing animation frames (`sheet_frames`).
-fn sheet_open(state: &GameState, clock: &mut f64) -> (Duration, Vec<Duration>) {
+fn sheet_open(state: &GameState, clock: &mut f64, theme: Theme) -> (Duration, Vec<Duration>) {
     let easel = Easel::new(1600, 1200, 2.0);
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut lightbox = Lightbox::new(easel, theme, false);
     let mut out = vec![0u32; 1600 * 1200];
     lightbox.paint(state, SETTLED, Output::Xrgb(&mut out));
     let mut times: Vec<Duration> = (0..21)
@@ -494,9 +576,9 @@ fn sheet_frames(
 /// The board light's develop at `easel`, per call: whole, and by patches after one cell's light
 /// changed (the board's centre cell; `develop_patches` adds its glow and bloom windows). Reported
 /// without a budget.
-fn light_develops(state: &GameState, easel: Easel) -> (Duration, Duration) {
+fn light_develops(state: &GameState, easel: Easel, theme: Theme) -> (Duration, Duration) {
     let tableau = Tableau::arrange(&easel);
-    let palette = Theme::Dark.palette();
+    let palette = theme.palette();
     let mut room = Darkroom::new(&tableau, palette);
     room.paint_all(&tableau, palette, &Scene::of(state));
     let cell = [tableau.cell_rect(board_index(7, 7))];
@@ -509,9 +591,16 @@ fn light_develops(state: &GameState, easel: Easel) -> (Duration, Duration) {
     (whole, patched)
 }
 
-fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> bool {
+fn bench_level(
+    criterion: &mut Criterion,
+    ledger: &mut Ledger,
+    theme: Theme,
+    label: &str,
+    mut state: GameState,
+) -> bool {
     let easel = Easel::new(WIDTH as u32, HEIGHT as u32, 2.0);
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut lightbox = Lightbox::new(easel, theme, false);
+    let t = tag(theme);
     let mut outs = outputs(WIDTH, HEIGHT);
     let mut phone_outs = outputs(PHONE_WIDTH, PHONE_HEIGHT);
     let arrange_name = format!("{label}: arrange 1280×800@2");
@@ -521,11 +610,11 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
     let first_name = format!("{label}: cold paint 2560×1600 (cell-changing resize)");
     let phone_first_name = format!("{label}: cold paint 780×1480 (phone, cell-changing resize)");
     let drag_name = format!("{label}: drag frame 2560×1600");
-    criterion.bench_function(&arrange_name, |b| {
+    criterion.bench_function(&format!("{t} {arrange_name}"), |b| {
         b.iter(|| Tableau::arrange(black_box(&easel)))
     });
     let mut desk = cold(WIDTH, HEIGHT, false);
-    criterion.bench_function(&cold_name, |b| {
+    criterion.bench_function(&format!("{t} {cold_name}"), |b| {
         b.iter(|| desk(&mut lightbox, &state, &mut outs))
     });
     // Arrange takes tens of ns: 100k calls make each batch about 1 ms or more.
@@ -547,12 +636,12 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
         lightbox.reset();
         lightbox.paint(state, SETTLED, Output::Xrgb(out));
     };
-    criterion.bench_function(&level_name, |b| {
+    criterion.bench_function(&format!("{t} {level_name}"), |b| {
         b.iter(|| level(&mut lightbox, &state, &mut out))
     });
     let level_time = per_call(11, 6, || level(&mut lightbox, &state, &mut out));
     let mut phone = cold(PHONE_WIDTH, PHONE_HEIGHT, true);
-    criterion.bench_function(&phone_name, |b| {
+    criterion.bench_function(&format!("{t} {phone_name}"), |b| {
         b.iter(|| phone(&mut lightbox, &state, &mut phone_outs))
     });
     let phone_time = per_call(11, 6, || phone(&mut lightbox, &state, &mut phone_outs));
@@ -571,8 +660,8 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
     lightbox.resize(easel);
     lightbox.paint(&state, SETTLED, Output::Xrgb(&mut out));
     match tray_drop(&mut lightbox, &mut state, &mut out) {
-        Some(took) => println!("{label}: tray drop 2560×1600: {took:?} (reported, no budget)"),
-        None => println!("{label}: tray drop 2560×1600: no piece to drop"),
+        Some(took) => println!("{t} {label}: tray drop 2560×1600: {took:?} (reported, no budget)"),
+        None => println!("{t} {label}: tray drop 2560×1600: no piece to drop"),
     }
     let mut clock = 0.0;
     let mut turns: Vec<Duration> = (0..21)
@@ -580,8 +669,8 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
         .collect();
     turns.sort();
     match turns.get(turns.len() / 2) {
-        Some(took) => println!("{label}: rotation 2560×1600: {took:?} (reported)"),
-        None => println!("{label}: rotation 2560×1600: no board piece to turn"),
+        Some(took) => println!("{t} {label}: rotation 2560×1600: {took:?} (reported)"),
+        None => println!("{t} {label}: rotation 2560×1600: no board piece to turn"),
     }
     // A drag: pick up the first movable piece, then wiggle between two points over the board.
     let tableau = lightbox.tableau().clone();
@@ -619,7 +708,7 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
         );
         lightbox.paint(state, SETTLED, Output::Xrgb(out));
     };
-    criterion.bench_function(&drag_name, |bench| {
+    criterion.bench_function(&format!("{t} {drag_name}"), |bench| {
         bench.iter(|| drag(&mut lightbox, &mut state, &mut out))
     });
     let drag_time = per_call(21, 50, || drag(&mut lightbox, &mut state, &mut out));
@@ -666,64 +755,87 @@ fn bench_level(criterion: &mut Criterion, label: &str, mut state: GameState) -> 
     let solved_name = format!("{label}: level change onto it solved, first frame 2560×1600");
     let solved = solved_level_first(&mut lightbox, &mut state, &mut out, &mut clock);
     match win(&mut lightbox, &mut state, &mut out) {
-        Some(took) => println!("{label}: win 2560×1600: {took:?} (reported, no budget)"),
-        None => println!("{label}: win 2560×1600: the cheat key does not win"),
+        Some(took) => println!("{t} {label}: win 2560×1600: {took:?} (reported, no budget)"),
+        None => println!("{t} {label}: win 2560×1600: the cheat key does not win"),
     }
-    let (sheet_first, sheet) = sheet_open(&state, &mut clock);
-    println!("{label}: sheet open frame 1600×1200@2: {sheet_first:?} (reported, no budget)");
+    let (sheet_first, sheet) = sheet_open(&state, &mut clock, theme);
+    println!("{t} {label}: sheet open frame 1600×1200@2: {sheet_first:?} (reported, no budget)");
     let sheet_name = format!("{label}: animation frame 1600×1200@2 (sheet, p90)");
     for (size, easel) in [("2560×1600", easel), ("780×1480 (phone)", phone)] {
-        let (whole, patched) = light_develops(&state, easel);
+        let (whole, patched) = light_develops(&state, easel, theme);
         println!(
-            "{label}: light develop {size}: whole {whole:?}, one cell by patches {patched:?} \
+            "{t} {label}: light develop {size}: whole {whole:?}, one cell by patches {patched:?} \
              (reported, no budget)"
         );
     }
-    check(&arrange_name, arrange, ARRANGE_BUDGET)
-        & check(&reach_name, reach, REACH_BUDGET)
-        & check(&cold_name, cold_time, COLD_BUDGET)
-        & check(&level_name, level_time, COLD_BUDGET)
-        & check(&phone_name, phone_time, PHONE_COLD_BUDGET)
-        & check(&first_name, first_time, COLD_BUDGET)
-        & check(&phone_first_name, phone_first_time, PHONE_COLD_BUDGET)
-        & check(&drag_name, drag_time, DRAG_BUDGET)
-        & check_sweep(&anim_name, anim, ANIM_BUDGET)
-        & check_sweep(&phone_anim_name, phone_anim, PHONE_ANIM_BUDGET)
-        & check_sweep(&burst_name, burst, ANIM_BUDGET)
-        & check_sweep(&phone_burst_name, phone_burst, PHONE_ANIM_BUDGET)
-        & check_sweep(&win_name, win_anim, ANIM_BUDGET)
-        & check_sweep(&phone_win_name, phone_win, PHONE_ANIM_BUDGET)
-        & check_sweep(&sheet_name, Some(sheet), ANIM_BUDGET)
-        & check_sweep(&phone_sheet_name, Some(phone_sheet), PHONE_ANIM_BUDGET)
+    ledger.check(theme, &arrange_name, arrange, ARRANGE_BUDGET)
+        & ledger.check(theme, &reach_name, reach, REACH_BUDGET)
+        & ledger.check(theme, &cold_name, cold_time, COLD_BUDGET)
+        & ledger.check(theme, &level_name, level_time, COLD_BUDGET)
+        & ledger.check(theme, &phone_name, phone_time, PHONE_COLD_BUDGET)
+        & ledger.check(theme, &first_name, first_time, COLD_BUDGET)
+        & ledger.check(
+            theme,
+            &phone_first_name,
+            phone_first_time,
+            PHONE_COLD_BUDGET,
+        )
+        & ledger.check(theme, &drag_name, drag_time, DRAG_BUDGET)
+        & ledger.check_sweep(theme, &anim_name, anim, ANIM_BUDGET)
+        & ledger.check_sweep(theme, &phone_anim_name, phone_anim, PHONE_ANIM_BUDGET)
+        & ledger.check_sweep(theme, &burst_name, burst, ANIM_BUDGET)
+        & ledger.check_sweep(theme, &phone_burst_name, phone_burst, PHONE_ANIM_BUDGET)
+        & ledger.check_sweep(theme, &win_name, win_anim, ANIM_BUDGET)
+        & ledger.check_sweep(theme, &phone_win_name, phone_win, PHONE_ANIM_BUDGET)
+        & ledger.check_sweep(theme, &sheet_name, Some(sheet), ANIM_BUDGET)
+        & ledger.check_sweep(
+            theme,
+            &phone_sheet_name,
+            Some(phone_sheet),
+            PHONE_ANIM_BUDGET,
+        )
         & check_level(
+            ledger,
+            theme,
             (&level_first_name, &level_anim_name),
             level,
             (COLD_BUDGET, ANIM_BUDGET),
         )
         & check_level(
+            ledger,
+            theme,
             (&phone_level_first_name, &phone_level_name),
             phone_level,
             (PHONE_COLD_BUDGET, PHONE_ANIM_BUDGET),
         )
-        & check_ran(&solved_name, solved, COLD_BUDGET)
-        & check_ran(&phone_solved_name, phone_solved, PHONE_COLD_BUDGET)
+        & check_ran(ledger, theme, &solved_name, solved, COLD_BUDGET)
+        & check_ran(
+            ledger,
+            theme,
+            &phone_solved_name,
+            phone_solved,
+            PHONE_COLD_BUDGET,
+        )
 }
 
 /// Checks a level change's first frame and its animation frames against `budgets`; a level the
 /// walk cannot reach fails the gate (a regression in the cheat key, unlocking or `=`).
 fn check_level(
+    ledger: &mut Ledger,
+    theme: Theme,
     (first_name, anim_name): (&str, &str),
     level: Option<(Duration, Vec<Duration>)>,
     (first_budget, anim_budget): (Duration, Duration),
 ) -> bool {
     match level {
         Some((first, frames)) => {
-            check(first_name, first, first_budget)
-                & check_sweep(anim_name, Some(frames), anim_budget)
+            ledger.check(theme, first_name, first, first_budget)
+                & ledger.check_sweep(theme, anim_name, Some(frames), anim_budget)
         }
         None => {
             println!(
-                "{first_name}: the level cannot be reached (FAILED: the walk should reach it)"
+                "{} {first_name}: the level cannot be reached (FAILED: the walk should reach it)",
+                tag(theme)
             );
             false
         }
@@ -731,11 +843,20 @@ fn check_level(
 }
 
 /// Checks a first frame row that must have run (`None` means its setup failed: a regression).
-fn check_ran(name: &str, took: Option<Duration>, budget: Duration) -> bool {
+fn check_ran(
+    ledger: &mut Ledger,
+    theme: Theme,
+    name: &str,
+    took: Option<Duration>,
+    budget: Duration,
+) -> bool {
     match took {
-        Some(took) => check(name, took, budget),
+        Some(took) => ledger.check(theme, name, took, budget),
         None => {
-            println!("{name}: did not run (FAILED: the level did not open solved)");
+            println!(
+                "{} {name}: did not run (FAILED: the level did not open solved)",
+                tag(theme)
+            );
             false
         }
     }
@@ -777,7 +898,7 @@ fn solved_level_first(
     Some(times[times.len() / 2])
 }
 
-fn bench_game(criterion: &mut Criterion, game: Game) -> bool {
+fn bench_game(criterion: &mut Criterion, ledger: &mut Ledger, game: Game, theme: Theme) -> bool {
     let data = spectrograph::decode(game, &game.read_original().unwrap()).unwrap();
     let densest = pick(&data, |b| {
         b.cells[..BOARD_CELLS]
@@ -793,12 +914,16 @@ fn bench_game(criterion: &mut Criterion, game: Game) -> bool {
     });
     let mut ok = bench_level(
         criterion,
+        ledger,
+        theme,
         &format!("{game}, densest (slot {densest})"),
         solved(&data, densest),
     );
     if walliest != densest {
         ok &= bench_level(
             criterion,
+            ledger,
+            theme,
             &format!("{game}, most walls (slot {walliest})"),
             solved(&data, walliest),
         );
@@ -812,11 +937,15 @@ fn main() -> ExitCode {
         .sample_size(10)
         .warm_up_time(Duration::from_secs(1))
         .measurement_time(Duration::from_secs(3));
+    let mut ledger = Ledger::default();
     let mut ok = true;
     for game in Game::ALL {
-        ok &= bench_game(&mut criterion, game);
+        for theme in Theme::ALL {
+            ok &= bench_game(&mut criterion, &mut ledger, game, theme);
+        }
     }
     criterion.final_summary();
+    ledger.ratios();
     if ok {
         ExitCode::SUCCESS
     } else {

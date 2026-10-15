@@ -66,17 +66,17 @@ shot game level solution="":
         cargo run --quiet -p lumen --features cli -- shot {{game}} {{level}} "$out/chromatron{{game}}-level{{level}}.png"
     fi
 
-# Render one level in the modern look to dist/shots-modern/ for review: optionally solved (stored, or a copied solution), at an easel (WxH@S), with the level sheet open (sheet=1) or on a touch layout (touch=1)
-shot-modern game level solution="" easel="1280x800@2" sheet="" touch="":
+# Render one level in the modern look to dist/shots-modern/ for review: optionally solved (stored, or a copied solution), at an easel (WxH@S), with the level sheet open (sheet=1) or on a touch layout (touch=1), in a theme (theme=light)
+shot-modern game level solution="" easel="1280x800@2" sheet="" touch="" theme="":
     #!/usr/bin/env bash
     set -euo pipefail
     out="{{justfile_directory()}}/dist/shots-modern"
     mkdir -p "$out"
-    png="$out/chromatron{{game}}-level{{level}}{{ if solution == "" { "" } else { "-solved" } }}{{ if sheet == "" { "" } else { "-sheet" } }}{{ if touch == "" { "" } else { "-touch" } }}-{{easel}}.png"
-    cargo run --quiet --release -p halation --features cli -- shot {{game}} {{level}} "$png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} {{ if sheet == "" { "" } else { "--sheet" } }} {{ if touch == "" { "" } else { "--touch" } }}
+    png="$out/chromatron{{game}}-level{{level}}{{ if solution == "" { "" } else { "-solved" } }}{{ if sheet == "" { "" } else { "-sheet" } }}{{ if touch == "" { "" } else { "-touch" } }}{{ if theme == "" { "" } else { "-" + theme } }}-{{easel}}.png"
+    cargo run --quiet --release -p halation --features cli -- shot {{game}} {{level}} "$png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} {{ if sheet == "" { "" } else { "--sheet" } }} {{ if touch == "" { "" } else { "--touch" } }} {{ if theme == "" { "" } else { "--theme " + theme } }}
 
-# Render frames of a cue in the modern look to dist/shots-motion/ for review: cue is turn:<cell>, move:<from>,<to>, lift:<from>,<to>, win, level or sheet (cells: 0–224 board, 225– tray); one PNG per time in `at` (ms after the cue); with `sheet`, from the level sheet open (so `sheet` closes it)
-shot-motion game level cue at="0 50 100 200 400 800" solution="stored" easel="1280x800@2" touch="" sheet="":
+# Render frames of a cue in the modern look to dist/shots-motion/ for review: cue is turn:<cell>, move:<from>,<to>, lift:<from>,<to>, win, level or sheet (cells: 0–224 board, 225– tray); one PNG per time in `at` (ms after the cue); with `sheet`, from the level sheet open (so `sheet` closes it); in a theme (theme=light)
+shot-motion game level cue at="0 50 100 200 400 800" solution="stored" easel="1280x800@2" touch="" sheet="" theme="":
     #!/usr/bin/env bash
     set -euo pipefail
     out="{{justfile_directory()}}/dist/shots-motion"
@@ -84,13 +84,13 @@ shot-motion game level cue at="0 50 100 200 400 800" solution="stored" easel="12
     cargo build --quiet --release -p halation --features cli
     name="$(printf '%s' "{{cue}}" | tr ':,' '--'){{ if sheet == "" { "" } else { "-from-sheet" } }}"
     for t in {{at}}; do
-        "{{justfile_directory()}}/target/release/halation" shot {{game}} {{level}} "$out/c{{game}}-l{{level}}-$name-${t}ms-{{easel}}.png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} --cue {{cue}} --at "$t" {{ if touch == "" { "" } else { "--touch" } }} {{ if sheet == "" { "" } else { "--sheet" } }}
+        "{{justfile_directory()}}/target/release/halation" shot {{game}} {{level}} "$out/c{{game}}-l{{level}}-$name-${t}ms{{ if theme == "" { "" } else { "-" + theme } }}-{{easel}}.png" {{ if solution == "" { "" } else { quote(solution) } }} --easel {{easel}} --cue {{cue}} --at "$t" {{ if touch == "" { "" } else { "--touch" } }} {{ if sheet == "" { "" } else { "--sheet" } }} {{ if theme == "" { "" } else { "--theme " + theme } }}
     done
 
-# Render the synthetic pieces sheet (every kind, colour and direction) in the modern look to dist/shots-modern/
-shot-pieces easel="1280x800@2":
+# Render the synthetic pieces sheet (every kind, colour and direction) in the modern look to dist/shots-modern/, in a theme (theme=light)
+shot-pieces easel="1280x800@2" theme="":
     mkdir -p "{{justfile_directory()}}/dist/shots-modern"
-    cargo run --quiet --release -p halation --features cli -- pieces "{{justfile_directory()}}/dist/shots-modern/pieces-{{easel}}" --easel {{easel}}
+    cargo run --quiet --release -p halation --features cli -- pieces "{{justfile_directory()}}/dist/shots-modern/pieces{{ if theme == "" { "" } else { "-" + theme } }}-{{easel}}" --easel {{easel}} {{ if theme == "" { "" } else { "--theme " + theme } }}
 
 # Benchmark the engine (trace, classic render), the modern look (arrange, cold paint, drag) and the macOS captions on real levels of every game; fails if over the spec's budgets
 bench:
@@ -148,6 +148,7 @@ web-serve port="8000": web
 web-check: web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_check.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
     node "{{justfile_directory()}}/crates/chromatron-web/tests/touch_layout_check.mjs" "{{justfile_directory()}}/dist/web"
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/lightbox_budgets.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions" light-memory
     node "{{justfile_directory()}}/crates/chromatron-web/tests/lightbox_budgets.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
 
 # Build dist/web/ and photograph it in headless Google Chrome (both looks; phone portrait and landscape, small phones, desktop) into <dir> (relative to the repo; default dist/web-shots, git-ignored), checking each view; local only, needs Chrome
@@ -191,10 +192,10 @@ trailer-sheet dir:
 run game:
     cargo run --release --bin chromatron{{game}}
 
-# Write a game's snapshot to a PNG, then quit (game: 1-4; level: strip number 1-50; solution: `stored` or copied text such as 3-17-hODwhH, pasted first; look: modern, painted offscreen at size WxH@S with its captions, or classic, the window's first presented frame)
-snapshot game png level="1" solution="" look="modern" size="1280x800@2":
+# Write a game's snapshot to a PNG, then quit (game: 1-4; level: strip number 1-50; solution: `stored` or copied text such as 3-17-hODwhH, pasted first; look: modern, painted offscreen at size WxH@S with its captions, or classic, the window's first presented frame; theme: dark or light, the modern look's)
+snapshot game png level="1" solution="" look="modern" size="1280x800@2" theme="dark":
     cargo build --release --quiet --bin chromatron{{game}}
-    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" CHROMATRON_LOOK="{{look}}" CHROMATRON_SNAPSHOT_SIZE="{{ if look == "classic" { "" } else { size } }}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
+    CHROMATRON_SNAPSHOT="{{join(invocation_directory(), png)}}" CHROMATRON_SNAPSHOT_LEVEL="{{level}}" CHROMATRON_SNAPSHOT_SOLUTION="{{solution}}" CHROMATRON_LOOK="{{look}}" CHROMATRON_SNAPSHOT_SIZE="{{ if look == "classic" { "" } else { size } }}" CHROMATRON_THEME="{{theme}}" perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron{{game}}"
     @sips -g pixelWidth -g pixelHeight "{{join(invocation_directory(), png)}}" | tail -n 2
 
 # Open a game's window and present the whole canvas `frames` times (switching look half way when `switch` is set), then print the present's p50/p90/max, the surfaces' memory and a read-back check, and quit (look: modern or classic; size: a modern window's WxH in pt, such as 2560x1400, else the default; damage: set to present only the stage's damage while the level's solution is pasted and reset, at the cues' own pace); never touches saves or preferences; local only, needs a display (spec §14 "Present")
@@ -213,7 +214,7 @@ screenshots-modern dir=(justfile_directory() / "assets/screenshots"):
     for shot in 1:46 2:22 3:41 4:21; do
         game="${shot%%:*}"
         cargo build --quiet --release --bin "chromatron$game"
-        CHROMATRON_SNAPSHOT="$tmp/$game.png" CHROMATRON_SNAPSHOT_LEVEL="${shot##*:}" CHROMATRON_SNAPSHOT_SOLUTION=stored CHROMATRON_LOOK=modern CHROMATRON_SNAPSHOT_SIZE=1280x800@1 \
+        CHROMATRON_SNAPSHOT="$tmp/$game.png" CHROMATRON_SNAPSHOT_LEVEL="${shot##*:}" CHROMATRON_SNAPSHOT_SOLUTION=stored CHROMATRON_LOOK=modern CHROMATRON_SNAPSHOT_SIZE=1280x800@1 CHROMATRON_THEME=dark \
             perl -e 'alarm shift; exec @ARGV or die "exec: $!"' 60 "{{justfile_directory()}}/target/release/chromatron$game"
         sips -s format jpeg -s formatOptions 90 "$tmp/$game.png" --out "$out/chromatron$game-modern.jpg" >/dev/null
     done

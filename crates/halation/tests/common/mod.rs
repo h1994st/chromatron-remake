@@ -54,12 +54,23 @@ pub fn state(game: Game, slot: usize, solved: bool) -> GameState<'static> {
 
 /// A fresh lightbox's first (cold) paint of `scene`.
 pub fn cold(easel: Easel, scene: Scene) -> Vec<u32> {
-    cold_with(easel, scene, false)
+    cold_in(Theme::Dark, easel, scene)
 }
 
 /// A fresh lightbox's first paint of `scene`, with the sheet open when `sheet` (and possible).
 pub fn cold_with(easel: Easel, scene: Scene, sheet: bool) -> Vec<u32> {
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    cold_with_in(Theme::Dark, easel, scene, sheet)
+}
+
+/// A fresh lightbox's first (cold) paint of `scene` in `theme`.
+pub fn cold_in(theme: Theme, easel: Easel, scene: Scene) -> Vec<u32> {
+    cold_with_in(theme, easel, scene, false)
+}
+
+/// A fresh lightbox's first paint of `scene` in `theme`, with the sheet open when `sheet` (and
+/// possible).
+pub fn cold_with_in(theme: Theme, easel: Easel, scene: Scene, sheet: bool) -> Vec<u32> {
+    let mut lightbox = Lightbox::new(easel, theme, false);
     if sheet {
         lightbox.command(halation::Control::Levels);
     }

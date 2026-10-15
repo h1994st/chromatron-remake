@@ -79,12 +79,6 @@ export function intersect(a, b) {
   return left < right && top < bottom ? { left, top, right, bottom } : null;
 }
 
-/** The look to show: `forced` (?look=) if it names one, else the stored choice, else modern. */
-export function lookFrom({ forced, stored }) {
-  if (forced === "classic" || forced === "modern") return forced;
-  return stored === "classic" ? "classic" : "modern";
-}
-
 /**
  * The safe-area insets [top, right, bottom, left] the modern canvas itself must keep clear: the
  * toolbar already covers the top (desktop, portrait) or the left (the landscape rail); in full

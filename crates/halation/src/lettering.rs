@@ -7,7 +7,7 @@ use std::f32::consts::TAU;
 
 use crate::DeviceRect;
 use crate::etch::{Blend, Paint, Pt, Shape, Stops, Target, fill, pt};
-use crate::spectrum::{Palette, Rgb, Rgba};
+use crate::spectrum::{LightMode, Palette, Rgb, Rgba};
 
 /// Every character the lettering has.
 pub const CHARSET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789·.+–×:/&!? ";
@@ -347,6 +347,33 @@ pub fn sparkle(t: &mut dyn Target, clip: DeviceRect, palette: &Palette, at: Pt, 
     }
 }
 
+/// The first `drawn` (0–1) of polyline `whole` by length, into `line` (the trailer's
+/// `drawGlyphPart` walk): how many points it holds, and how many of `whole`'s it reached whole.
+/// Summed in one order, so at 1 every corner is reached exactly.
+fn partial_path(whole: &[Pt], drawn: f32, line: &mut [Pt; MAX_SEGMENTS + 1]) -> (usize, usize) {
+    let n = whole.len();
+    let len = |j: usize| (whole[j] - whole[j - 1]).len();
+    let goal = (1..n).map(len).sum::<f32>() * drawn;
+    let mut walked = 0.0;
+    line[0] = whole[0];
+    let (mut m, mut reached) = (1, 1);
+    for j in 1..n {
+        if walked >= goal {
+            break;
+        }
+        let (a, b, l) = (whole[j - 1], whole[j], len(j));
+        line[m] = if walked + l <= goal {
+            reached += 1;
+            b
+        } else {
+            a + (b - a) * ((goal - walked) / l)
+        };
+        m += 1;
+        walked += l;
+    }
+    (m, reached)
+}
+
 /// Part of a glyph, as a beam writing it has got to (the trailer's `drawGlyphPart`): `drawn`
 /// (0–1) of each stroke's length from its start, in beams, with a sparkle (7t) at each tip; its
 /// dots fading in from 60% drawn. Over its last 20% the tips' sparkles fade out and the glints
@@ -386,27 +413,8 @@ fn beam_glyph_part(
             continue;
         }
         let n = path_points(points, closed, cap, &mut whole);
-        let len = |j: usize| (whole[j] - whole[j - 1]).len();
-        // Summed in the same order as `walked` below, so at 1 every corner is reached exactly.
-        let goal = (1..n).map(len).sum::<f32>() * drawn;
-        let mut walked = 0.0;
-        line[0] = whole[0];
         // The points drawn, and how many of them were reached whole.
-        let (mut m, mut reached) = (1, 1);
-        for j in 1..n {
-            if walked >= goal {
-                break;
-            }
-            let (a, b, l) = (whole[j - 1], whole[j], len(j));
-            line[m] = if walked + l <= goal {
-                reached += 1;
-                b
-            } else {
-                a + (b - a) * ((goal - walked) / l)
-            };
-            m += 1;
-            walked += l;
-        }
+        let (m, reached) = partial_path(&whole[..n], drawn, &mut line);
         beam_strokes(t, clip, palette, at, &line[..m], beam);
         if beam.glints && settled > 0.0 {
             // As `beam_glyph`: the path's own turns (not a closed path's repeated start).
@@ -621,6 +629,193 @@ pub fn beam_line_revealed(
     }) * cap
 }
 
+/// Ink lettering's measures (spec §10 light, ruling L6): cap height, strand width `t` (px), alpha
+/// (a fade), and whether the three strands show (caps of 12 pt and up; below, one ink stroke).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ink {
+    pub cap: f32,
+    pub t: f32,
+    pub alpha: f32,
+    pub strands: bool,
+}
+
+impl Ink {
+    pub fn new(cap_px: f32, ppp: f32, t_px: f32, alpha: f32) -> Ink {
+        Ink {
+            cap: cap_px,
+            t: t_px,
+            alpha,
+            strands: cap_px / ppp >= 12.0,
+        }
+    }
+}
+
+const INK_STRAND_ALPHA: f32 = 0.95;
+const INK_CORE_ALPHA: f32 = 0.55;
+const INK_CORE_WIDTH: f32 = 0.55;
+const INK_DOT: f32 = 1.1;
+
+/// The most segments one glyph's paths hold (`every_glyph_fits_one_ink_union` checks the
+/// charset).
+const GLYPH_SEGMENTS: usize = 4 * MAX_SEGMENTS;
+
+/// A glyph's segments (`segs`: px from `at`) in ink: each R/G/B strand multiplied as **one
+/// union** (or one ink stroke), then the ink core over them, also one union. Where a glyph's own
+/// paths cross (X, 4, A's bar) each strand is laid once, as the comp strokes one `Path2D` per
+/// line (review finding 10).
+fn ink_strokes(
+    t: &mut dyn Target,
+    clip: DeviceRect,
+    palette: &Palette,
+    at: Pt,
+    segs: &[(Pt, Pt)],
+    ink: &Ink,
+) {
+    let (w, k) = (ink.t, ink.alpha);
+    let mut shapes = [Shape::disc(pt(0.0, 0.0), 0.0); GLYPH_SEGMENTS];
+    let n = segs.len().min(GLYPH_SEGMENTS);
+    let mut union = |t: &mut dyn Target, shift: Pt, width: f32, paint: &Paint, blend: Blend| {
+        for (shape, &(a, b)) in shapes.iter_mut().zip(&segs[..n]) {
+            *shape = Shape::line(at + shift + a, at + shift + b, width);
+        }
+        fill(t, clip, &shapes[..n], paint, 1.0, blend);
+    };
+    if ink.strands {
+        for (rgb, s) in strand_colours(palette) {
+            let strand = Paint::Solid(rgb.alpha(INK_STRAND_ALPHA * k));
+            union(t, pt(s * w, s * w), 1.5 * w, &strand, Blend::Multiply);
+        }
+    } else {
+        let one = Paint::Solid(palette.text.primary.alpha(k));
+        union(t, pt(0.0, 0.0), 1.5 * w, &one, Blend::Over);
+    }
+    let core = Paint::Solid(palette.ink_core.alpha(INK_CORE_ALPHA * k));
+    union(t, pt(0.0, 0.0), INK_CORE_WIDTH * w, &core, Blend::Over);
+}
+
+/// A dot in ink: three multiplied discs (1.1t) at the strand offsets, or one ink disc.
+fn ink_dot(t: &mut dyn Target, clip: DeviceRect, palette: &Palette, c: Pt, ink: &Ink) {
+    let (w, k) = (ink.t, ink.alpha);
+    if ink.strands {
+        for (rgb, s) in strand_colours(palette) {
+            let disc = [Shape::disc(c + pt(s * w, s * w), INK_DOT * w)];
+            let paint = Paint::Solid(rgb.alpha(INK_STRAND_ALPHA * k));
+            fill(t, clip, &disc, &paint, 1.0, Blend::Multiply);
+        }
+    } else {
+        let disc = [Shape::disc(c, INK_DOT * w)];
+        let paint = Paint::Solid(palette.text.primary.alpha(k));
+        fill(t, clip, &disc, &paint, 1.0, Blend::Over);
+    }
+}
+
+/// The target O in ink: its R/G/B arcs (1.7t, the beam O's gaps) and a primary-text dot of r
+/// 0.32 × its radius (spec §10 light).
+fn ink_target_o(
+    t: &mut dyn Target,
+    clip: DeviceRect,
+    palette: &Palette,
+    centre: Pt,
+    cap: f32,
+    ink: &Ink,
+) {
+    let (r, w, k) = (cap / 2.0, ink.t, ink.alpha);
+    for (n, rgb) in [palette.red, palette.green, palette.blue]
+        .into_iter()
+        .enumerate()
+    {
+        let (start, sweep) = (n as f32 * TAU / 3.0 + 0.16, TAU / 3.0 - 0.32);
+        let arc = [Shape::arc(centre, r, 1.7 * w, start, sweep)];
+        fill(t, clip, &arc, &Paint::Solid(rgb.alpha(k)), 1.0, Blend::Over);
+    }
+    let dot = [Shape::disc(centre, 0.32 * r)];
+    let paint = Paint::Solid(palette.text.primary.alpha(k));
+    fill(t, clip, &dot, &paint, 1.0, Blend::Over);
+}
+
+/// One glyph in ink, `drawn` (0–1) of each stroke from its start: every path's drawn segments
+/// gathered, then inked as one union per strand; its dots fade in from 60% (discs of their own,
+/// at their own alpha).
+fn ink_glyph(
+    t: &mut dyn Target,
+    clip: DeviceRect,
+    palette: &Palette,
+    g: &'static Glyph,
+    at: Pt,
+    ink: &Ink,
+    drawn: f32,
+) {
+    let cap = ink.cap;
+    let mut whole = [pt(0.0, 0.0); MAX_SEGMENTS + 1];
+    let mut line = [pt(0.0, 0.0); MAX_SEGMENTS + 1];
+    let mut segs = [(pt(0.0, 0.0), pt(0.0, 0.0)); GLYPH_SEGMENTS];
+    let mut n = 0;
+    for (points, closed, dot) in paths(g) {
+        if dot {
+            // (drawn − 0.6) / 0.4, exactly 1 when drawn is.
+            let a = (2.5 * drawn - 1.5).clamp(0.0, 1.0);
+            if a > 0.0 {
+                let c = at + pt(f32::from(points[0]), f32::from(points[1])) * (cap / 100.0);
+                let faded = Ink {
+                    alpha: ink.alpha * a,
+                    ..*ink
+                };
+                ink_dot(t, clip, palette, c, &faded);
+            }
+            continue;
+        }
+        let k = path_points(points, closed, cap, &mut whole);
+        let (m, _) = partial_path(&whole[..k], drawn, &mut line);
+        for pair in line[..m].windows(2) {
+            if n < GLYPH_SEGMENTS {
+                segs[n] = (pair[0], pair[1]);
+                n += 1;
+            }
+        }
+    }
+    ink_strokes(t, clip, palette, at, &segs[..n], ink);
+}
+
+/// `text` in ink (spec §10 light, ruling L6), its cap line's left end at `origin`, glyph
+/// `target_o_at` (an O) a target, written on to `reveal` (0–1) as `beam_line_revealed` writes
+/// beams; no glints, no sparkle. Returns the line's width in px.
+#[allow(clippy::too_many_arguments)]
+pub fn ink_line(
+    t: &mut dyn Target,
+    clip: DeviceRect,
+    palette: &Palette,
+    text: &str,
+    origin: Pt,
+    track: f32,
+    ink: &Ink,
+    target_o_at: Option<usize>,
+    reveal: f32,
+) -> f32 {
+    let count = if reveal < 1.0 {
+        text.chars().count() as f32
+    } else {
+        0.0
+    };
+    let cap = ink.cap;
+    layout(text, track, |i, x, g| {
+        let drawn = drawn_at(reveal, count, i);
+        if drawn <= 0.0 {
+            return;
+        }
+        let at = origin + pt(x * cap, 0.0);
+        if Some(i) == target_o_at {
+            let centre = at + pt(f32::from(g.width) / 200.0 * cap, cap / 2.0);
+            let faded = Ink {
+                alpha: ink.alpha * drawn,
+                ..*ink
+            };
+            ink_target_o(t, clip, palette, centre, cap, &faded);
+        } else {
+            ink_glyph(t, clip, palette, g, at, ink, drawn);
+        }
+    }) * cap
+}
+
 /// `text` as flat strokes `stroke_w` px wide in `colour` (the picker's digits, Next ▶'s "NEXT"):
 /// one capsule chain per path, a disc of 0.9 × stroke per dot. Returns the width in px.
 #[allow(clippy::too_many_arguments)]
@@ -693,6 +888,39 @@ pub fn wordmark(
     let line_y = 1.32 * cap;
     let y = row_top + (row_h - (line_y + sub / 2.0)) / 2.0;
     let gx = left + width + 0.35 * cap;
+    let (ly, d, run, end) = (y + line_y, 0.09 * cap, 0.5 * cap, gx - 0.25 * cap);
+    if palette.light_mode == LightMode::Over {
+        // Ruling L6: the wordmark in ink; the underline's strands multiplied; its core in ink.
+        let word = Ink {
+            cap,
+            t: w,
+            alpha: 1.0,
+            strands: cap / ppp >= 12.0,
+        };
+        let o = pt(left, y);
+        ink_line(t, clip, palette, "CHROMATRON", o, 0.36, &word, Some(3), 1.0);
+        underline(
+            t,
+            clip,
+            palette,
+            (left, ly, d, run, end, w),
+            Blend::Multiply,
+        );
+        let core = Shape::line(pt(left + run + d, ly), pt(end, ly), 0.5 * w);
+        let paint = Paint::Solid(palette.ink_core.alpha(0.6));
+        fill(t, clip, &[core], &paint, 1.0, Blend::Over);
+        let mut digit = [0u8; 2];
+        let number_ink = Ink {
+            cap: sub,
+            t: 0.9 * w,
+            alpha: 1.0,
+            strands: sub / ppp >= 12.0,
+        };
+        let text = number(usize::from(game), &mut digit);
+        let o = pt(gx, ly - sub / 2.0);
+        ink_line(t, clip, palette, text, o, 0.3, &number_ink, None, 1.0);
+        return cap;
+    }
     let word = Beam {
         cap,
         t: w,
@@ -710,24 +938,7 @@ pub fn wordmark(
         &word,
         Some(3),
     );
-    let (ly, d, run, end) = (y + line_y, 0.09 * cap, 0.5 * cap, gx - 0.25 * cap);
-    for (rgb, dy) in [(palette.red, -d), (palette.green, 0.0), (palette.blue, d)] {
-        let fade = Paint::Linear {
-            from: pt(left, 0.0),
-            to: pt(left + run, 0.0),
-            stops: Stops::new(&[(0.0, rgb.alpha(0.0)), (1.0, rgb.alpha(0.95))]),
-        };
-        let path = [
-            Shape::line(pt(left, ly + dy), pt(left + run, ly + dy), 1.2 * w),
-            Shape::line(
-                pt(left + run, ly + dy),
-                pt(left + run + dy.abs(), ly),
-                1.2 * w,
-            ),
-            Shape::line(pt(left + run + dy.abs(), ly), pt(end, ly), 1.2 * w),
-        ];
-        fill(t, clip, &path, &fade, 1.0, Blend::Add);
-    }
+    underline(t, clip, palette, (left, ly, d, run, end, w), Blend::Add);
     let core = Shape::line(pt(left + run + d, ly), pt(end, ly), 0.5 * w);
     fill(
         t,
@@ -756,6 +967,34 @@ pub fn wordmark(
         None,
     );
     cap
+}
+
+/// The wordmark's R/G/B underline (`left`, line y, strand spacing, fade run, end, beam width):
+/// three strands fading in over `run`, then merging into one line, in `blend`.
+fn underline(
+    t: &mut dyn Target,
+    clip: DeviceRect,
+    palette: &Palette,
+    (left, ly, d, run, end, w): (f32, f32, f32, f32, f32, f32),
+    blend: Blend,
+) {
+    for (rgb, dy) in [(palette.red, -d), (palette.green, 0.0), (palette.blue, d)] {
+        let fade = Paint::Linear {
+            from: pt(left, 0.0),
+            to: pt(left + run, 0.0),
+            stops: Stops::new(&[(0.0, rgb.alpha(0.0)), (1.0, rgb.alpha(0.95))]),
+        };
+        let path = [
+            Shape::line(pt(left, ly + dy), pt(left + run, ly + dy), 1.2 * w),
+            Shape::line(
+                pt(left + run, ly + dy),
+                pt(left + run + dy.abs(), ly),
+                1.2 * w,
+            ),
+            Shape::line(pt(left + run + dy.abs(), ly), pt(end, ly), 1.2 * w),
+        ];
+        fill(t, clip, &path, &fade, 1.0, blend);
+    }
 }
 
 /// "LEVEL n" for strip slot `slot` (n = slot + 1).
@@ -1134,75 +1373,239 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_revealed_line_and_its_sparkle_take_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(Rgb(255, 0, 255));
-        let (w, h) = (500usize, 120usize);
-        let mut px = canvas(w, h);
-        let mut layer = Layer {
-            px: &mut px,
-            width: w,
-            height: h,
-        };
-        let all = DeviceRect::new(0, 0, 500, 120);
-        let beam = Beam::new(30.0, 2.0, 1.0);
-        beam_line_revealed(
-            &mut layer,
-            all,
-            &sentinel,
-            "YOU WIN!",
-            pt(10.0, 10.0),
-            0.3,
-            &beam,
-            None,
-            0.5,
-        );
-        sparkle(&mut layer, all, &sentinel, pt(300.0, 80.0), 20.0, 1.0);
-        let mut lit_px = 0;
-        for &p in &px {
+    /// The ground a sentinel test draws on in `theme`: black in the dark theme (light adds), a
+    /// dim sentinel hue in the light one, so a multiplied stroke of another hue shows too.
+    fn sentinel_ground(theme: crate::Theme) -> u32 {
+        match theme {
+            crate::Theme::Dark => 0,
+            crate::Theme::Light => 0x0080_0080,
+        }
+    }
+
+    /// Every px of `px` is the sentinel's hue (no green, red equal to blue); returns how many
+    /// differ from `ground`.
+    fn sentinel_only(px: &[u32], ground: u32, what: &str) -> usize {
+        let mut drawn = 0;
+        for &p in px {
             let (r, g, b) = (
                 (p >> 16 & 0xff) as i32,
                 (p >> 8 & 0xff) as i32,
                 (p & 0xff) as i32,
             );
-            assert!(g == 0 && (r - b).abs() <= 1, "{p:06x}");
-            lit_px += usize::from(p != 0);
+            assert!(g == 0 && (r - b).abs() <= 1, "{what}: {p:06x}");
+            drawn += usize::from(p != ground);
         }
-        assert!(lit_px > 100, "the reveal and the sparkle drew: {lit_px} px");
-        // The sparkle's long ray reaches across, its short one down.
-        let at = |x: usize, y: usize| px[y * w + x] != 0;
-        assert!(at(300 + 15, 80) && at(300, 80 + 8) && !at(300 + 8, 80 + 8));
+        drawn
+    }
+
+    #[test]
+    fn a_revealed_line_and_its_sparkle_take_every_colour_from_the_palette() {
+        for theme in crate::Theme::ALL {
+            let sentinel = theme.palette().recoloured(Rgb(255, 0, 255));
+            let ground = sentinel_ground(theme);
+            let (w, h) = (500usize, 120usize);
+            let mut px = vec![ground; w * h];
+            let mut layer = Layer {
+                px: &mut px,
+                width: w,
+                height: h,
+            };
+            let all = DeviceRect::new(0, 0, 500, 120);
+            let beam = Beam::new(30.0, 2.0, 1.0);
+            beam_line_revealed(
+                &mut layer,
+                all,
+                &sentinel,
+                "YOU WIN!",
+                pt(10.0, 10.0),
+                0.3,
+                &beam,
+                None,
+                0.5,
+            );
+            sparkle(&mut layer, all, &sentinel, pt(300.0, 80.0), 20.0, 1.0);
+            if theme == crate::Theme::Light {
+                // The light header written on in ink (ruling L6), its O a target.
+                let ink = Ink::new(30.0, 2.0, 2.0, 1.0);
+                let o = pt(10.0, 60.0);
+                ink_line(
+                    &mut layer,
+                    all,
+                    &sentinel,
+                    "YOU WON",
+                    o,
+                    0.3,
+                    &ink,
+                    Some(5),
+                    0.5,
+                );
+            }
+            let lit_px = sentinel_only(&px, ground, &format!("{theme:?}"));
+            assert!(
+                lit_px > 100,
+                "{theme:?}: the reveal and the sparkle drew: {lit_px} px"
+            );
+            // The sparkle's long ray reaches across, its short one down.
+            let at = |x: usize, y: usize| px[y * w + x] != ground;
+            assert!(
+                at(300 + 15, 80) && at(300, 80 + 8) && !at(300 + 8, 80 + 8),
+                "{theme:?}"
+            );
+        }
+    }
+
+    fn ink_on_white(text: &str, target: Option<usize>, reveal: f32) -> Vec<u32> {
+        let mut px = vec![0x00ff_ffffu32; 240 * 60];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 240,
+            height: 60,
+        };
+        let ink = Ink::new(26.0, 1.0, 2.0, 1.0);
+        let clip = DeviceRect::new(0, 0, 240, 60);
+        let at = pt(8.0, 17.0);
+        ink_line(
+            &mut layer,
+            clip,
+            &Palette::LIGHT,
+            text,
+            at,
+            0.3,
+            &ink,
+            target,
+            reveal,
+        );
+        px
+    }
+
+    /// Spec §10 light: the three strands multiplied overlap to near-black ink, with a spectral
+    /// fringe at the edges (one channel well above the others).
+    #[test]
+    fn ink_lettering_is_near_black_with_a_spectral_fringe() {
+        let px = ink_on_white("LEVEL 1", None, 1.0);
+        let ch = |p: u32| {
+            [
+                (p >> 16 & 0xff) as i32,
+                (p >> 8 & 0xff) as i32,
+                (p & 0xff) as i32,
+            ]
+        };
+        let darkest = px.iter().map(|&p| ch(p).iter().sum::<i32>()).min().unwrap();
+        assert!(darkest < 3 * 60, "darkest {darkest}");
+        let fringe = px.iter().map(|&p| ch(p)).any(|[r, g, b]| {
+            let (hi, lo) = (r.max(g).max(b), r.min(g).min(b));
+            hi - lo >= 60 && hi < 250
+        });
+        assert!(fringe, "a coloured fringe");
+    }
+
+    /// Spec §10 light: the target O keeps its R/G/B arcs and gets a #141a2e centre dot (r 0.32 ×
+    /// its radius).
+    #[test]
+    fn an_ink_target_o_has_a_dark_dot() {
+        let px = ink_on_white("CHROMATRON", Some(3), 1.0);
+        let o = super::glyph('O').unwrap();
+        // The O's left from `layout` itself ("CHR"'s width leaves out the gap after the R).
+        let mut left = 0.0;
+        layout("CHROMATRON", 0.3, |i, x, _| {
+            if i == 3 {
+                left = x;
+            }
+        });
+        let x = 8.0 + (left + f32::from(o.width) / 200.0) * 26.0;
+        let p = px[(17 + 13) * 240 + x.round() as usize];
+        let [r, g, b] = [
+            (p >> 16 & 0xff) as i32,
+            (p >> 8 & 0xff) as i32,
+            (p & 0xff) as i32,
+        ];
+        assert!(
+            (r - 0x14).abs() <= 24 && (g - 0x1a).abs() <= 24 && (b - 0x2e).abs() <= 24,
+            "{p:06x}"
+        );
+    }
+
+    /// Review finding 10: every glyph's segments fit one ink union.
+    #[test]
+    fn every_glyph_fits_one_ink_union() {
+        for ch in CHARSET.chars() {
+            let g = super::glyph(ch).unwrap();
+            let segments: usize = paths(g)
+                .filter(|&(_, _, dot)| !dot)
+                .map(|(points, closed, _)| points.len() / 2 - 1 + usize::from(closed))
+                .sum();
+            assert!(segments <= GLYPH_SEGMENTS, "{ch:?}: {segments}");
+        }
+    }
+
+    /// Review finding 10: where an X's two strokes cross, the ink is laid once, so the
+    /// crossing is no darker than a stroke's middle.
+    #[test]
+    fn crossing_strokes_of_a_glyph_ink_once() {
+        let px = ink_on_white("X", None, 1.0);
+        let lum = |p: u32| (p >> 16 & 0xff) + (p >> 8 & 0xff) + (p & 0xff);
+        let darkest_in = |x0: usize, x1: usize, y0: usize, y1: usize| {
+            (y0..y1)
+                .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+                .map(|(x, y)| lum(px[y * 240 + x]))
+                .min()
+                .unwrap()
+        };
+        let o = super::glyph('X').unwrap();
+        let mid = 8.0 + f32::from(o.width) / 200.0 * 26.0;
+        let (cx, cy) = (mid.round() as usize, 17 + 13);
+        let crossing = darkest_in(cx - 1, cx + 2, cy - 1, cy + 2);
+        let arm = darkest_in(8, cx - 6, 17, 17 + 8);
+        assert!(crossing + 6 >= arm, "crossing {crossing} vs arm {arm}");
+    }
+
+    /// The reveal writes glyphs on: half-way there is less ink than whole, and none at 0.
+    #[test]
+    fn ink_is_written_on_by_the_reveal() {
+        let inked = |px: &[u32]| px.iter().filter(|&&p| p != 0x00ff_ffff).count();
+        assert_eq!(inked(&ink_on_white("YOU WIN!", None, 0.0)), 0);
+        let (half, whole) = (
+            inked(&ink_on_white("YOU WIN!", None, 0.5)),
+            inked(&ink_on_white("YOU WIN!", None, 1.0)),
+        );
+        assert!(0 < half && half < whole, "{half} of {whole}");
     }
 
     #[test]
     fn lettering_takes_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(Rgb(255, 0, 255));
-        let (w, h) = (500usize, 120usize);
-        let mut px = canvas(w, h);
-        let mut layer = Layer {
-            px: &mut px,
-            width: w,
-            height: h,
-        };
-        let all = DeviceRect::new(0, 0, 500, 120);
-        beam_line(
-            &mut layer,
-            all,
-            &sentinel,
-            "YOU WIN!",
-            pt(10.0, 10.0),
-            0.3,
-            &Beam::new(30.0, 2.0, 1.0),
-            None,
-        );
-        wordmark(&mut layer, all, &sentinel, 10.0, 50.0, 70.0, 420.0, 3, 1.0);
-        for &p in &px {
-            let (r, g, b) = (
-                (p >> 16 & 0xff) as i32,
-                (p >> 8 & 0xff) as i32,
-                (p & 0xff) as i32,
+        for theme in crate::Theme::ALL {
+            let sentinel = theme.palette().recoloured(Rgb(255, 0, 255));
+            let ground = sentinel_ground(theme);
+            let (w, h) = (500usize, 120usize);
+            let mut px = vec![ground; w * h];
+            let mut layer = Layer {
+                px: &mut px,
+                width: w,
+                height: h,
+            };
+            let all = DeviceRect::new(0, 0, 500, 120);
+            beam_line(
+                &mut layer,
+                all,
+                &sentinel,
+                "YOU WIN!",
+                pt(10.0, 10.0),
+                0.3,
+                &Beam::new(30.0, 2.0, 1.0),
+                None,
             );
-            assert!(g == 0 && (r - b).abs() <= 1, "{p:06x}");
+            // The light theme's wordmark is ink (strands multiplied, the underline too).
+            wordmark(&mut layer, all, &sentinel, 10.0, 50.0, 70.0, 420.0, 3, 1.0);
+            if theme == crate::Theme::Light {
+                // Ink below 12 pt: one stroke, no strands.
+                let ink = Ink::new(10.0, 1.0, 1.2, 1.0);
+                let o = pt(300.0, 10.0);
+                ink_line(
+                    &mut layer, all, &sentinel, "LEVEL 9", o, 0.3, &ink, None, 1.0,
+                );
+            }
+            let drawn = sentinel_only(&px, ground, &format!("{theme:?}"));
+            assert!(drawn > 100, "{theme:?}: drew {drawn} px");
         }
     }
 }

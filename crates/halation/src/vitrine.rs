@@ -10,7 +10,7 @@ use lumen::SlotState;
 use crate::DeviceRect;
 use crate::etch::{Blend, Layer, Paint, Pt, Shape, Stops, Target, clip_rect, fill, pt};
 use crate::lettering::{Align, flat_line, number};
-use crate::spectrum::{Palette, Rgba};
+use crate::spectrum::{Glaze, Palette, Rgba};
 
 /// Source-over of the solid `c` on every pixel of `rect` (clipped to the layer), in integers:
 /// `(px·(255 − a) + c·a + 127) / 255` per channel with `a = round(255·α)`.
@@ -36,6 +36,22 @@ pub fn tint(layer: &mut Layer, rect: DeviceRect, c: Rgba) {
     }
 }
 
+/// A glass face's fill (spec §7.2 tile, §7.5 chip) over `(l, t, r, b)` at highlight `h`: from
+/// the top-left toward `reach` of the face. A reach of (1, 1) keeps the exact far corner, the
+/// dark recipe's own end point (ruling L1).
+pub fn glaze(g: &Glaze, (l, t, r, b): (f32, f32, f32, f32), h: f32) -> Paint {
+    let to = if g.reach == (1.0, 1.0) {
+        pt(r, b)
+    } else {
+        pt(l + g.reach.0 * (r - l), t + g.reach.1 * (b - t))
+    };
+    Paint::Linear {
+        from: pt(l, t),
+        to,
+        stops: Stops::new(&[(0.0, g.near.at(h)), (1.0, g.far.at(h))]),
+    }
+}
+
 /// A rounded glass panel on whole device px (spec §7.1): a fill, then a rim fading from `rim[0]`
 /// at the top to `rim[1]` at the bottom.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -48,14 +64,13 @@ pub struct Panel {
 }
 
 impl Panel {
-    /// The card and tray panel: `panel_fill`, rim `rim(0.22 → 0.05)`.
+    /// The card and tray panel: `panel_fill`, rim `panel_rim` (dark: `rim(0.22 → 0.05)`).
     pub fn glass(palette: &Palette, rect: DeviceRect, radius: f32, rim_width: f32) -> Panel {
-        let [top, bottom] = palette.panel_rim_alpha;
         Panel {
             rect,
             radius,
             fill: palette.panel_fill,
-            rim: [palette.rim.at(top), palette.rim.at(bottom)],
+            rim: palette.panel_rim,
             rim_width,
         }
     }
@@ -265,7 +280,7 @@ pub fn close_mark(t: &mut dyn Target, clip: DeviceRect, palette: &Palette, centr
 }
 
 /// `1` well inside, `0` at 2σ outside, smoothstep between (from −2σ): a blurred edge's profile.
-fn falloff(d: f32, sigma: f32) -> f32 {
+pub(crate) fn falloff(d: f32, sigma: f32) -> f32 {
     let x = ((d + 2.0 * sigma) / (4.0 * sigma.max(1e-3))).clamp(0.0, 1.0);
     1.0 - x * x * (3.0 - 2.0 * x)
 }
@@ -489,9 +504,10 @@ pub fn chip_margin(ppp: f32) -> f32 {
 }
 
 /// A chip's body at `centre`, `size` px square, radius 0.22 × size: the current chip's glow (cast
-/// by its fill, so at the fill's alpha too) and white fill; the glass fill (TL → BR, `h` by state); the rim (current: white α 0.9 at 1.5 pt;
-/// else `rim` α 0.08 locked / 0.3, vertical 1 → 0.35 → 0.55, `max(1 px, 0.028·size)`); the solved
-/// mark (R/G/B arcs, 16° gaps, and a centre dot) at the top right; the padlock at the bottom right.
+/// by its fill, so at the fill's alpha too) and white fill; the glass fill (`chip`, `h` by
+/// state); the rim (current: `current_rim` at 1.5 pt; else `chip_rim`, dark: `rim` α 0.08 locked
+/// / 0.3, vertical 1 → 0.35 → 0.55, `max(1 px, 0.028·size)`); the solved mark (R/G/B arcs, 16°
+/// gaps, and a centre dot) at the top right; the padlock at the bottom right.
 pub fn chip_body(
     t: &mut dyn Target,
     clip: DeviceRect,
@@ -519,14 +535,7 @@ pub fn chip_body(
         );
     }
     let h = state.highlight();
-    let glass = Paint::Linear {
-        from: pt(x, y),
-        to: pt(x + size, y + size),
-        stops: Stops::new(&[
-            (0.0, palette.glass.at(0.085 + 0.05 * h)),
-            (1.0, palette.glass_deep.alpha(0.025 + 0.02 * h)),
-        ]),
-    };
+    let glass = glaze(&palette.chip, (x, y, x + size, y + size), h);
     fill(t, clip, &[shape], &glass, 1.0, Blend::Over);
     let rim_of = |w: f32| {
         Shape::round_rect(
@@ -549,19 +558,20 @@ pub fn chip_body(
             Blend::Over,
         );
     } else {
+        let cr = palette.chip_rim;
         let a = if state == ChipState::Locked {
-            0.08
+            cr.alpha[0]
         } else {
-            0.3
+            cr.alpha[1]
         };
-        let rim = rim_of((0.028 * size).max(1.0));
+        let rim = rim_of(cr.width_pt.map_or((0.028 * size).max(1.0), |w| w * ppp));
         let paint = Paint::Linear {
             from: pt(0.0, y),
             to: pt(0.0, y + size),
             stops: Stops::new(&[
-                (0.0, palette.rim.at(a)),
-                (0.5, palette.rim.at(0.35 * a)),
-                (1.0, palette.rim.at(0.55 * a)),
+                (0.0, cr.tone.at(cr.profile[0] * a)),
+                (0.5, cr.tone.at(cr.profile[1] * a)),
+                (1.0, cr.tone.at(cr.profile[2] * a)),
             ]),
         };
         fill(t, clip, &[rim], &paint, 1.0, Blend::Over);
@@ -662,6 +672,37 @@ mod tests {
             (p >> 8 & 0xff) as i32,
             (p & 0xff) as i32,
         ]
+    }
+
+    /// Spec §7.5 light chips: an open chip's fill is near white (white α 0.73 → 0.66 toward
+    /// (0.4, 1) of it); its 1-pt rim is ink at α 0.16, darker than the fill inside it.
+    #[test]
+    fn a_light_open_chip_is_white_with_an_ink_rim() {
+        let ground = 0x00ee_f1f6u32;
+        let mut px = vec![ground; 80 * 80];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 80,
+            height: 80,
+        };
+        let all = DeviceRect::new(0, 0, 80, 80);
+        chip_body(
+            &mut layer,
+            all,
+            &Palette::LIGHT,
+            pt(40.0, 40.0),
+            60.0,
+            ChipState::Open,
+            1.0,
+        );
+        let lum = |p: u32| (p >> 16 & 0xff) + (p >> 8 & 0xff) + (p & 0xff);
+        let inside = px[25 * 80 + 25];
+        assert!(
+            lum(inside) >= lum(ground),
+            "the fill lightens the page: {inside:06x}"
+        );
+        let rim = px[40 * 80 + 10]; // the left edge, x = 10..11
+        assert!(lum(rim) + 15 < lum(inside), "rim {rim:06x} vs {inside:06x}");
     }
 
     #[test]
@@ -877,50 +918,52 @@ mod tests {
 
     #[test]
     fn chrome_takes_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(Rgb(255, 0, 255));
-        let (w, h) = (300, 200);
-        let mut px = black(w, h);
-        let all = DeviceRect::new(0, 0, 300, 200);
-        let mut layer = Layer {
-            px: &mut px,
-            width: w,
-            height: h,
-        };
-        panel(
-            &mut layer,
-            all,
-            &Panel::glass(&sentinel, DeviceRect::new(5, 5, 120, 90), 14.0, 1.0),
-        );
-        panel(
-            &mut layer,
-            all,
-            &Panel::sheet(&sentinel, DeviceRect::new(130, 5, 290, 90), 14.0, 1.0),
-        );
-        well(&mut layer, all, &sentinel, pt(60.0, 140.0), 50.0);
-        pill(
-            &mut layer,
-            all,
-            [100.0, 120.0, 180.0, 148.0],
-            &Paint::Solid(sentinel.pill_fill),
-            sentinel.pill_rim,
-            1.0,
-        );
-        levels_icon(&mut layer, all, &sentinel, pt(110.0, 126.0), 1.0);
-        close_mark(&mut layer, all, &sentinel, pt(220.0, 140.0), 1.0);
-        soft_ellipse(
-            &mut layer,
-            all,
-            pt(260.0, 170.0),
-            20.0,
-            10.0,
-            3.0,
-            sentinel.drag_shadow.with_alpha(1.0),
-        );
-        drop_target(&mut layer, all, &sentinel, pt(150.0, 170.0), 30.0);
-        dashed_outline(&mut layer, all, &sentinel, pt(60.0, 140.0), 50.0);
-        for &p in &px {
-            let [r, g, b] = channels(p);
-            assert!(g == 0 && (r - b).abs() <= 1, "{p:06x}");
+        for theme in crate::Theme::ALL {
+            let sentinel = theme.palette().recoloured(Rgb(255, 0, 255));
+            let (w, h) = (300, 200);
+            let mut px = black(w, h);
+            let all = DeviceRect::new(0, 0, 300, 200);
+            let mut layer = Layer {
+                px: &mut px,
+                width: w,
+                height: h,
+            };
+            panel(
+                &mut layer,
+                all,
+                &Panel::glass(&sentinel, DeviceRect::new(5, 5, 120, 90), 14.0, 1.0),
+            );
+            panel(
+                &mut layer,
+                all,
+                &Panel::sheet(&sentinel, DeviceRect::new(130, 5, 290, 90), 14.0, 1.0),
+            );
+            well(&mut layer, all, &sentinel, pt(60.0, 140.0), 50.0);
+            pill(
+                &mut layer,
+                all,
+                [100.0, 120.0, 180.0, 148.0],
+                &Paint::Solid(sentinel.pill_fill),
+                sentinel.pill_rim,
+                1.0,
+            );
+            levels_icon(&mut layer, all, &sentinel, pt(110.0, 126.0), 1.0);
+            close_mark(&mut layer, all, &sentinel, pt(220.0, 140.0), 1.0);
+            soft_ellipse(
+                &mut layer,
+                all,
+                pt(260.0, 170.0),
+                20.0,
+                10.0,
+                3.0,
+                sentinel.drag_shadow.with_alpha(1.0),
+            );
+            drop_target(&mut layer, all, &sentinel, pt(150.0, 170.0), 30.0);
+            dashed_outline(&mut layer, all, &sentinel, pt(60.0, 140.0), 50.0);
+            for &p in &px {
+                let [r, g, b] = channels(p);
+                assert!(g == 0 && (r - b).abs() <= 1, "{theme:?}: {p:06x}");
+            }
         }
     }
 
@@ -1021,26 +1064,28 @@ mod tests {
 
     #[test]
     fn chips_take_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(crate::Rgb(255, 0, 255));
-        for state in ChipState::ALL {
-            let mut px = chip_canvas(state, &sentinel);
-            let mut layer = Layer {
-                px: &mut px,
-                width: 120,
-                height: 120,
-            };
-            chip_digits(
-                &mut layer,
-                DeviceRect::new(0, 0, 120, 120),
-                &sentinel,
-                pt(60.0, 60.0),
-                80.0,
-                50,
-                state,
-            );
-            for &p in &px {
-                let [r, g, b] = channels(p);
-                assert!(g == 0 && (r - b).abs() <= 1, "{state:?}: {p:06x}");
+        for theme in crate::Theme::ALL {
+            let sentinel = theme.palette().recoloured(crate::Rgb(255, 0, 255));
+            for state in ChipState::ALL {
+                let mut px = chip_canvas(state, &sentinel);
+                let mut layer = Layer {
+                    px: &mut px,
+                    width: 120,
+                    height: 120,
+                };
+                chip_digits(
+                    &mut layer,
+                    DeviceRect::new(0, 0, 120, 120),
+                    &sentinel,
+                    pt(60.0, 60.0),
+                    80.0,
+                    50,
+                    state,
+                );
+                for &p in &px {
+                    let [r, g, b] = channels(p);
+                    assert!(g == 0 && (r - b).abs() <= 1, "{theme:?} {state:?}: {p:06x}");
+                }
             }
         }
     }

@@ -17,6 +17,25 @@
   --muted: #8a94b8;
   --accent: #8ab4ff;
 }
+/* The modern look's light tokens (spec §7.1 Light; index.html's chromatronTheme sets
+   data-theme="light" only in the modern look under a light system, from before the first paint,
+   so classic keeps its dark page). */
+[data-look="modern"][data-theme="light"] {
+  color-scheme: light;
+  --page: #eef1f6;
+  --panel: #ffffff;
+  --line: rgba(27, 35, 64, 0.14);
+  --ink: #141a2e;
+  --body: #3a4566;
+  --muted: #6b7594;
+  --accent: #2f6bff;
+}
+[data-look="modern"][data-theme="light"] .menu { box-shadow: 0 8px 24px rgba(27, 35, 64, 0.16); }
+/* The light scrim of the canvas's own sheet (Task 16's still review): a navy veil can't dim the ink. */
+[data-look="modern"][data-theme="light"] .sheet-dialog::backdrop { background: rgba(110, 120, 152, 0.6); }
+[data-look="modern"][data-theme="light"] #stage:fullscreen { background: var(--page); }
+/* The select's chevron, in the light muted ink (its dark stroke is a literal in the data URL). */
+[data-look="modern"][data-theme="light"] select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m4 6 4 4 4-4' fill='none' stroke='%236b7594' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
 
 * { box-sizing: border-box; }
 

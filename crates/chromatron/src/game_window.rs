@@ -46,8 +46,8 @@ use crate::user_defaults::Preferences;
 use crate::viewport::{DeviceRect, Viewport, window_size};
 use crate::wake_schedule::wake_flow;
 use crate::window_shape::{
-    FullscreenExitObserver, apply_shape, centre_window, easel_for, shape_for, theme_for,
-    visible_frame,
+    FullscreenExitObserver, apply_shape, centre_window, easel_for, ground_for, shape_for,
+    theme_for, visible_frame,
 };
 
 /// The whole frame, as a damage rect.
@@ -386,10 +386,19 @@ impl App {
             LayerPresenter::new(&window)
                 .map_err(|e| format!("cannot draw into the window: {e}"))?,
         );
+        self.show_ground();
         let size = window.inner_size();
         self.window = Some(window);
         self.resized(size);
         Ok(())
+    }
+
+    /// The layer's ground follows the look and the theme (final review M1), so a resize never
+    /// uncovers black next to a light page.
+    fn show_ground(&self) {
+        if let Some(presenter) = &self.presenter {
+            presenter.set_ground(ground_for(self.look, self.theme));
+        }
     }
 
     /// The window's content changed size (open, scale, fullscreen, another display, a modern
@@ -566,6 +575,7 @@ impl App {
         if look != self.look {
             self.pointer_cancel();
             let from = std::mem::replace(&mut self.look, look);
+            self.show_ground();
             if !self.dry() {
                 self.prefs.set_classic_look(look == Look::Classic);
             }
@@ -1000,10 +1010,14 @@ impl ApplicationHandler<UserEvent> for App {
                 let theme = theme_for(Some(appearance));
                 if theme != self.theme {
                     self.theme = theme;
+                    self.show_ground();
                     if let Some(stage) = &mut self.stage {
                         stage.set_theme(theme);
                     }
-                    if let Some(window) = &self.window {
+                    // Classic keeps its look whatever the appearance: nothing to repaint.
+                    if self.look == Look::Modern
+                        && let Some(window) = &self.window
+                    {
                         window.request_redraw();
                     }
                 }

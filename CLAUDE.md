@@ -71,8 +71,8 @@ The Cargo workspace has a strict layering: `spectrograph` → `lumen` → `halat
   - the save and clipboard codecs in the original formats;
   - `GameState::handle(InputEvent) -> Effects`, the input rules shared by both shells;
   - rendering into a 640×480 frame plus text boxes (the classic look).
-- **`halation`** is the modern look: a dependency-free CPU rasteriser (`etch`), additive light with glow and bloom, its own layout (`tableau`) and piece art, behind one façade (`Lightbox`) that both shells call. It never allocates while painting; `just bench` and `web-check` hold it to its time, size and memory budgets.
-- **`chromatron`** is the macOS shell, built on winit, its own `CALayer` presenter, muda menus and objc2/Core Text. There is one binary per game. It opens in halation's modern look, with Core Text captions; View ▸ Classic Look switches, remembered per app. Progress is saved in the original `.dat` format.
+- **`halation`** is the modern look, in two themes (dark and light, following the system): a dependency-free CPU rasteriser (`etch`), light with glow and bloom (additive in dark, painted over in light), its own layout (`tableau`) and piece art, behind one façade (`Lightbox`) that both shells call. It never allocates while painting; `just bench` and `web-check` hold it to its time, size and memory budgets.
+- **`chromatron`** is the macOS shell, built on winit, its own `CALayer` presenter, muda menus and objc2/Core Text. There is one binary per game. It opens in halation's modern look (light or dark with the system), with Core Text captions; View ▸ Classic Look switches, remembered per app. Progress is saved in the original `.dat` format.
 - **`chromatron-web`** is the wasm shell, a `wasm-bindgen` `Session` that drives the four games for the page.
 - **`web/`** is the static page: plain HTML, CSS and JS, with no bundler.
   - It has a desktop layout and a touch layout (portrait/landscape) for phones.

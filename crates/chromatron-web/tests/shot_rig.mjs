@@ -117,6 +117,10 @@ export function receive(event) {
   const message = JSON.parse(event.data);
   if (message.method === "Network.requestWillBeSent") {
     requested.push(message.params.request.url);
+  } else if (message.method === "Fetch.requestPaused") {
+    // Fetch is enabled only to hold a script back (web-shots' first-paint view): every request
+    // it pauses fails, as a blocked one.
+    send("Fetch.failRequest", { requestId: message.params.requestId, errorReason: "BlockedByClient" });
   } else if (message.id !== undefined) {
     const call = calls.get(message.id);
     calls.delete(message.id);
@@ -185,7 +189,9 @@ export async function load({ name, width, height, ratio, touch, query = "" }, or
   await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: ratio, mobile: touch });
   await send("Emulation.setTouchEmulationEnabled", touch ? { enabled: true, maxTouchPoints: 5 } : { enabled: false });
   await send("Page.navigate", { url: `${origin}?shot=${name}${query}#1` });
-  const started = `!window.shotStale && (document.title !== "Chromatron" || !document.getElementById("fatal").hidden)`;
+  // Started: main.js has laid the page out (its first layout sets data-layout, after the Session
+  // exists), or says it can't start. (data-look is no signal: index.html sets it before the wasm.)
+  const started = `!window.shotStale && (document.documentElement.dataset.layout !== undefined || !document.getElementById("fatal").hidden)`;
   for (let tries = 0; !(await evaluate(started).catch(() => false)); tries += 1) {
     assert.ok(tries < 100, `${name}: the page did not start`);
     await delay(100);

@@ -19,8 +19,12 @@ const coarsePointer = matchMedia("(pointer: coarse)");
 // Spec §9.3: the visitor's reduced-motion setting, followed live (the Session settles a running
 // animation when it turns on).
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)");
-// `?look=classic` (or `modern`) forces a look over the stored choice, for tests; never stored.
-const forcedLook = new URLSearchParams(location.search).get("look");
+// Spec §11: the visitor's colour scheme, followed live. The modern look takes it; classic keeps
+// its dark page whatever it says.
+const darkScheme = matchMedia("(prefers-color-scheme: dark)");
+// The look the page opened in (spec §11), which index.html's head script chose before the first
+// paint: `?look=classic` (or `modern`, for tests; never stored), then the stored choice, then modern.
+const firstLook = document.documentElement.dataset.look === "classic" ? "classic" : "modern";
 
 const $ = (id) => document.getElementById(id);
 const stage = $("stage");
@@ -36,7 +40,6 @@ const footer = document.querySelector("footer");
 const boardPart = $("board-part");
 const toolboxPart = $("toolbox-part");
 const smallViewport = $("small-viewport");
-const themeColor = document.querySelector('meta[name="theme-color"]');
 const toolbarNext = document.querySelector('.toolbar [data-command="next"]');
 // The ▶'s own aria-label (none: its hidden "Next" names it), put back when its highlight goes.
 const toolbarNextLabel = toolbarNext.getAttribute("aria-label");
@@ -64,7 +67,7 @@ let wasm;
 let session;
 let Flag;
 let displayScale;
-// The look on screen, "classic" or "modern" (wantedLook); "" before the first layout.
+// The look on screen, "classic" or "modern" (firstLook, then toggles); "" before the first layout.
 let look = "";
 let Look;
 let renderScale;
@@ -668,9 +671,11 @@ function sizeView(view, viewScale) {
   view.canvas.style.height = `${(view.frame.bottom - view.frame.top) * viewScale}px`;
 }
 
-// The look to show (spec §11): ?look= wins and is never stored; then the stored choice; then modern.
-function wantedLook() {
-  return touchLayout.lookFrom({ forced: forcedLook, stored: storage.read("chromatron.look").value });
+// The page's theme (spec §12) for the look on screen (the first look before the first layout):
+// index.html's chromatronTheme, which set it before the first paint, keeps data-theme and the
+// address bar's colour.
+function applyTheme() {
+  window.chromatronTheme(look || firstLook);
 }
 
 // Switches the look (spec §11), storing it as the player's choice when `store`: the drag ends (the
@@ -683,10 +688,8 @@ function setLook(next, { store = false } = {}) {
   look = next;
   const root = document.documentElement;
   root.dataset.look = look;
-  // Theme-ready (ruling 1): phase 2's modern look is dark only.
-  root.dataset.theme = "dark";
+  applyTheme();
   $("classic-look").setAttribute("aria-checked", String(look === "classic"));
-  themeColor.content = look === "modern" ? "#06070b" : "#25272a";
   lightboxImage = null;
   lightboxSize = "";
   clearTimeout(resizeTimer);
@@ -751,7 +754,7 @@ function setMode(next) {
   root.classList.toggle("touch", mode !== "desktop");
   // The first layout picks the look; later layouts keep the one on screen, so a rotation never
   // undoes a toggle (with ?look= forced, or storage that refused it).
-  setLook(look || wantedLook());
+  setLook(look || firstLook);
   $("wheel").hidden = mode !== "desktop";
   $("clockwise").hidden = mode === "desktop";
   $("clockwise-item").hidden = mode === "desktop";
@@ -1527,6 +1530,11 @@ function wire() {
   reduceMotion.addEventListener("change", (event) => {
     if (session.set_reduced_motion(event.matches) & Flag.Redraw) schedule();
   });
+  // Spec §11: a scheme change repaints the modern canvas in the new theme, with no reload.
+  darkScheme.addEventListener("change", (event) => {
+    applyTheme();
+    if (session.set_theme(event.matches) & Flag.Redraw) schedule();
+  });
   window.addEventListener("hashchange", () => {
     const n = gameFromHash();
     if (n !== undefined) selectGame(n);
@@ -1575,10 +1583,12 @@ async function start() {
     stageHeight = glue.stage_height;
     session = new glue.Session();
     session.set_reduced_motion(reduceMotion.matches);
+    session.set_theme(darkScheme.matches);
     wire();
     const stored = Number(storage.read("chromatron.game").value);
-    // The look's styles from the start, so the other look never flashes.
-    document.documentElement.dataset.look = wantedLook();
+    // index.html's head script set the look and theme before the first paint; the theme again, in
+    // case the system's scheme changed while the wasm loaded (the listener is only now wired).
+    applyTheme();
     selectGame(gameFromHash() ?? (GAMES.includes(stored) ? stored : 1));
     layout();
     showHelpOnFirstVisit();

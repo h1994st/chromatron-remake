@@ -777,6 +777,14 @@ impl Tableau {
         })
     }
 
+    /// The light board's panel (spec §6 `pad`, §7.2): the board grown by `pad`, in whole
+    /// device px.
+    pub fn board_panel(&self) -> DeviceRect {
+        let pad = (self.pad * self.px_per_pt()).round() as i32;
+        let b = self.board;
+        DeviceRect::new(b.left - pad, b.top - pad, b.right + pad, b.bottom + pad)
+    }
+
     pub fn px_per_pt(&self) -> f32 {
         self.easel.px_per_pt
     }

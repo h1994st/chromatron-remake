@@ -155,6 +155,10 @@ const ANIM_CAP = 40;
 // The 90th percentile of `xs` (null for none).
 const p90 = (xs) => (xs.length === 0 ? null : [...xs].sort((a, b) => a - b)[Math.floor(xs.length * 0.9)]);
 const REDUCE = [{ name: "prefers-reduced-motion", value: "reduce" }];
+const LIGHT = [{ name: "prefers-color-scheme", value: "light" }];
+// Every view runs under a dark system unless it names a scheme (phase 5: the modern look follows
+// prefers-color-scheme), so the dark views stay dark whatever the machine's default is.
+const withScheme = (media = []) => (media.some((f) => f.name === "prefers-color-scheme") ? media : [...media, { name: "prefers-color-scheme", value: "dark" }]);
 
 // Ends a view that won level 1 without leaving the win in the browser's storage for the next view:
 // the page stores its progress when it goes away, so every later write is dropped first.
@@ -363,7 +367,63 @@ const SCENARIOS = [
   { name: "modern-motion", width: 1400, height: 1000, ratio: 2, touch: false, query: "&perf" },
   { name: "modern-reduced", width: 1400, height: 1000, ratio: 2, touch: false, query: "&perf", media: REDUCE },
   { name: "modern-reduced-live", width: 1400, height: 1000, ratio: 2, touch: false, query: "&perf" },
+  // Phase 5: the light theme (prefers-color-scheme: light) at desktop and portrait; classic
+  // under a light system (its page stays dark; and the first paint before main.js runs); a live
+  // switch; a switch while in classic, then the look toggled to modern; the motion row in light.
+  { name: "modern-light-desktop", width: 1400, height: 1000, ratio: 2, touch: false, media: LIGHT },
+  { name: "modern-light-portrait", width: 390, height: 844, ratio: 3, touch: true, media: LIGHT },
+  { name: "classic-light", width: 1400, height: 1000, ratio: 1, touch: false, query: "&look=classic", media: LIGHT },
+  { name: "modern-theme-live", width: 1400, height: 1000, ratio: 1, touch: false },
+  { name: "classic-theme-live", width: 1400, height: 1000, ratio: 1, touch: false, query: "&look=classic" },
+  { name: "modern-light-motion", width: 1400, height: 1000, ratio: 2, touch: false, query: "&perf", media: LIGHT },
 ];
+
+// The page's theme facts: data-theme, theme-color, the body's background, the hint's colour
+// (C1 level 1 has a hint and no level name, and the inline picker means no Levels pill).
+const THEME_FACTS = `(() => JSON.stringify({
+  theme: document.documentElement.dataset.theme,
+  color: document.querySelector('meta[name="theme-color"]').content,
+  page: getComputedStyle(document.body).backgroundColor,
+  body: (() => { const t = document.querySelector("#captions .cap-body"); return t ? getComputedStyle(t).color : null; })(),
+  origin: performance.timeOrigin,
+}))()`;
+const theme = async () => JSON.parse(await evaluate(THEME_FACTS));
+
+// The page as index.html's head script leaves it before main.js runs: its look and theme, every
+// theme-color, the page and toolbar colours, and whether main.js has started (it sets `?perf`'s log).
+const FIRST_PAINT = `(() => JSON.stringify({
+  look: document.documentElement.dataset.look,
+  theme: document.documentElement.dataset.theme,
+  colors: [...document.querySelectorAll('meta[name="theme-color"]')].map((meta) => meta.content),
+  page: getComputedStyle(document.body).backgroundColor,
+  toolbar: getComputedStyle(document.querySelector("header")).backgroundColor,
+  started: window.__perf !== undefined,
+}))()`;
+
+// Loads the page with main.js held back (it fails, as blocked), so the picture is the one a visitor
+// sees while the wasm loads (final review I1), with the stored look `stored` (null: none) and
+// `query`; the browser's scheme is the view's.
+let firstPaints = 0;
+async function firstPaint(stored, query = "") {
+  const origin = await evaluate("location.origin + location.pathname");
+  await evaluate(stored === null ? `localStorage.removeItem("chromatron.look")` : `localStorage.setItem("chromatron.look", ${JSON.stringify(stored)})`);
+  await send("Fetch.enable", { patterns: [{ urlPattern: "*/main.js*" }] });
+  try {
+    await evaluate("window.shotStale = true");
+    // A query of its own each time: the same URL again (with its #1) would only scroll.
+    firstPaints += 1;
+    await send("Page.navigate", { url: `${origin}?shot=first-paint-${firstPaints}&perf${query}#1` });
+    for (let tries = 0; !(await evaluate(`!window.shotStale && document.readyState === "complete"`).catch(() => false)); tries += 1) {
+      assert.ok(tries < 100, "the held-back page did not load");
+      await delay(100);
+    }
+    await evaluate(FRAMES);
+    return JSON.parse(await evaluate(FIRST_PAINT));
+  } finally {
+    await send("Fetch.disable");
+    await evaluate(`localStorage.removeItem("chromatron.look")`);
+  }
+}
 
 // The analytics commands the page has pushed (web/analytics.js), as [command, target, params].
 const DATA_LAYER = `(window.dataLayer ?? []).map((entry) => [entry[0], entry[0] === "js" ? null : entry[1], entry[2] ?? null])`;
@@ -631,7 +691,7 @@ async function reducedLive(name) {
     await evaluate(PASTE_WIN);
     await delay(120);
     assert.ok(await evaluate("window.__session.next_wake(performance.now()) >= 0"), `${name}: the win is animating`);
-    await setMedia(REDUCE);
+    await setMedia(withScheme(REDUCE));
     const t0 = await evaluate("performance.now()");
     await delay(400);
     const lit = await litSince(t0);
@@ -639,7 +699,7 @@ async function reducedLive(name) {
     assert.ok(await evaluate(IDLE), `${name}: idle`);
     await shoot(`${name}-switched`);
   } finally {
-    await setMedia([]);
+    await setMedia(withScheme());
     await forgetAll();
   }
 }
@@ -648,15 +708,15 @@ async function reducedLive(name) {
 // the footer in the Help, the dark theme colour, and captions screen readers can read (only a
 // win text that #win-live already reads is aria-hidden). Captions never overflow their box
 // across, but for the ellipsised credits and compact name.
-function checkModern(facts, touchLayout) {
+function checkModern(facts, touchLayout, light = false) {
   assert.equal(facts.look, "modern");
   assert.equal(facts.game, null, "the classic frame is hidden");
   const { width, height } = facts.lightbox;
   const scale = glue.render_scale(width, height, facts.ratio, touchLayout);
   assert.deepEqual(facts.lightboxBacking, [Math.round(width * scale), Math.round(height * scale)], "backing = CSS size × render scale");
-  assert.ok(facts.lightboxCorner.slice(0, 3).every((v) => v < 40) && facts.lightboxCorner[3] === 255, `ink in the corner: ${facts.lightboxCorner}`);
+  assert.ok(facts.lightboxCorner.slice(0, 3).every((v) => (light ? v >= 230 : v < 40)) && facts.lightboxCorner[3] === 255, `${light ? "paper" : "ink"} in the corner: ${facts.lightboxCorner}`);
   assert.ok(facts.footerInHelp, "the footer is in the Help sheet");
-  assert.equal(facts.themeColor, "#06070b");
+  assert.equal(facts.themeColor, light ? "#eef1f6" : "#06070b");
   assert.equal(facts.storedLook, null, "no look stored unasked");
   assert.equal(facts.captionsAriaHidden, null, "screen readers read #captions");
   assert.ok(facts.captions.length >= 1, "the card's captions are typeset");
@@ -668,8 +728,8 @@ function checkModern(facts, touchLayout) {
 
 // The modern desktop at 1400 × 1000: the inline picker (Levels keeps its slot unseen), the hint
 // in the card's body and the credits line.
-function checkModernDesktop(facts) {
-  checkModern(facts, false);
+function checkModernDesktop(facts, light = false) {
+  checkModern(facts, false, light);
   assert.equal(facts.layout, "desktop");
   assert.equal(facts.toolbarRows, 1, "one toolbar row");
   assert.ok(!facts.tools.includes("levels-open"), `an inline picker, no Levels: ${facts.tools}`);
@@ -681,8 +741,8 @@ function checkModernDesktop(facts) {
 // The modern phone portrait: Levels and the compact "C1" in the toolbar, the stage sized by
 // stage_height for the room below the toolbar; no page scroll when the room holds Stacked's
 // minimum (`fits`), and a page taller than the screen otherwise.
-function checkModernPortrait(facts, { fits = true } = {}) {
-  checkModern(facts, true);
+function checkModernPortrait(facts, { fits = true, light = false } = {}) {
+  checkModern(facts, true, light);
   assert.equal(facts.layout, "portrait");
   assert.ok(facts.levelsOpen, "Levels shows");
   assert.equal(facts.gameShort, "C1", "the compact game control");
@@ -739,6 +799,12 @@ const CHECKS = {
   "modern-motion": checkModernDesktop,
   "modern-reduced": checkModernDesktop,
   "modern-reduced-live": checkModernDesktop,
+  "modern-light-desktop": (facts) => checkModernDesktop(facts, true),
+  "modern-light-portrait": (facts) => checkModernPortrait(facts, { light: true }),
+  "classic-light": (facts) => CHECKS.desktop(facts),
+  "modern-theme-live": (facts) => checkModernDesktop(facts),
+  "classic-theme-live": (facts) => CHECKS.desktop(facts),
+  "modern-light-motion": (facts) => checkModernDesktop(facts, true),
   "modern-desktop-narrow"(facts) {
     checkModern(facts, false);
     assert.equal(facts.layout, "desktop");
@@ -1688,6 +1754,82 @@ const ACTIONS = {
   "modern-motion": () => motionFrames("modern-motion"),
   "modern-reduced": () => reducedFrames("modern-reduced"),
   "modern-reduced-live": () => reducedLive("modern-reduced-live"),
+  async "modern-light-desktop"() {
+    const t = await theme();
+    assert.equal(t.theme, "light");
+    assert.equal(t.color, "#eef1f6");
+    assert.equal(t.page, "rgb(238, 241, 246)");
+    assert.equal(t.body, "rgb(58, 69, 102)", "the hint in the light body tone (#3a4566)");
+    const corner = await evaluate(`(() => Array.from(document.getElementById("lightbox").getContext("2d").getImageData(2, 2, 1, 1).data.slice(0, 3)))()`);
+    assert.ok(corner.every((c) => c >= 230), `light page: ${corner}`);
+  },
+  async "modern-light-portrait"() {
+    const t = await theme();
+    assert.equal(t.theme, "light");
+    assert.equal(t.color, "#eef1f6");
+    assert.equal(t.body, "rgb(58, 69, 102)", "the hint in the light body tone (#3a4566)");
+  },
+  async "classic-light"() {
+    const t = await theme();
+    assert.equal(t.theme, "dark", "classic keeps its dark page");
+    assert.equal(t.color, "#25272a");
+    assert.equal(t.page, "rgb(27, 28, 30)");
+    // The first paint, before main.js and the wasm: already light for a modern visitor, and
+    // still dark for a stored Classic or ?look=classic (the head script, not a CSS default).
+    const light = { look: "modern", theme: "light", colors: ["#eef1f6", "#eef1f6"], page: "rgb(238, 241, 246)", toolbar: "rgb(255, 255, 255)", started: false };
+    const dark = { look: "classic", theme: "dark", colors: ["#25272a", "#25272a"], page: "rgb(27, 28, 30)", toolbar: "rgb(37, 39, 42)", started: false };
+    assert.deepEqual(await firstPaint(null), light, "a light system's first paint is light");
+    assert.deepEqual(await firstPaint("classic"), dark, "a stored Classic's first paint stays dark");
+    assert.deepEqual(await firstPaint(null, "&look=classic"), dark, "?look=classic's first paint stays dark");
+  },
+  // Review Focus 5 in a browser (final review M3): under a dark system in classic, the scheme turns
+  // light (the page stays dark), then the player switches Classic look off: the modern page and
+  // canvas come up light.
+  async "classic-theme-live"() {
+    try {
+      assert.equal((await theme()).theme, "dark");
+      await setMedia(LIGHT);
+      await evaluate(SETTLE);
+      const classic = await theme();
+      assert.deepEqual([classic.theme, classic.color, classic.page], ["dark", "#25272a", "rgb(27, 28, 30)"], "classic keeps its dark page under the light scheme");
+      await evaluate(`document.getElementById("classic-look").click()`);
+      await hook();
+      await evaluate(SETTLE);
+      const modern = await theme();
+      assert.equal(await evaluate("document.documentElement.dataset.look"), "modern");
+      assert.deepEqual([modern.theme, modern.color, modern.page], ["light", "#eef1f6", "rgb(238, 241, 246)"], "the modern look comes up light");
+      const corner = await evaluate(`(() => Array.from(document.getElementById("lightbox").getContext("2d").getImageData(2, 2, 1, 1).data.slice(0, 3)))()`);
+      assert.ok(corner.every((c) => c >= 230), `the canvas is the light page: ${corner}`);
+    } finally {
+      await forgetAll().catch(() => {});
+    }
+  },
+  async "modern-theme-live"() {
+    await hook();
+    const before = await theme();
+    assert.equal(before.theme, "dark");
+    const dark = await lightboxHash();
+    await setMedia(LIGHT);
+    await evaluate(SETTLE);
+    const after = await theme();
+    assert.equal(after.theme, "light", "the page follows at once");
+    assert.equal(before.body, "rgb(195, 203, 230)", "the dark hint (#c3cbe6)");
+    assert.equal(after.body, "rgb(58, 69, 102)", "the captions change colour");
+    assert.notEqual(await lightboxHash(), dark, "the canvas repaints in light");
+    const corner = await evaluate(`(() => Array.from(document.getElementById("lightbox").getContext("2d").getImageData(2, 2, 1, 1).data.slice(0, 3)))()`);
+    assert.ok(corner.every((c) => c >= 230), `the repaint is the light page: ${corner}`);
+    assert.equal(after.origin, before.origin, "no reload (the document's time origin survives the flip)");
+    await setMedia(withScheme());
+    await evaluate(SETTLE);
+    assert.equal(await lightboxHash(), dark, "dark again, the same pixels");
+  },
+  async "modern-light-motion"() {
+    await hook();
+    await motionFrames("modern-light-motion");
+    const dark = perfRows.find((row) => row.name === "modern-motion animation frames");
+    const light = perfRows.find((row) => row.name === "modern-light-motion animation frames");
+    if (dark && light) console.log(`perf: modern-light-motion p90 / modern-motion p90 = ${(light.p90 / dark.p90).toFixed(2)} (${light.p90.toFixed(1)} / ${dark.p90.toFixed(1)} ms)`);
+  },
   "modern-landscape-bars-844": (facts) => landscapeBars("modern-landscape-bars-844", facts),
   "modern-landscape-bars-667": (facts) => landscapeBars("modern-landscape-bars-667", facts),
   "modern-landscape-bars-740": (facts) => landscapeBars("modern-landscape-bars-740", facts),
@@ -1955,12 +2097,13 @@ try {
   await send("Page.enable");
   await send("Network.enable");
   // The first visit opens the help once; mark it seen so that the pictures show the game.
+  await setMedia(withScheme());
   await load({ name: "first-visit", width: 1400, height: 1000, ratio: 1, touch: false, query: "&look=classic" }, origin);
   assert.deepEqual(pageErrors, [], "no errors on the page at the first visit");
   await evaluate(`localStorage.setItem("chromatron.helpSeen", "1")`);
   for (const scenario of SCENARIOS) {
-    // Media features emulated from the load (reduced motion), restored after the view.
-    if (scenario.media) await setMedia(scenario.media);
+    // Media features emulated from the load (reduced motion, a scheme), restored after the view.
+    await setMedia(withScheme(scenario.media));
     await load(scenario, origin);
     const facts = await evaluate(FACTS);
     writeFileSync(join(outDir, `${scenario.name}.json`), `${JSON.stringify(facts, null, 2)}\n`);
@@ -1980,7 +2123,7 @@ try {
       failures += 1;
       console.error(`FAIL ${scenario.name}: ${error.message}`);
     } finally {
-      if (scenario.media) await setMedia([]);
+      await setMedia(withScheme());
     }
   }
   // The `?perf` animation rows (spec §14), against ANIM_CAP.

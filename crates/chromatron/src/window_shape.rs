@@ -1,6 +1,7 @@
 //! The window each look opens (spec §13): classic's fixed 640 × 480 pt window exactly as today,
 //! and modern's resizable one (default 1280 × 800 pt within 90% of the screen, minimum 800 × 600);
-//! the modern easel for a window size; the theme for the window's appearance; and AppKit's
+//! the modern easel for a window size; the theme for the window's appearance and the ground
+//! its layer shows; and AppKit's
 //! word that the window has left fullscreen, which a look's shape waits for.
 
 use std::ptr::NonNull;
@@ -17,6 +18,7 @@ use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowButtons};
 
+use crate::blit::LETTERBOX;
 use crate::look_switch::Look;
 
 /// The modern window's minimum content size (pt, D6).
@@ -170,10 +172,26 @@ pub fn easel_for(size: PhysicalSize<u32>, scale_factor: f64) -> Easel {
     Easel::new(size.width, size.height, scale_factor as f32)
 }
 
-/// The modern look's theme for the window's effective appearance (spec §11). Only the dark
-/// theme exists until phase 5, which returns `Theme::Light` for `Some(Light)` here.
-pub fn theme_for(_appearance: Option<winit::window::Theme>) -> Theme {
-    Theme::Dark
+/// The modern look's theme for the window's effective appearance (spec §11): light under a
+/// light appearance, dark otherwise (the brand look when AppKit reports none).
+pub fn theme_for(appearance: Option<winit::window::Theme>) -> Theme {
+    match appearance {
+        Some(winit::window::Theme::Light) => Theme::Light,
+        _ => Theme::Dark,
+    }
+}
+
+/// The window's ground in `look` and `theme`, as [r, g, b]: what shows where the presented
+/// canvas doesn't reach yet (final review M1). Classic: its letterbox; modern: the page's
+/// ground at its edge (the palette's bottom ground).
+pub fn ground_for(look: Look, theme: Theme) -> [u8; 3] {
+    match look {
+        Look::Classic => [LETTERBOX >> 16, LETTERBOX >> 8, LETTERBOX].map(|c| c as u8),
+        Look::Modern => {
+            let halation::Rgb(r, g, b) = theme.palette().ground[1];
+            [r, g, b]
+        }
+    }
 }
 
 #[cfg(test)]
@@ -251,11 +269,22 @@ mod tests {
         assert!(!t.compact && t.picker.is_none());
     }
 
-    /// Phase 5 maps `Light` to `Theme::Light` here, and changes this test.
+    /// Ruling L12: the light appearance paints light; none (AppKit reports nothing) is the brand
+    /// look.
     #[test]
-    fn every_appearance_is_dark_until_phase_5() {
-        assert_eq!(theme_for(None), Theme::Dark);
+    fn the_light_appearance_is_the_light_theme() {
+        assert_eq!(theme_for(None), Theme::Dark, "unknown: the brand look");
         assert_eq!(theme_for(Some(winit::window::Theme::Dark)), Theme::Dark);
-        assert_eq!(theme_for(Some(winit::window::Theme::Light)), Theme::Dark);
+        assert_eq!(theme_for(Some(winit::window::Theme::Light)), Theme::Light);
+    }
+
+    /// Final review M1: the strip a resize uncovers is the page's ground, never black in light.
+    #[test]
+    fn the_ground_follows_the_look_and_the_theme() {
+        for theme in Theme::ALL {
+            assert_eq!(ground_for(Look::Classic, theme), [0, 0, 0], "the letterbox");
+        }
+        assert_eq!(ground_for(Look::Modern, Theme::Dark), [0x06, 0x07, 0x0b]);
+        assert_eq!(ground_for(Look::Modern, Theme::Light), [0xe9, 0xec, 0xf3]);
     }
 }

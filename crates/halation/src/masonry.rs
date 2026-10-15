@@ -6,7 +6,7 @@ use lumen::{BOARD_CELLS, Board, Piece, SIDE, board_index};
 use crate::bloom::{blur_plane, blur_scratch};
 use crate::etch::{Blend, Layer, Paint, Pt, Shape, Stops, Target, clip_rect, fill, pt};
 use crate::spectrum::{Palette, Rgba};
-use crate::{DeviceRect, fit_buffer, make_room};
+use crate::{DeviceRect, fit_buffer, make_room, vitrine};
 
 /// Grid lines 0.35u past the board, `max(1 px, 0.014u)` wide, and crossing dots of radius
 /// `max(1 px, 0.022u)`; both fade radially over 0.75 × the board diagonal.
@@ -81,8 +81,13 @@ pub fn draw_grid(
     }
 }
 
+/// The light tile's shadow (spec §7.2: blur 0.08u, so σ 0.04u; 0.03u down), in units of `u`.
+pub(crate) const TILE_SHADOW_SIGMA: f32 = 0.04;
+pub(crate) const TILE_SHADOW_DROP: f32 = 0.03;
+
 /// The glass tile under a piece (`raised`: movable, h = 1): inset 0.07u, radius 0.16u, a
-/// diagonal glass fill and a vertical three-stop rim `max(1 px, 0.014u)` wide.
+/// diagonal glass fill and a vertical three-stop rim `max(1 px, 0.014u)` wide. A light palette
+/// casts a soft shadow under it first (`tile_shadow`).
 pub fn draw_tile(
     t: &mut dyn Target,
     clip: DeviceRect,
@@ -99,23 +104,23 @@ pub fn draw_tile(
         centre.x + half,
         centre.y + half,
     );
+    // The light theme's shadow, cast under the tile, inside its sprite, which is its cell: the
+    // tail past the cell is cut (≤ 2 code values at the sides, about 5 at the bottom; ruling L8).
+    if let Some(shade) = palette.tile_shadow {
+        let drop = TILE_SHADOW_DROP * u;
+        let cast = Shape::round_rect(l, tp + drop, r, b + drop, 0.16 * u);
+        vitrine::soft_shape(t, clip, &cast, TILE_SHADOW_SIGMA * u, shade.at(h), None);
+    }
     let shape = Shape::round_rect(l, tp, r, b, 0.16 * u);
-    let glass = Paint::Linear {
-        from: pt(l, tp),
-        to: pt(r, b),
-        stops: Stops::new(&[
-            (0.0, palette.glass.at(0.085 + 0.05 * h)),
-            (1.0, palette.glass_deep.alpha(0.025 + 0.02 * h)),
-        ]),
-    };
+    let glass = vitrine::glaze(&palette.tile, (l, tp, r, b), h);
     fill(t, clip, &[shape], &glass, 1.0, Blend::Over);
     let rim = Paint::Linear {
         from: pt(0.0, tp),
         to: pt(0.0, b),
         stops: Stops::new(&[
-            (0.0, palette.rim.at(0.26 + 0.3 * h)),
-            (0.5, palette.rim.at(0.06 + 0.1 * h)),
-            (1.0, palette.rim.at(0.10 + 0.16 * h)),
+            (0.0, palette.tile_rim[0].at(h)),
+            (0.5, palette.tile_rim[1].at(h)),
+            (1.0, palette.tile_rim[2].at(h)),
         ]),
     };
     fill(
@@ -198,6 +203,7 @@ impl WallScratch {
         fit_buffer(&mut self.line.shadow, hw + 2, 0.0);
         fit_buffer(&mut self.line.near, width, 0);
         fit_buffer(&mut self.line.deep, width, 0);
+        fit_buffer(&mut self.line.columns, 2 * width, 0);
     }
 
     pub fn bytes(&self) -> usize {
@@ -207,6 +213,7 @@ impl WallScratch {
             + self.line.shadow.capacity() * size_of::<f32>()
             + self.line.near.capacity()
             + self.line.deep.capacity()
+            + self.line.columns.capacity() * size_of::<u16>()
     }
 
     /// Labels the board's 4-connected wall groups and finds each one's rows; false when the
@@ -259,6 +266,8 @@ struct LineScratch {
     near: Vec<u8>,
     /// `near`'s least across the horizontal bands' reach: 255 where no band touches a pixel.
     deep: Vec<u8>,
+    /// `cover`'s coverage per column of a slab's edge, per half (two widths).
+    columns: Vec<u16>,
 }
 
 /// A coverage mask that `fill` draws into: a union keeps each pixel's largest coverage, so
@@ -286,10 +295,19 @@ fn coverage_byte(d: f32) -> u8 {
     (coverage * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
+/// `cover`'s mark for a column's coverage not yet measured (a coverage is a byte).
+const UNMEASURED: u16 = 0x100;
+
 /// Fills `shape` into `mask` as `fill` would. A slab's rect is drawn directly: 255 where it
 /// covers fully, away from its rounded corners; elsewhere each pixel's coverage, where along a
-/// straight top or bottom edge one distance serves the whole run.
-fn cover(mask: &mut SlabMask, shape: Shape) {
+/// straight top or bottom edge one distance serves the whole run, and along a straight left or
+/// right edge one distance serves the whole column (per half: `columns` holds them, at least
+/// twice the mask's width).
+fn cover(mask: &mut SlabMask, shape: Shape, columns: &mut [u16]) {
+    debug_assert!(
+        columns.len() >= 2 * mask.width,
+        "cover's columns: at least twice the mask's width"
+    );
     let (w, h) = (mask.width as i32, mask.height as i32);
     let full = DeviceRect::new(0, 0, w, h);
     let Shape::RoundRect {
@@ -332,6 +350,13 @@ fn cover(mask: &mut SlabMask, shape: Shape) {
     // > 0 is at distance `|(0, qy)| − r` whatever its x.
     let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
     let (hx, hy) = ((right - left) / 2.0, (bottom - top) / 2.0);
+    // On a row whose `qy` is ≤ 0, `distance` is `|(max(qx, 0), 0)| + min(qx, 0) − r` where
+    // `qx ≥ qy` (its row's terms drop out: `max(qy, 0)` squares to 0 and `max(qx, qy)` is
+    // `qx`), which holds for its column in that half (top or bottom: the radii), and
+    // `0 + min(qy, 0) − r` where `qx < qy` (`max(qx, 0)` is 0), which holds for the row.
+    let span = (x1 - x0).max(0) as usize;
+    let columns = &mut columns[..2 * span];
+    columns.fill(UNMEASURED);
     for y in y0..y1 {
         let py = y as f32 + 0.5;
         let dy = py - cy;
@@ -346,13 +371,16 @@ fn cover(mask: &mut SlabMask, shape: Shape) {
             (qy > 0.0).then(|| coverage_byte(pt(0.0, qy).len() - r))
         };
         let (run_left, run_right) = (run(r_left), run(r_right));
-        let skip = if (inner.top..inner.bottom).contains(&y) {
-            inner.left..inner.right
+        // The px the filled rect leaves on this row: either side of it (`inner` lies in x0..x1),
+        // or the whole row past its rows. The full px are stepped over, not tested.
+        let (before, after) = if (inner.top..inner.bottom).contains(&y) {
+            (x1.min(inner.left), x0.max(inner.right))
         } else {
-            0..0
+            (x1, x1)
         };
+        let half = &mut columns[usize::from(dy >= 0.0) * span..][..span];
         let row = &mut mask.px[y as usize * mask.width..][..mask.width];
-        for x in (x0..x1).filter(|x| !skip.contains(x)) {
+        for x in (x0..before).chain(after..x1) {
             let px = x as f32 + 0.5;
             let dx = px - cx;
             let (r, run) = if dx < 0.0 {
@@ -360,9 +388,19 @@ fn cover(mask: &mut SlabMask, shape: Shape) {
             } else {
                 (r_right, run_right)
             };
+            let qx = dx.abs() - hx + r;
+            let qy = dy.abs() - hy + r;
             let v = match run {
-                Some(v) if dx.abs() - hx + r <= 0.0 => v,
-                _ => coverage_byte(shape.distance(pt(px, py))),
+                Some(v) if qx <= 0.0 => v,
+                None if qy <= 0.0 && qx >= qy => {
+                    let v = &mut half[(x - x0) as usize];
+                    if *v == UNMEASURED {
+                        *v = coverage_byte(pt(qx.max(0.0), 0.0).len() + qx.min(0.0) - r).into();
+                    }
+                    *v as u8
+                }
+                None if qy <= 0.0 => coverage_byte(0.0 + qy.min(0.0) - r),
+                _ => coverage_byte(shape.signed(pt(px, py))),
             };
             let p = &mut row[x as usize];
             *p = (*p).max(v);
@@ -834,7 +872,7 @@ fn draw_window(
                     .then(|| Shape::rect(cx + near, cy + near, cx + far, cy + far)),
             ];
             for shape in parts.into_iter().flatten() {
-                cover(&mut target, shape);
+                cover(&mut target, shape, &mut scratch.line.columns);
             }
         }
     }
@@ -886,6 +924,47 @@ mod tests {
 
     fn black(w: usize, h: usize) -> Vec<u32> {
         vec![0u32; w * h]
+    }
+
+    /// Spec §7.2 Light tile: nearly white glass, a shadow 0.03u down (σ 0.04u) inside its
+    /// cell, darker below the tile than above it.
+    #[test]
+    fn a_light_tile_is_white_glass_with_a_shadow_below() {
+        let ground = 0x00f0_f2f7u32;
+        let mut px = vec![ground; 100 * 100];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 100,
+            height: 100,
+        };
+        let full = DeviceRect::new(0, 0, 100, 100);
+        draw_tile(
+            &mut layer,
+            full,
+            &Palette::LIGHT,
+            pt(50.0, 50.0),
+            100.0,
+            true,
+        );
+        let lum = |p: u32| (p >> 16 & 0xff) + (p >> 8 & 0xff) + (p & 0xff);
+        // The glass (white α 0.95 → (223,228,242) α 0.7) covers its own shadow: inside, the
+        // tile is as light as the bare ground (α 0.14 of ink would take ≈ 85 off it).
+        let glass = px[30 * 100 + 30];
+        assert!(lum(glass) + 3 >= lum(ground), "the glass: {glass:06x}");
+        // Pinned (review T5 M2): the glaze over its shadow over this ground is #f0f2f7 ± 2.
+        let near = |s: u32| (glass >> s & 0xff).abs_diff(0xf0f2f7 >> s & 0xff) <= 2;
+        assert!(near(16) && near(8) && near(0), "the glass: {glass:06x}");
+        // The tile spans 7..93: 2 px below its bottom edge vs 2 px above its top edge.
+        let (below, above) = (px[95 * 100 + 50], px[4 * 100 + 50]);
+        assert!(lum(below) + 6 < lum(above), "{below:06x} vs {above:06x}");
+        // The shadow's tail reaches 2σ = 8 px past the tile (its edge at 7): at x = 1 it is
+        // α ≈ 0.009, within 2 code values of the ground.
+        let (side, g) = (px[50 * 100 + 1], ground);
+        let close = |s: u32| ((side >> s & 0xff) as i32 - (g >> s & 0xff) as i32).abs() <= 2;
+        assert!(
+            close(16) && close(8) && close(0),
+            "the cell's side edge: {side:06x}"
+        );
     }
 
     fn walled_with(palette: &Palette, cells: &[(usize, usize)]) -> (Vec<u32>, f32) {
@@ -946,13 +1025,14 @@ mod tests {
     #[test]
     fn covering_a_slab_matches_filling_it() {
         let (w, h) = (97, 83);
+        let mut columns = vec![0; 2 * w];
         let ink = Paint::Solid(Rgba::CLEAR.with_alpha(1.0));
         let mut k = 0u32;
         let mut next = || {
             k = k.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             (k >> 8) as f32 / (1 << 24) as f32
         };
-        for _ in 0..400 {
+        for _ in 0..4000 {
             let (cx, cy) = (-10.0 + 117.0 * next(), -10.0 + 103.0 * next());
             let (a, b) = (1.0 + 45.0 * next(), 1.0 + 45.0 * next());
             let radius = [0.0, 0.12 * a.min(b), 0.5 * a.min(b)][(3.0 * next()) as usize % 3];
@@ -973,6 +1053,7 @@ mod tests {
                     height: h,
                 },
                 shape,
+                &mut columns,
             );
             fill(
                 &mut SlabMask {
@@ -1059,44 +1140,46 @@ mod tests {
 
     #[test]
     fn walls_take_every_colour_from_the_palette() {
-        let sentinel = Palette::DARK.recoloured(crate::Rgb(255, 0, 255));
-        let mut board = Board::default();
-        for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2), (5, 5)] {
-            board.cells[board_index(x, y)] = Cell {
-                piece: Piece::Wall,
-                colour: 0,
-                dir: 0,
+        for theme in crate::Theme::ALL {
+            let sentinel = theme.palette().recoloured(crate::Rgb(255, 0, 255));
+            let mut board = Board::default();
+            for (x, y) in [(1, 1), (2, 1), (1, 2), (2, 2), (5, 5)] {
+                board.cells[board_index(x, y)] = Cell {
+                    piece: Piece::Wall,
+                    colour: 0,
+                    dir: 0,
+                };
+            }
+            let mut px = vec![0u32; 300 * 300];
+            let region = DeviceRect::new(0, 0, 300, 300);
+            let mut scratch = WallScratch::new();
+            scratch.reshape(region, 40.0);
+            let mut layer = Layer {
+                px: &mut px,
+                width: 300,
+                height: 300,
             };
-        }
-        let mut px = vec![0u32; 300 * 300];
-        let region = DeviceRect::new(0, 0, 300, 300);
-        let mut scratch = WallScratch::new();
-        scratch.reshape(region, 40.0);
-        let mut layer = Layer {
-            px: &mut px,
-            width: 300,
-            height: 300,
-        };
-        draw_walls(
-            &mut layer,
-            region,
-            &sentinel,
-            &board,
-            pt(0.0, 0.0),
-            40.0,
-            &mut scratch,
-        );
-        draw_grid(
-            &mut layer,
-            region,
-            &sentinel,
-            DeviceRect::new(0, 0, 300, 300),
-            20.0,
-        );
-        draw_tile(&mut layer, region, &sentinel, pt(150.0, 150.0), 40.0, true);
-        for &p in &px {
-            let [r, g, b] = channels(p);
-            assert!(g == 0 && (r - b).abs() <= 1, "{p:06x}");
+            draw_walls(
+                &mut layer,
+                region,
+                &sentinel,
+                &board,
+                pt(0.0, 0.0),
+                40.0,
+                &mut scratch,
+            );
+            draw_grid(
+                &mut layer,
+                region,
+                &sentinel,
+                DeviceRect::new(0, 0, 300, 300),
+                20.0,
+            );
+            draw_tile(&mut layer, region, &sentinel, pt(150.0, 150.0), 40.0, true);
+            for &p in &px {
+                let [r, g, b] = channels(p);
+                assert!(g == 0 && (r - b).abs() <= 1, "{theme:?}: {p:06x}");
+            }
         }
     }
 
@@ -1116,8 +1199,8 @@ mod tests {
             100.0,
             true,
         );
-        // Halfway along the fill: glass α 0.135 and glass_deep α 0.045, straight-interpolated
-        // to (145, 165, 237.5) at α 0.09, over black.
+        // Halfway along the fill: glass α 0.135 and the tile's far stop α 0.045,
+        // straight-interpolated to (145, 165, 237.5) at α 0.09, over black.
         let p = px[50 * 100 + 50];
         let (r, g, b) = (
             (p >> 16 & 0xff) as i32,

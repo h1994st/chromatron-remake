@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::{SETTLED, cold, cold_with, state};
+use common::{SETTLED, cold, state};
 use halation::{Control, DeviceRect, Easel, Lightbox, MAX_DAMAGE, Output, Scene, Theme};
 use lumen::{
     BOARD_CELLS, Floorplan, GameState, Hit, InputEvent, Piece, SIDE, VISIBLE_TOOLBOX_SLOTS,
@@ -697,6 +697,8 @@ struct Covered {
     ringed: usize,
     landed: usize,
     cancels: usize,
+    /// Theme switches (walks with `flips` only).
+    flips: usize,
 }
 
 #[test]
@@ -705,7 +707,7 @@ fn incremental_paints_equal_cold_paints() {
     // silently stop covering a case. The drag cases also have their own scripted tests above.
     let mut all = Covered::default();
     for seed in [4, 88, 149, 164, 268] {
-        let c = walk(seed);
+        let c = walk(seed, false);
         all.chosen += c.chosen;
         all.wins += c.wins;
         all.sheets += c.sheets;
@@ -734,9 +736,20 @@ fn incremental_paints_equal_cold_paints() {
     }
 }
 
+#[test]
+fn incremental_paints_equal_cold_paints_across_theme_changes() {
+    let mut flips = 0;
+    for seed in [7, 91, 230] {
+        flips += walk(seed, true).flips;
+    }
+    assert!(flips >= 3, "the walks switched theme");
+}
+
 /// 60 random steps from `seed` (wins, presses, drags held and dropped, inline chips, the sheet,
 /// game switches and resizes), each frame painted incrementally and checked against a cold paint.
-fn walk(start: u32) -> Covered {
+/// With `flips`, a second sequence (so the first one's steps are untouched) switches the theme
+/// before one step in ten (ruling L10), and the cold paint is in the theme switched to.
+fn walk(start: u32, flips: bool) -> Covered {
     let mut seed = start;
     let mut next = |n: u32| {
         seed ^= seed << 13;
@@ -744,14 +757,31 @@ fn walk(start: u32) -> Covered {
         seed ^= seed << 5;
         seed % n
     };
+    let mut flip_seed = start ^ 0x5eed;
+    let mut flip = move || {
+        flip_seed ^= flip_seed << 13;
+        flip_seed ^= flip_seed >> 17;
+        flip_seed ^= flip_seed << 5;
+        flip_seed.is_multiple_of(10)
+    };
     // Starts at 1280 × 800, the one easel here with an inline picker (and the brand).
     let mut easel = easel_1280();
-    let mut lightbox = Lightbox::new(easel, Theme::Dark, false);
+    let mut theme = Theme::Dark;
+    let mut lightbox = Lightbox::new(easel, theme, false);
     let mut games = Game::ALL.map(|g| state(g, 0, false));
     let mut current = 0;
     let mut out = canvas(easel);
     let mut c = Covered::default();
     for step in 0..60 {
+        if flips && flip() {
+            theme = if theme == Theme::Dark {
+                Theme::Light
+            } else {
+                Theme::Dark
+            };
+            lightbox.set_theme(theme);
+            c.flips += 1;
+        }
         let tableau = lightbox.tableau().clone();
         let game = &mut games[current];
         let (held, was) = (game.drag().is_some(), current);
@@ -886,8 +916,8 @@ fn walk(start: u32) -> Covered {
         }
         lightbox.paint(game, SETTLED, Output::Xrgb(&mut out));
         assert!(
-            out == cold_with(easel, Scene::of(game), lightbox.sheet_open()),
-            "seed {start}, step {step}: incremental differs from cold"
+            out == common::cold_with_in(theme, easel, Scene::of(game), lightbox.sheet_open()),
+            "seed {start}, step {step} ({theme:?}): incremental differs from cold"
         );
     }
     c
@@ -1142,99 +1172,104 @@ fn tiny_canvases_paint() {
 #[test]
 fn memory_stays_within_budget() {
     const MB: usize = 1 << 20;
-    let bytes = |easel: Easel| Lightbox::new(easel, Theme::Dark, false).buffer_bytes();
-    // The web's own RGBA canvas counts too (spec §14).
-    let web = |w: u32, h: u32, scale: f32| bytes(Easel::new(w, h, scale)) + (w * h * 4) as usize;
-    let phone = bytes(Easel::new(780, 1688, 2.0).with_touch(true)) + 780 * 1688 * 4;
-    assert!(
-        phone <= 20 * MB,
-        "phone 390 × 844 @2 (Stacked): {} MiB",
-        phone / MB
-    );
-    assert!(
-        web(2450, 1671, 1.75) <= 96 * MB,
-        "web desktop 1400 × 955 @1.75: {} MiB",
-        web(2450, 1671, 1.75) / MB
-    );
-    assert!(
-        web(2880, 1910, 1.0) <= 96 * MB,
-        "web at the 5.5 Mpx limit: {} MiB",
-        web(2880, 1910, 1.0) / MB
-    );
-    assert!(
-        bytes(Easel::new(2560, 1600, 2.0)) <= 64 * MB,
-        "macOS 2560 × 1600"
-    );
-    assert!(
-        bytes(Easel::new(3456, 2234, 2.0)) <= 110 * MB,
-        "macOS 3456 × 2234"
-    );
+    for theme in Theme::ALL {
+        let bytes = |easel: Easel| Lightbox::new(easel, theme, false).buffer_bytes();
+        // The web's own RGBA canvas counts too (spec §14).
+        let web =
+            |w: u32, h: u32, scale: f32| bytes(Easel::new(w, h, scale)) + (w * h * 4) as usize;
+        let phone = bytes(Easel::new(780, 1688, 2.0).with_touch(true)) + 780 * 1688 * 4;
+        assert!(
+            phone <= 20 * MB,
+            "{theme:?}: phone 390 × 844 @2 (Stacked): {} MiB",
+            phone / MB
+        );
+        assert!(
+            web(2450, 1671, 1.75) <= 96 * MB,
+            "{theme:?}: web desktop 1400 × 955 @1.75: {} MiB",
+            web(2450, 1671, 1.75) / MB
+        );
+        assert!(
+            web(2880, 1910, 1.0) <= 96 * MB,
+            "{theme:?}: web at the 5.5 Mpx limit: {} MiB",
+            web(2880, 1910, 1.0) / MB
+        );
+        assert!(
+            bytes(Easel::new(2560, 1600, 2.0)) <= 64 * MB,
+            "{theme:?}: macOS 2560 × 1600"
+        );
+        assert!(
+            bytes(Easel::new(3456, 2234, 2.0)) <= 110 * MB,
+            "{theme:?}: macOS 3456 × 2234"
+        );
+    }
 }
 
 #[test]
 fn memory_stays_within_budget_across_resizes() {
     const MB: usize = 1 << 20;
-    // A lightbox made at `sizes[0]` and resized through the rest, ending at the last size.
-    let bytes = |sizes: &[Easel]| {
-        let mut lightbox = Lightbox::new(sizes[0], Theme::Dark, false);
-        for &easel in &sizes[1..] {
-            lightbox.resize(easel);
+    for theme in Theme::ALL {
+        // A lightbox made at `sizes[0]` and resized through the rest, ending at the last size.
+        let bytes = |sizes: &[Easel]| {
+            let mut lightbox = Lightbox::new(sizes[0], theme, false);
+            for &easel in &sizes[1..] {
+                lightbox.resize(easel);
+            }
+            lightbox.buffer_bytes()
+        };
+        let web = Easel::new(2880, 1910, 1.0);
+        let rgba = (web.width * web.height * 4) as usize;
+        for (path, what) in [
+            (
+                [Easel::new(2860, 1900, 1.0), web],
+                "a window grown by a few px",
+            ),
+            ([Easel::new(1400, 900, 1.0), web], "grown from small"),
+        ] {
+            let end = path[path.len() - 1];
+            let total = bytes(&path) + (end.width * end.height * 4) as usize;
+            assert!(
+                total <= 96 * MB,
+                "{theme:?}: web {what}, ending {}×{}: {:.1} MiB",
+                end.width,
+                end.height,
+                total as f64 / MB as f64
+            );
         }
-        lightbox.buffer_bytes()
-    };
-    let web = Easel::new(2880, 1910, 1.0);
-    let rgba = (web.width * web.height * 4) as usize;
-    for (path, what) in [
-        (
-            [Easel::new(2860, 1900, 1.0), web],
-            "a window grown by a few px",
-        ),
-        ([Easel::new(1400, 900, 1.0), web], "grown from small"),
-    ] {
-        let end = path[path.len() - 1];
-        let total = bytes(&path) + (end.width * end.height * 4) as usize;
+        // A much smaller canvas gives the memory back.
+        let small = Easel::new(1400, 900, 1.0);
+        let (shrunk, fresh) = (bytes(&[web, small]), bytes(&[small]));
         assert!(
-            total <= 96 * MB,
-            "web {what}, ending {}×{}: {:.1} MiB",
-            end.width,
-            end.height,
-            total as f64 / MB as f64
+            shrunk <= fresh + fresh / 8,
+            "{theme:?}: shrunk to 1400 × 900: {:.1} MiB, fresh {:.1} MiB",
+            shrunk as f64 / MB as f64,
+            fresh as f64 / MB as f64
+        );
+        let shrunk_then_grown = bytes(&[web, Easel::new(1400, 900, 1.0), web]) + rgba;
+        assert!(
+            shrunk_then_grown <= 96 * MB,
+            "{theme:?}: web shrunk then grown: {:.1} MiB",
+            shrunk_then_grown as f64 / MB as f64
+        );
+        let mac = Easel::new(3456, 2234, 2.0);
+        for path in [
+            vec![Easel::new(3440, 2220, 2.0), mac],
+            vec![mac, Easel::new(1600, 1000, 2.0), mac],
+            vec![Easel::new(2560, 1600, 2.0), mac],
+        ] {
+            let total = bytes(&path);
+            assert!(
+                total <= 110 * MB,
+                "{theme:?}: macOS {path:?}: {:.1} MiB",
+                total as f64 / MB as f64
+            );
+        }
+        let grown = bytes(&[Easel::new(2540, 1590, 2.0), Easel::new(2560, 1600, 2.0)]);
+        assert!(
+            grown <= 64 * MB,
+            "{theme:?}: macOS grown to 2560 × 1600: {:.1} MiB",
+            grown as f64 / MB as f64
         );
     }
-    // A much smaller canvas gives the memory back.
-    let small = Easel::new(1400, 900, 1.0);
-    let (shrunk, fresh) = (bytes(&[web, small]), bytes(&[small]));
-    assert!(
-        shrunk <= fresh + fresh / 8,
-        "shrunk to 1400 × 900: {:.1} MiB, fresh {:.1} MiB",
-        shrunk as f64 / MB as f64,
-        fresh as f64 / MB as f64
-    );
-    let shrunk_then_grown = bytes(&[web, Easel::new(1400, 900, 1.0), web]) + rgba;
-    assert!(
-        shrunk_then_grown <= 96 * MB,
-        "web shrunk then grown: {:.1} MiB",
-        shrunk_then_grown as f64 / MB as f64
-    );
-    let mac = Easel::new(3456, 2234, 2.0);
-    for path in [
-        vec![Easel::new(3440, 2220, 2.0), mac],
-        vec![mac, Easel::new(1600, 1000, 2.0), mac],
-        vec![Easel::new(2560, 1600, 2.0), mac],
-    ] {
-        let total = bytes(&path);
-        assert!(
-            total <= 110 * MB,
-            "macOS {path:?}: {:.1} MiB",
-            total as f64 / MB as f64
-        );
-    }
-    let grown = bytes(&[Easel::new(2540, 1590, 2.0), Easel::new(2560, 1600, 2.0)]);
-    assert!(
-        grown <= 64 * MB,
-        "macOS grown to 2560 × 1600: {:.1} MiB",
-        grown as f64 / MB as f64
-    );
 }
 
 /// Ruling P4 (phase 3): a rect the shell drew over is recomposed at the next paint, which then

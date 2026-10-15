@@ -10,7 +10,7 @@ use objc2::runtime::{AnyObject, Bool};
 use objc2_core_foundation::{
     CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
 };
-use objc2_core_graphics::CGColorSpace;
+use objc2_core_graphics::{CGColor, CGColorSpace};
 use objc2_io_surface::{
     IOSurfaceLockOptions, IOSurfaceRef, kIOSurfaceBytesPerElement, kIOSurfaceColorSpace,
     kIOSurfaceHeight, kIOSurfacePixelFormat, kIOSurfaceWidth,
@@ -297,6 +297,21 @@ impl LayerPresenter {
             current: false,
             crowded: 0,
         })
+    }
+
+    /// The colour the layer shows where its contents don't reach: the strip that a live resize
+    /// or the fullscreen animation uncovers before the next present (final review M1). Without
+    /// it that strip is black, which shows against a light page.
+    pub fn set_ground(&self, [r, g, b]: [u8; 3]) {
+        let rgba = [r, g, b, 255].map(|c| c as f64 / 255.0);
+        let Some(space) = CGColorSpace::new_device_rgb() else {
+            return;
+        };
+        // SAFETY: four components, the device RGB space's three and alpha.
+        let Some(color) = (unsafe { CGColor::new(Some(&space), rgba.as_ptr()) }) else {
+            return;
+        };
+        without_actions(|| self.layer.setBackgroundColor(Some(&color)));
     }
 
     /// How many surfaces this size has.

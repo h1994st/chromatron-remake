@@ -40,7 +40,7 @@ The original Mac versions are PowerPC Carbon apps, which no longer run on curren
 
 ## 🌐 Play in your browser
 
-**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. It opens in the modern look: beams sweep out from their lasers, targets flash as they light, and pieces lift, turn and land. **Actions ▸ Classic look** switches to the original graphics, and the page remembers your choice. With the system's reduced-motion setting on, every change appears at once. On a phone it switches to a touch layout, held upright or turned sideways. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. The hosted page uses Google Analytics to count visits and plays. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
+**[shengtuo.me/chromatron-remake](https://shengtuo.me/chromatron-remake/)** plays all four games in one page, in current Safari, Chrome and Firefox. It opens in the modern look: beams sweep out from their lasers, targets flash as they light, and pieces lift, turn and land. The modern look follows the system's light or dark appearance; the classic look is unchanged. **Actions ▸ Classic look** switches to the original graphics, and the page remembers your choice. With the system's reduced-motion setting on, every change appears at once. On a phone it switches to a touch layout, held upright or turned sideways. Progress stays in your browser, and solutions copied on the page paste into the Mac apps and back. The hosted page uses Google Analytics to count visits and plays. To build the page yourself, install the matching `wasm-bindgen` CLI (`just web` prints the exact `cargo install` command), then run `just web-serve` and open <http://127.0.0.1:8000/>.
 
 ## 🧰 Requirements
 
@@ -77,7 +77,7 @@ Guide the coloured beams 🌈 to light every target. Drag pieces between the too
 
 - 🖱️ **File ▸ Mouse Wheel Changes Level** turns level switching with the scroll wheel on or off.
 - 🔍 In the classic look, **View ▸ Scale** sets the window size in whole multiples of the original 640×480, so pixels stay sharp. The modern window resizes freely, down to 800×600.
-- 🎞️ The modern look animates beams, targets and pieces; with the system's reduced-motion setting on, every change appears at once. Each app remembers which look you chose.
+- 🎞️ The modern look animates beams, targets and pieces; with the system's reduced-motion setting on, every change appears at once. The modern look follows the system's light or dark appearance; the classic look is unchanged. Each app remembers which look you chose.
 - 💾 Progress is saved in `~/Library/Application Support/Chromatron N/` in the original games' own file format. Each game reopens on the level you last played.
 
 ## 🧑‍💻 Development

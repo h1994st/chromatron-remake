@@ -1,12 +1,15 @@
-// `just web-check`: the page's pure layout and touch rules (web/touch_layout.js), in Node.
-// Usage: node touch_layout_check.mjs <a directory holding touch_layout.js>
+// `just web-check`: the page's pure layout and touch rules (web/touch_layout.js), and the look
+// and theme of its first paint (index.html's head script), in Node.
+// Usage: node touch_layout_check.mjs <a directory holding touch_layout.js and index.html>
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const [dir] = process.argv.slice(2);
-assert.ok(dir, "usage: node touch_layout_check.mjs <a directory holding touch_layout.js>");
+assert.ok(dir, "usage: node touch_layout_check.mjs <a directory holding touch_layout.js and index.html>");
 const t = await import(pathToFileURL(join(dir, "touch_layout.js")).href);
 const near = (actual, expected, message) =>
   assert.ok(Math.abs(actual - expected) < 1e-9, `${message}: ${actual}, expected ${expected}`);
@@ -190,11 +193,7 @@ assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), fals
 // The modern look: which look, the canvas's safe insets, client points in backing pixels, and
 // portrait's hand-scroll.
 {
-  const { lookFrom, canvasInsets, lightboxPoint } = t;
-  assert.equal(lookFrom({ forced: null, stored: null }), "modern", "modern is the default");
-  assert.equal(lookFrom({ forced: null, stored: "classic" }), "classic");
-  assert.equal(lookFrom({ forced: "modern", stored: "classic" }), "modern", "?look= wins and is never stored");
-  assert.equal(lookFrom({ forced: "bogus", stored: "nonsense" }), "modern");
+  const { canvasInsets, lightboxPoint } = t;
   const insets = [47, 34, 21, 47];
   assert.deepEqual(canvasInsets("desktop", insets, false), [0, 34, 21, 47], "the toolbar is above the canvas");
   assert.deepEqual(canvasInsets("portrait", insets, false), [0, 34, 21, 47]);
@@ -208,6 +207,41 @@ assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), fals
   assert.equal(t.startsPan({ held: true, inert: false, pageTaller: true }), false, "a finger on a piece drags it");
   assert.equal(t.startsPan({ held: true, inert: true, pageTaller: false }), false, "nothing to scroll");
   assert.equal(t.startsPan({ held: false, inert: true, pageTaller: true }), false, "a mouse never pans");
+}
+
+// The look and theme index.html's head script sets before the first paint (main.js starts from
+// them): run in a stub page with a given ?look=, stored choice and system scheme.
+{
+  const html = readFileSync(join(dir, "index.html"), "utf8");
+  const source = html.match(/<script>([\s\S]*?)<\/script>/)?.[1];
+  assert.ok(source?.includes("chromatronTheme"), "index.html's head script");
+  const firstPaint = ({ search = "", stored = null, dark = true, storage = true }) => {
+    const metas = [{ content: "#06070b" }, { content: "#eef1f6" }];
+    const page = {
+      document: { documentElement: { dataset: {} }, querySelectorAll: () => metas },
+      location: { search },
+      localStorage: {
+        getItem: (key) => {
+          if (!storage) throw new Error("SecurityError");
+          return key === "chromatron.look" ? stored : null;
+        },
+      },
+      matchMedia: (query) => ({ matches: query === "(prefers-color-scheme: dark)" && dark }),
+      URLSearchParams,
+    };
+    page.window = page;
+    runInNewContext(source, page);
+    const { look, theme } = page.document.documentElement.dataset;
+    return { look, theme, colors: metas.map((meta) => meta.content) };
+  };
+  const both = (color) => [color, color];
+  assert.deepEqual(firstPaint({}), { look: "modern", theme: "dark", colors: both("#06070b") }, "modern is the default");
+  assert.deepEqual(firstPaint({ dark: false }), { look: "modern", theme: "light", colors: both("#eef1f6") }, "light from the first paint");
+  assert.deepEqual(firstPaint({ stored: "classic", dark: false }), { look: "classic", theme: "dark", colors: both("#25272a") }, "classic stays dark");
+  assert.equal(firstPaint({ search: "?look=modern", stored: "classic" }).look, "modern", "?look= wins and is never stored");
+  assert.deepEqual(firstPaint({ search: "?shot=x&look=classic", dark: false }), { look: "classic", theme: "dark", colors: both("#25272a") });
+  assert.equal(firstPaint({ search: "?look=bogus", stored: "nonsense" }).look, "modern");
+  assert.deepEqual(firstPaint({ stored: "classic", storage: false, dark: false }), { look: "modern", theme: "light", colors: both("#eef1f6") }, "storage that throws: modern");
 }
 
 console.log("ok: touch layout rules");

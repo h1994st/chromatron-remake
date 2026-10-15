@@ -1185,3 +1185,98 @@ fn a_resize_mid_cue_settles_to_the_cold_picture() {
         }
     }
 }
+
+#[test]
+fn set_theme_repaints_the_modern_canvas_cold_in_the_new_theme() {
+    let mut session = modern(1);
+    session.render_at(0.0);
+    let dark = session.rgba().to_vec();
+    assert_eq!(session.set_theme(true), 0, "already dark");
+    assert!(Flag::Redraw.is_in(session.set_theme(false)));
+    assert_eq!(session.render_at(16.0), 1, "a cold paint, whole");
+    assert_ne!(session.rgba(), &dark[..], "light pixels");
+    assert_eq!(session.next_wake(16.0), -1.0);
+    assert!(Flag::Redraw.is_in(session.set_theme(true)));
+    session.render_at(32.0);
+    assert_eq!(session.rgba(), &dark[..], "dark again, byte for byte");
+}
+
+#[test]
+fn set_theme_mid_cue_redraws_and_idles() {
+    let mut session = modern(1);
+    session.render_at(0.0);
+    cheat_win(&mut session);
+    session.render_at(1000.0);
+    assert!(Flag::Redraw.is_in(session.set_theme(false)));
+    assert_eq!(session.render_at(1016.0), 1);
+    assert_eq!(session.next_wake(1016.0), -1.0);
+}
+
+#[test]
+fn set_theme_in_classic_is_kept_for_modern() {
+    let mut session = started(1);
+    assert_eq!(session.set_theme(false), 0, "classic does not repaint");
+    session.set_look(Look::Modern);
+    session.resize(W, H, 2.0, vec![0.0; 4], false);
+    session.render_at(0.0);
+    let light = session.rgba().to_vec();
+    let mut fresh = modern(1);
+    fresh.set_theme(false);
+    fresh.render_at(0.0);
+    assert_eq!(
+        fresh.rgba(),
+        &light[..],
+        "the lightbox took the stored theme"
+    );
+}
+
+/// Review T12 M1: with a lightbox already built (modern, dark), a theme change in classic
+/// reaches it, and the switch back to modern paints it in that theme: a fresh light lightbox's
+/// picture.
+#[test]
+fn set_theme_in_classic_reaches_an_existing_lightbox() {
+    let mut session = modern(1);
+    session.render_at(0.0);
+    session.set_look(Look::Classic);
+    session.render_at(16.0);
+    assert_eq!(session.set_theme(false), 0, "classic does not repaint");
+    session.set_look(Look::Modern);
+    session.render_at(32.0);
+    let light = session.rgba().to_vec();
+    let mut fresh = modern(1);
+    fresh.set_theme(false);
+    fresh.render_at(0.0);
+    assert_eq!(fresh.rgba(), &light[..], "the lightbox repainted in light");
+}
+
+#[test]
+fn a_resize_keeps_the_theme() {
+    let mut session = modern(1);
+    session.set_theme(false);
+    session.render_at(0.0);
+    let light = session.rgba().to_vec();
+    session.resize(W, H, 2.0, vec![0.0; 4], false);
+    session.render_at(16.0);
+    assert_eq!(session.rgba(), &light[..]);
+}
+
+/// Ruling L2: a theme change swaps the lightbox's planes in place, so a piece held mid-drag
+/// stays held and drops where it is released.
+#[test]
+fn a_held_piece_survives_a_theme_change() {
+    let mut session = modern(1);
+    session.render_at(0.0);
+    let (from, to) = (
+        centre(&session.cell_rect(toolbox_index(0))),
+        centre(&session.cell_rect(board_index(0, 0))),
+    );
+    let before = session.copy();
+    session.pointer_down(from.0, from.1, 0, false, false, false);
+    session.pointer_move(to.0, to.1);
+    assert!(session.dragging());
+    assert!(Flag::Redraw.is_in(session.set_theme(false)));
+    assert!(session.dragging(), "still held");
+    session.render_at(16.0);
+    session.pointer_up(to.0, to.1, 0);
+    assert_ne!(session.copy(), before, "dropped on the board");
+}

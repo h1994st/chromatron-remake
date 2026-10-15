@@ -219,6 +219,16 @@ impl Shape {
 
     /// Signed distance from `p` to the shape's edge, px (negative inside).
     pub fn distance(&self, p: Pt) -> f32 {
+        self.signed(p)
+    }
+
+    /// `distance`, inlined into the loops that measure px by px (`fill`, the walls' mask, the
+    /// page's bake), where the call was much of the cost; other callers share one copy. Not in
+    /// `vitrine::soft_shape`: it would grow past being inlined where it blends into a known
+    /// target, and its blends would go through the vtable (the level sheet's frames, 0.4–0.9 ms
+    /// slower).
+    #[inline(always)]
+    pub(crate) fn signed(&self, p: Pt) -> f32 {
         match *self {
             Shape::Capsule { a, b, radius } => segment_distance(p, a, b) - radius,
             Shape::Arc {
@@ -526,11 +536,14 @@ impl Paint {
     }
 }
 
-/// How a colour lands: source-over, or added (Canvas `lighter`).
+/// How a colour lands: source-over, added (Canvas `lighter`), or multiplied (Canvas `multiply`
+/// over an opaque backdrop: the light theme's ink lettering, spec §10). A premultiplied sprite
+/// or a light plane takes `Multiply` as `Over`: nothing draws it there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blend {
     Over,
     Add,
+    Multiply,
 }
 
 /// Something `fill` draws into, in its own pixels.
@@ -545,6 +558,7 @@ fn channel(dst: u32, src: f32, a: f32, blend: Blend) -> u32 {
     let v = match blend {
         Blend::Over => s * a + d * (1.0 - a),
         Blend::Add => d + s * a,
+        Blend::Multiply => d * (1.0 - a + a * src),
     };
     v.round().clamp(0.0, 255.0) as u32
 }
@@ -606,13 +620,13 @@ impl Target for SpriteCanvas<'_> {
         let mix = |dv: u32, s: f32| {
             let s = s * 255.0 * a;
             let v = match blend {
-                Blend::Over => s + dv as f32 * (1.0 - a),
+                Blend::Over | Blend::Multiply => s + dv as f32 * (1.0 - a),
                 Blend::Add => dv as f32 + s,
             };
             v.round().clamp(0.0, 255.0) as u32
         };
         let alpha = match blend {
-            Blend::Over => a * 255.0 + da * (1.0 - a),
+            Blend::Over | Blend::Multiply => a * 255.0 + da * (1.0 - a),
             Blend::Add => da + a * 255.0,
         };
         self.px[i] = (alpha.round().clamp(0.0, 255.0) as u32) << 24
@@ -633,8 +647,15 @@ pub fn clip_rect(a: DeviceRect, b: DeviceRect) -> Option<DeviceRect> {
     (r.left < r.right && r.top < r.bottom).then_some(r)
 }
 
-/// The most shapes `fill` culls per row.
+/// The most shapes a row culls: a row of `fill` with more near shapes than this measures
+/// every shape at every pixel it walks.
 const NEAR_SHAPES: usize = 64;
+
+// The pixels `fill` has measured on this thread (each test runs on its own thread).
+#[cfg(test)]
+thread_local! {
+    static VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Fills the union of `shapes` with `paint` at `alpha`, only inside `clip` (and the target).
 pub fn fill(
@@ -662,50 +683,91 @@ pub fn fill(
     let y1 = (bottom.ceil() as i32 + 1).min(clip.bottom);
     // A row's shapes with their spans grown by 1 px: a pixel more than 1 px outside a shape's
     // span is at distance > 1.5 from it, so it changes no coverage and is not measured (the
-    // result is the same min). More shapes than this measure every shape at every pixel.
-    let culled = shapes.len() <= NEAR_SHAPES;
-    let mut near = [(0.0f32, 0.0f32, 0u8); NEAR_SHAPES];
+    // result is the same min).
+    let mut near = [(0.0f32, 0.0f32, 0u16); NEAR_SHAPES];
+    let mut spans = [(0i32, 0i32); NEAR_SHAPES];
     for y in y0..y1 {
         let cy = y as f32 + 0.5;
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let mut n = 0;
+        let (mut n, mut crowded) = (0, false);
         for (i, s) in shapes.iter().enumerate() {
             if let Some((a, b)) = s.row_span(cy) {
                 lo = lo.min(a);
                 hi = hi.max(b);
-                if culled {
-                    near[n] = (a - 1.0, b + 1.0, i as u8);
-                    n += 1;
+                match u16::try_from(i) {
+                    Ok(k) if n < NEAR_SHAPES => {
+                        near[n] = (a - 1.0, b + 1.0, k);
+                        n += 1;
+                    }
+                    _ => crowded = true,
                 }
             }
         }
         if lo > hi {
             continue;
         }
+        // A row with more near shapes than the array holds measures every shape (the same
+        // minimum: a shape more than 1 px outside its span changes no coverage).
+        let culled = !crowded;
         let near = &near[..n];
-        let x0 = (lo.floor() as i32 - 1).max(clip.left);
-        let x1 = (hi.ceil() as i32 + 1).min(clip.right);
-        for x in x0..x1 {
-            let p = pt(x as f32 + 0.5, cy);
-            let d = if culled {
-                near.iter()
-                    .filter(|&&(a, b, _)| a <= p.x && p.x <= b)
-                    .fold(f32::INFINITY, |m, &(_, _, i)| {
-                        m.min(shapes[usize::from(i)].distance(p))
-                    })
-            } else {
-                shapes
-                    .iter()
-                    .fold(f32::INFINITY, |m, s| m.min(s.distance(p)))
-            };
-            let coverage = (0.5 - d).clamp(0.0, 1.0);
-            if coverage <= 0.0 {
-                continue;
+        let walks = if culled {
+            // Walk only the near spans' pixels, sorted and merged (insertion sort of ≤ 64, no
+            // allocation): a pixel outside every grown span measures no shape, so it would get
+            // no coverage anyway. A union then costs its shapes' area, not the row between them.
+            // A pixel whose centre is in [a, b] lies in floor(a)..ceil(b): for one shape, the
+            // same pixels the whole-row walk visits.
+            for (k, &(a, b, _)) in near.iter().enumerate() {
+                let s = (
+                    (a.floor() as i32).max(clip.left),
+                    (b.ceil() as i32).min(clip.right),
+                );
+                let mut j = k;
+                while j > 0 && spans[j - 1].0 > s.0 {
+                    spans[j] = spans[j - 1];
+                    j -= 1;
+                }
+                spans[j] = s;
             }
-            let mut c = paint.at(p);
-            c.a *= coverage * alpha;
-            if c.a > 0.0 {
-                target.blend(x as usize, y as usize, c, blend);
+            n
+        } else {
+            spans[0] = (
+                (lo.floor() as i32 - 1).max(clip.left),
+                (hi.ceil() as i32 + 1).min(clip.right),
+            );
+            1
+        };
+        let mut k = 0;
+        while k < walks {
+            let (x0, mut x1) = spans[k];
+            k += 1;
+            while k < walks && spans[k].0 <= x1 {
+                x1 = x1.max(spans[k].1);
+                k += 1;
+            }
+            for x in x0..x1 {
+                #[cfg(test)]
+                VISITS.with(|v| v.set(v.get() + 1));
+                let p = pt(x as f32 + 0.5, cy);
+                let d = if culled {
+                    near.iter()
+                        .filter(|&&(a, b, _)| a <= p.x && p.x <= b)
+                        .fold(f32::INFINITY, |m, &(_, _, i)| {
+                            m.min(shapes[usize::from(i)].signed(p))
+                        })
+                } else {
+                    shapes
+                        .iter()
+                        .fold(f32::INFINITY, |m, s| m.min(s.distance(p)))
+                };
+                let coverage = (0.5 - d).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                let mut c = paint.at(p);
+                c.a *= coverage * alpha;
+                if c.a > 0.0 {
+                    target.blend(x as usize, y as usize, c, blend);
+                }
             }
         }
     }
@@ -1034,6 +1096,193 @@ mod tests {
         layer.blend(0, 0, Rgb(255, 255, 255).opaque(), Blend::Add);
         layer.blend(1, 0, Rgb(0, 0, 0).alpha(0.5), Blend::Over);
         assert_eq!(px, [0x00ffffff, 0x00808080]);
+    }
+
+    #[test]
+    fn multiply_darkens_by_the_source_colour() {
+        let mut px = vec![0x00c8_6432u32]; // (200, 100, 50)
+        let mut layer = Layer {
+            px: &mut px,
+            width: 1,
+            height: 1,
+        };
+        let s = Rgb(128, 255, 0);
+        layer.blend(0, 0, s.alpha(1.0), Blend::Multiply);
+        assert_eq!(px[0], 0x0064_6400, "200·128/255, 100·1, 50·0");
+        let mut px = vec![0x00c8_6432u32];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 1,
+            height: 1,
+        };
+        layer.blend(0, 0, s.alpha(0.5), Blend::Multiply);
+        // d·(1 − 0.5 + 0.5·s): 200·0.751 = 150.2, 100, 50·0.5 = 25.
+        assert_eq!(px[0], 0x0096_6419);
+        let mut bytes = [200u8, 100, 50, 0];
+        let mut rgba = RgbaBytes {
+            px: &mut bytes,
+            width: 1,
+            height: 1,
+        };
+        rgba.blend(0, 0, s.alpha(0.5), Blend::Multiply);
+        assert_eq!(
+            bytes,
+            [150, 100, 25, 255],
+            "the web's bytes multiply the same"
+        );
+    }
+
+    /// Review T3 M3: a sprite and a light plane take `Multiply` as `Over` (nothing multiplies
+    /// there), so the same blend in either gives the same px.
+    #[test]
+    fn sprites_and_planes_take_multiply_as_over() {
+        let s = Rgb(128, 255, 0).alpha(0.5);
+        let sprite = |blend| {
+            let mut px = [0x80c8_6432u32];
+            let mut canvas = SpriteCanvas {
+                px: &mut px,
+                size: 1,
+            };
+            canvas.blend(0, 0, s, blend);
+            px[0]
+        };
+        assert_eq!(sprite(Blend::Multiply), sprite(Blend::Over));
+        assert_ne!(sprite(Blend::Over), 0x80c8_6432, "the blend drew");
+        let plane = |blend| {
+            let mut planes = crate::bloom::Planes::new(1, 1);
+            planes.r[0] = 40_000;
+            planes.g[0] = 9_000;
+            planes.blend(0, 0, s, blend);
+            [planes.r[0], planes.g[0], planes.b[0]]
+        };
+        assert_eq!(plane(Blend::Multiply), plane(Blend::Over));
+        assert_ne!(plane(Blend::Over), [40_000, 9_000, 0], "the blend drew");
+    }
+
+    /// `shapes` filled over a `size × size` layer, and the same picture from every px's nearest
+    /// shape measured directly.
+    fn filled_and_nearest(shapes: &[Shape], size: usize) -> (Vec<u32>, Vec<u32>) {
+        let colour = Rgb(255, 255, 255).alpha(0.6);
+        let mut px = vec![0u32; size * size];
+        let mut layer = Layer {
+            px: &mut px,
+            width: size,
+            height: size,
+        };
+        let all = DeviceRect::new(0, 0, size as i32, size as i32);
+        fill(
+            &mut layer,
+            all,
+            shapes,
+            &Paint::Solid(colour),
+            1.0,
+            Blend::Over,
+        );
+        let mut want = vec![0u32; size * size];
+        let mut reference = Layer {
+            px: &mut want,
+            width: size,
+            height: size,
+        };
+        for y in 0..size {
+            for x in 0..size {
+                let p = pt(x as f32 + 0.5, y as f32 + 0.5);
+                let d = shapes
+                    .iter()
+                    .fold(f32::INFINITY, |m, s| m.min(s.distance(p)));
+                let c = (0.5 - d).clamp(0.0, 1.0);
+                if c > 0.0 {
+                    reference.blend(x, y, colour.with_alpha(colour.a * c), Blend::Over);
+                }
+            }
+        }
+        (px, want)
+    }
+
+    /// `count` random lines over a 100 × 100 px square, from `seed`.
+    fn random_lines(count: usize, mut seed: u32) -> Vec<Shape> {
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 1000) as f32 / 10.0
+        };
+        (0..count)
+            .map(|_| {
+                let (a, b) = (pt(next(), next()), pt(next(), next()));
+                Shape::line(a, b, 0.5 + next() / 50.0)
+            })
+            .collect()
+    }
+
+    /// Ruling L14(b): with more than `NEAR_SHAPES` shapes, `fill` gives every pixel exactly the
+    /// coverage of the nearest shape, as measuring them all would.
+    #[test]
+    fn many_shapes_fill_like_their_nearest_one() {
+        let (px, want) = filled_and_nearest(&random_lines(300, 7), 100);
+        assert!(px == want);
+    }
+
+    /// Review T3 M1: a few dozen shapes take the culled path on most rows (with several
+    /// overlapping, merged spans) and the crowded one on none or few: the same picture.
+    #[test]
+    fn a_few_dozen_shapes_fill_like_their_nearest_one() {
+        for (count, seed) in [(12, 3), (30, 11), (40, 29)] {
+            let shapes = random_lines(count, seed);
+            let (px, want) = filled_and_nearest(&shapes, 100);
+            assert!(px == want, "{count} shapes");
+            assert!(px.iter().any(|&p| p != 0), "{count} shapes drew");
+        }
+    }
+
+    /// Review T3 M2: a shape past index 65 535 (no u16 index) on a row makes the row measure
+    /// every shape, so it is drawn like the rest.
+    #[test]
+    fn a_shape_past_a_u16_index_is_still_drawn() {
+        // 65 536 shapes far below the square (never on its rows), then two across it.
+        let far = Shape::line(pt(0.0, 1000.0), pt(1.0, 1000.0), 0.5);
+        let mut shapes = vec![far; 1 << 16];
+        shapes.push(Shape::line(pt(0.0, 2.0), pt(8.0, 6.0), 1.0));
+        shapes.push(Shape::line(pt(8.0, 0.0), pt(0.0, 8.0), 0.8));
+        let (px, want) = filled_and_nearest(&shapes, 8);
+        assert!(px == want);
+        assert!(
+            px.iter().filter(|&&p| p != 0).count() > 8,
+            "both lines drew"
+        );
+    }
+
+    /// Review finding 1: a row with two short strokes 1000 px apart walks about their widths,
+    /// not the 1000 px between them.
+    #[test]
+    fn a_row_walks_only_its_shapes() {
+        let mut px = vec![0u32; 1100 * 4];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 1100,
+            height: 4,
+        };
+        let strokes = [
+            Shape::line(pt(10.0, 2.0), pt(14.0, 2.0), 2.0),
+            Shape::line(pt(1010.0, 2.0), pt(1014.0, 2.0), 2.0),
+        ];
+        VISITS.with(|v| v.set(0));
+        fill(
+            &mut layer,
+            DeviceRect::new(0, 0, 1100, 4),
+            &strokes,
+            &Paint::Solid(Rgb(255, 255, 255).opaque()),
+            1.0,
+            Blend::Over,
+        );
+        let visits = VISITS.with(|v| v.get());
+        assert!(visits < 4 * 40, "{visits} px visited");
+        assert_eq!(px[2 * 1100 + 12], 0x00ff_ffff, "the first stroke is drawn");
+        assert_eq!(
+            px[2 * 1100 + 1012],
+            0x00ff_ffff,
+            "the second stroke is drawn"
+        );
     }
 
     #[test]

@@ -11,6 +11,14 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { gzipSync } from "node:zlib";
 
+// FNV-1a over a byte array (shot_rig.mjs's, inlined: that module installs the web-shots exit
+// handlers and its 240 s limit).
+function fnv(bytes) {
+  let h = 2166136261;
+  for (let i = 0; i < bytes.length; i += 1) h = Math.imul(h ^ bytes[i], 16777619);
+  return h >>> 0;
+}
+
 const [webDir, solutionsDir] = process.argv.slice(2);
 assert.ok(webDir && solutionsDir, "usage: node web_check.mjs <dist/web> <tests/solutions>");
 
@@ -202,9 +210,10 @@ assert.equal(displayScale(320, 480), 0.5);
   assert.equal(renderScale(1400, 955, 1, false), 1);
   assert.equal(renderScale(390, 740, 3, true), 2);
   assert.ok(Math.abs(stageHeight(390, 500, true) - 596) <= 0.6, "a short phone canvas grows to Stacked's minimum");
-  for (const [w, h, scale, touch] of [[2560, 1600, 2, false], [780, 1480, 2, true]]) {
+  for (const dark of [true, false]) for (const [w, h, scale, touch] of [[2560, 1600, 2, false], [780, 1480, 2, true]]) {
     for (const game of [1, 2, 3, 4]) {
       const session = new Session();
+      session.set_theme(dark);
       session.select(game, undefined, undefined);
       session.set_look(Look.Modern);
       session.resize(w, h, scale, [0, 0, 0, 0], touch);
@@ -225,6 +234,24 @@ assert.equal(displayScale(320, 480), 0.5);
       }
       session.free();
     }
+  }
+  // Spec §11, ruling L10: dark → light → dark repaints cold each time and comes back byte for byte.
+  const rgbaOf = (session) => new Uint8Array(wasm.memory.buffer, session.rgba_ptr(), session.canvas_width() * session.canvas_height() * 4);
+  for (const game of [1, 2, 3, 4]) {
+    const session = new Session();
+    session.select(game, undefined, undefined);
+    session.set_look(Look.Modern);
+    session.resize(2560, 1600, 2, [0, 0, 0, 0], false);
+    session.render_at(0);
+    const dark = fnv(rgbaOf(session));
+    assert.ok(session.set_theme(false) & Flag.Redraw, `game ${game}: light redraws`);
+    assert.equal(session.render_at(16), 1, `game ${game}: light is a cold paint`);
+    assert.notEqual(fnv(rgbaOf(session)), dark, `game ${game}: light differs`);
+    assert.equal(session.next_wake(16), -1, `game ${game}: light idles`);
+    session.set_theme(true);
+    session.render_at(32);
+    assert.equal(fnv(rgbaOf(session)), dark, `game ${game}: dark again, byte for byte`);
+    session.free();
   }
   // An alternate (clockwise) tap on a chip opens its level: inline at 1280 × 800, in the sheet on a phone.
   for (const [w, h, scale, touch, sheet] of [[2560, 1600, 2, false, false], [780, 1480, 2, true, true]]) {
