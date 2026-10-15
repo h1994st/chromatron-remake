@@ -67,7 +67,7 @@ pub struct Glint {
 
 /// Pieces of half-segments a sweep is drawing: fractions `from`..`to` of half (`cell`, `side`)
 /// (0 at the cell's centre, 1 at its edge point, already trimmed at an aperture or a wall face),
-/// with the bits over it. `order` is the half's walk position × 4 + the piece's index, so two
+/// with the bits over it. `order` is the half's walk position × 8 + the piece's index, so two
 /// frames' pieces merge in one pass.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Partial {
@@ -81,14 +81,19 @@ pub struct Partial {
 
 pub const MAX_PARTIALS: usize = BOARD_CELLS * 8;
 
+/// Most moving heads on one half mid-sweep: two strands (one each way) per channel.
+pub const MAX_HALF_HEADS: usize = 6;
+/// Most pieces of one half mid-sweep: one between each two of its ends and heads.
+pub const MAX_HALF_PIECES: usize = MAX_HALF_HEADS + 1;
+
 /// What one half-segment shows mid-sweep: whole in `steady` (it merges into runs), or as up to
-/// four `pieces` (then `steady` is 0); and where each fresh channel's head is.
+/// `MAX_HALF_PIECES` `pieces` (then `steady` is 0); and where each fresh strand's head is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HalfState {
     pub steady: Colour,
-    pub pieces: [(f32, f32, Colour); 4],
+    pub pieces: [(f32, f32, Colour); MAX_HALF_PIECES],
     pub len: usize,
-    pub heads: [(f32, Colour); 3],
+    pub heads: [(f32, Colour); MAX_HALF_HEADS],
     pub head_len: usize,
 }
 
@@ -142,9 +147,10 @@ impl SweepView<'_> {
     }
 
     /// What half (`cell`, `side`) of `new` shows at this front (spec §9.1 "Beams", per channel):
-    /// bits in both fields are steady; a fresh bit is drawn from where its strand starts
-    /// (`strand_start`) over the part the front has passed; bits only in the old field aren't in
-    /// the light at all (they fade over the output: `flourish`).
+    /// bits in both fields are steady; a fresh bit is drawn from where its strands start
+    /// (`strands`) over the part the front has passed (a bit crossing the half both ways from
+    /// both ends: whole once either strand is, or once the two meet); bits only in the old field
+    /// aren't in the light at all (they fade over the output: `flourish`).
     pub fn half(&self, new: &BeamField, cell: usize, side: usize) -> HalfState {
         let (now, then) = (
             half_colour(new, cell, side),
@@ -152,42 +158,72 @@ impl SweepView<'_> {
         );
         let mut state = HalfState {
             steady: now & then,
-            pieces: [(0.0, 0.0, 0); 4],
+            pieces: [(0.0, 0.0, 0); MAX_HALF_PIECES],
             len: 0,
-            heads: [(0.0, 0); 3],
+            heads: [(0.0, 0); MAX_HALF_HEADS],
             head_len: 0,
         };
-        let mut spans = [(0u8, 0f32, 0f32); 3];
+        let mut spans = [(0u8, 0f32, 0f32); MAX_HALF_HEADS];
         let mut m = 0;
-        let mut cuts = [0f32, 1.0, 0.0, 0.0, 0.0];
+        let mut cuts = [0f32; MAX_HALF_HEADS + 2];
+        cuts[1] = 1.0;
         let mut n = 2;
-        for bit in [1u8, 2, 4] {
+        // Second (inbound) strands' heads go after every first strand's, so a half's heads at
+        // one point stay side by side (`flourish` merges them in `Over`).
+        let mut seconds = [(0f32, 0u8); BITS.len()];
+        let mut second_len = 0;
+        let swept = |passed: f32| passed.clamp(0.0, 1.0);
+        for bit in BITS {
             if now & !then & bit == 0 {
                 continue;
             }
-            let (start, inward) = strand_start(new, self.reach, cell, side, bit);
-            let passed = (self.front - start) * 2.0;
-            let g = passed.clamp(0.0, 1.0);
-            if g >= 1.0 {
-                state.steady |= bit;
-                // The front exactly at this half's far end: the head sits there, or a frame
-                // landing on a half boundary would show no head at all.
-                if passed == 1.0 {
-                    state.heads[state.head_len] = (if inward { 0.0 } else { 1.0 }, bit);
+            // How far (half lengths) the front has passed each strand's start, and its way.
+            let passed = |(start, inward): (f32, bool)| ((self.front - start) * 2.0, inward);
+            let pair = strands(new, self.reach, cell, side, bit).map(|strand| strand.map(passed));
+            // Whole once either strand is (the parts are clamped, so the sum is at least the
+            // larger), or once the two meet.
+            let whole = pair.iter().flatten().map(|&(p, _)| swept(p)).sum::<f32>() >= 1.0;
+            // Past whole: a strand that ended before this frame.
+            let ended = pair.iter().flatten().any(|&(p, _)| p > 1.0);
+            for (k, strand) in pair.into_iter().enumerate() {
+                let Some((p, inward)) = strand else {
+                    continue;
+                };
+                let head = if whole {
+                    // The front exactly at this half's far end: the head sits there, or a frame
+                    // landing on a half boundary would show no head at all; not on a half the
+                    // other strand had already lit whole.
+                    if p != 1.0 || ended {
+                        continue;
+                    }
+                    if inward { 0.0 } else { 1.0 }
+                } else {
+                    let g = swept(p);
+                    if g <= 0.0 {
+                        continue;
+                    }
+                    let (a, b) = if inward { (1.0 - g, 1.0) } else { (0.0, g) };
+                    let head = if inward { a } else { b };
+                    spans[m] = (bit, a, b);
+                    m += 1;
+                    cuts[n] = head;
+                    n += 1;
+                    head
+                };
+                if k == 0 {
+                    state.heads[state.head_len] = (head, bit);
                     state.head_len += 1;
+                } else {
+                    seconds[second_len] = (head, bit);
+                    second_len += 1;
                 }
-                continue;
             }
-            if g <= 0.0 {
-                continue;
+            if whole {
+                state.steady |= bit;
             }
-            let (a, b) = if inward { (1.0 - g, 1.0) } else { (0.0, g) };
-            let head = if inward { a } else { b };
-            spans[m] = (bit, a, b);
-            m += 1;
-            cuts[n] = head;
-            n += 1;
-            state.heads[state.head_len] = (head, bit);
+        }
+        for &head in &seconds[..second_len] {
+            state.heads[state.head_len] = head;
             state.head_len += 1;
         }
         if m == 0 {
@@ -228,8 +264,9 @@ pub fn fresh_arrival(old: &BeamField, new: &BeamField, reach: &Reach, cell: usiz
         let fresh = half_colour(new, cell, side) & !half_colour(old, cell, side);
         for bit in [1u8, 2, 4] {
             if fresh & bit != 0 {
-                let (start, inward) = strand_start(new, reach, cell, side, bit);
-                first = first.min(if inward { start + 0.5 } else { start });
+                for (start, inward) in strands(new, reach, cell, side, bit).into_iter().flatten() {
+                    first = first.min(if inward { start + 0.5 } else { start });
+                }
             }
         }
     }
@@ -388,7 +425,7 @@ impl Beamline {
                 };
                 if let Some(h) = pieces {
                     let trim = centre_trim(board, field, cell, side);
-                    let base = (line | step) << 2;
+                    let base = (line | step) << 3;
                     for (k, &(from, to, bits)) in h.pieces[..h.len].iter().enumerate() {
                         let from = from.max(trim);
                         if from < to && self.partial_len < MAX_PARTIALS {
@@ -805,8 +842,30 @@ pub fn strand_start(
     if field.outbound[cell][side] & bit != 0 {
         return (f32::from(reach.leaving[cell][side][k]), false);
     }
+    (inbound_start(reach, cell, side, k), true)
+}
+
+/// Where light of channel `k` entering `cell` by `side` starts, at the half's edge: half a cell
+/// after the channel it left its neighbour by.
+fn inbound_start(reach: &Reach, cell: usize, side: usize, k: usize) -> f32 {
     let from = entering(&reach.leaving, cell, (side + 4) & 7, k).unwrap_or(reach.cells[cell]);
-    (f32::from(from) + 0.5, true)
+    f32::from(from) + 0.5
+}
+
+/// The strands a sweep draws bit `bit` of half (`cell`, `side`) from: `strand_start`'s, and on a
+/// half the bit crosses both ways (leaving the cell by `side` and entering it by `side`) the
+/// inbound one too, from the half's edge.
+pub fn strands(
+    field: &BeamField,
+    reach: &Reach,
+    cell: usize,
+    side: usize,
+    bit: Colour,
+) -> [Option<(f32, bool)>; 2] {
+    let first = strand_start(field, reach, cell, side, bit);
+    let both = field.outbound[cell][side] & field.inbound[cell][(side + 4) & 7] & bit != 0;
+    let second = both.then(|| (inbound_start(reach, cell, side, channel(bit)), true));
+    [Some(first), second]
 }
 
 /// A sweep at one moment: the field it started from, the new field's reach, and its front
@@ -1418,6 +1477,66 @@ mod tests {
         );
         let before = view(start - 1.0).half(&new, cell, east);
         assert_eq!((before.steady, before.len), (0, 0), "not reached: nothing");
+    }
+
+    #[test]
+    fn a_half_lit_both_ways_sweeps_from_both_ends() {
+        // White east from (2, 5) into a mirror at (8, 5) that sends it straight back: cell
+        // (5, 5)'s west half takes the light coming in from the west early and the light going
+        // back out west late. It is drawn from its edge as soon as the first comes in, not dark
+        // until the second leaves (the "dashed beam" of C1 level 27).
+        let old = BeamField::default();
+        let (b, new) = (0..8)
+            .map(|dir| board(&[(2, 5, Piece::Laser, 7, 2), (8, 5, Piece::Mirror, 0, dir)]))
+            .find(|(_, f)| f.outbound[board_index(5, 5)][6] == 7)
+            .expect("a mirror that sends the beam back");
+        let reach = Reach::compute(&b, &new);
+        let (cell, west) = (board_index(5, 5), 6);
+        let [first, second] = strands(&new, &reach, cell, west, 1);
+        let ((out_start, out_in), (in_start, in_in)) = (first.unwrap(), second.unwrap());
+        assert!(
+            !out_in && in_in,
+            "outbound from the centre, inbound from the edge"
+        );
+        assert!(
+            in_start + 0.5 < out_start,
+            "in at {in_start}, out at {out_start}"
+        );
+        let view = |front| SweepView {
+            old: &old,
+            reach: &reach,
+            front,
+        };
+        let mid = view(in_start + 0.25).half(&new, cell, west);
+        assert_eq!(
+            (mid.steady, mid.len, mid.pieces[0]),
+            (0, 1, (0.5, 1.0, 7)),
+            "half way in from its edge"
+        );
+        assert_eq!(mid.head_len, 3, "a head per channel coming in");
+        let whole = view(in_start + 0.5).half(&new, cell, west);
+        assert_eq!(
+            (whole.steady, whole.len),
+            (7, 0),
+            "whole once the inbound light is"
+        );
+        // Its east half takes the light going out first: drawn from the centre, as one way.
+        let [first, second] = strands(&new, &reach, cell, 2, 1);
+        let ((out_start, _), (in_start, _)) = (first.unwrap(), second.unwrap());
+        assert!(out_start + 0.5 < in_start);
+        let east = view(out_start + 0.25).half(&new, cell, 2);
+        assert_eq!((east.len, east.pieces[0]), (1, (0.0, 0.5, 7)), "centre out");
+        // Whole since then: no head flashes at the centre when the front lands exactly where
+        // the light coming back in would end, nor just before or after.
+        for front in [in_start + 0.4, in_start + 0.5, in_start + 0.6] {
+            let late = view(front).half(&new, cell, 2);
+            assert_eq!(
+                (late.steady, late.head_len),
+                (7, 0),
+                "front {front}: {:?}",
+                late.heads
+            );
+        }
     }
 
     #[test]

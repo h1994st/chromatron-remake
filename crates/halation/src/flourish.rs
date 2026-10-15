@@ -10,7 +10,7 @@ use lumen::{BLUE, BOARD_CELLS, BeamField, Board, Colour, DX, DY, GREEN, Piece, R
 
 use crate::DeviceRect;
 use crate::beamline::{
-    Reach, centre_trim, for_each_head, for_each_line, half_colour, on_board, strand_start,
+    Reach, centre_trim, for_each_head, for_each_line, half_colour, on_board, strands,
 };
 use crate::choreography::{
     Burst, MAX_BURSTS, Moment, PACKET_CELLS_PER_S, PULSE_MS, RING_MS, SPARKS_MS, WIN_MS, WinMoment,
@@ -300,8 +300,8 @@ fn fading(moment: &Moment, field: &BeamField, cell: usize, side: usize) -> Colou
 
 /// Where half (`cell`, `side`)'s packet is when the packets are at `packet` (reach units), as a
 /// fraction of the half from the cell's centre: it runs over the half from its earliest
-/// strand's start (`strand_start`), half a cell in half a reach unit; none off the half or
-/// inside its trimmed centre.
+/// strand's start (`strands`: a bit crossing the half both ways has two), half a cell in half a
+/// reach unit; none off the half or inside its trimmed centre.
 fn packet_at(
     field: &BeamField,
     reach: &Reach,
@@ -314,7 +314,7 @@ fn packet_at(
     let (start, inward) = [RED, GREEN, BLUE]
         .into_iter()
         .filter(|b| mask & b != 0)
-        .map(|b| strand_start(field, reach, cell, side, b))
+        .flat_map(|b| strands(field, reach, cell, side, b).into_iter().flatten())
         .min_by(|a, b| a.0.total_cmp(&b.0))?;
     let g = (packet - start) * 2.0;
     if !(0.0..1.0).contains(&g) {
@@ -1025,6 +1025,25 @@ mod tests {
             pulse(&board, &field, &reach, laser, 100.0),
             None,
             "only targets"
+        );
+    }
+
+    #[test]
+    fn a_packet_on_a_half_lit_both_ways_rides_its_first_strand() {
+        // White east from (2, 5) into a mirror at (8, 5) that sends it straight back: (5, 5)'s
+        // west half takes the light coming in at 2.5 and going back out at 9. Its packet enters
+        // from the edge with the first, as the packet beside it leaves (4, 5).
+        let (board, field) = (0..8)
+            .map(|dir| lit(&[(2, 5, Piece::Laser, 7, 2), (8, 5, Piece::Mirror, 0, dir)]))
+            .find(|(_, f)| f.outbound[board_index(5, 5)][6] == 7)
+            .expect("a mirror that sends the beam back");
+        let reach = Reach::compute(&board, &field);
+        let at = |cell, side, packet| packet_at(&field, &reach, &board, cell, side, packet);
+        assert_eq!(at(board_index(4, 5), 2, 2.25), Some(0.5), "leaving (4, 5)");
+        assert_eq!(
+            at(board_index(5, 5), 6, 2.75),
+            Some(0.5),
+            "into (5, 5) from its edge"
         );
     }
 
