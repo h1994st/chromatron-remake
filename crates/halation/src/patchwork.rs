@@ -121,6 +121,15 @@ impl<const N: usize> Patchwork<N> {
         }
     }
 
+    /// Puts `r` at `i` and takes out the rect at `j` (the last held rect moves into its place):
+    /// two held rects become one. `i < j`, both held.
+    pub fn replace_pair(&mut self, i: usize, j: usize, r: DeviceRect) {
+        debug_assert!(i < j && j < self.len);
+        self.rects[i] = r;
+        self.len -= 1;
+        self.rects[j] = self.rects[self.len];
+    }
+
     /// Merges every two held rects that overlap into their hull, until none do: each point is
     /// then in exactly one rect (a develop window is recomputed once).
     pub fn coalesce(&mut self) {
@@ -128,9 +137,7 @@ impl<const N: usize> Patchwork<N> {
             for i in 0..self.len {
                 for j in i + 1..self.len {
                     if meets(self.rects[i], self.rects[j]) {
-                        self.rects[i] = hull(self.rects[i], self.rects[j]);
-                        self.len -= 1;
-                        self.rects[j] = self.rects[self.len];
+                        self.replace_pair(i, j, hull(self.rects[i], self.rects[j]));
                         continue 'again;
                     }
                 }
@@ -196,6 +203,28 @@ mod tests {
                 "{q:?} still covered"
             );
         }
+    }
+
+    #[test]
+    fn replacing_a_pair_keeps_the_others() {
+        let mut p = Patchwork::<4>::new();
+        let rects = [
+            r(0, 0, 2, 2),
+            r(10, 0, 12, 2),
+            r(20, 0, 22, 2),
+            r(30, 0, 32, 2),
+        ];
+        for q in rects {
+            p.add(q);
+        }
+        p.replace_pair(0, 1, r(0, 0, 12, 2));
+        assert_eq!(
+            p.as_slice(),
+            &[r(0, 0, 12, 2), r(30, 0, 32, 2), r(20, 0, 22, 2)],
+            "the last moved into the gap"
+        );
+        p.replace_pair(1, 2, r(20, 0, 32, 2));
+        assert_eq!(p.as_slice(), &[r(0, 0, 12, 2), r(20, 0, 32, 2)], "j last");
     }
 
     #[test]

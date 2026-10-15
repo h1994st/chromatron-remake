@@ -20,10 +20,12 @@
       const color = look === "modern" ? (light ? "#eef1f6" : "#06070b") : "#25272a";
       for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.content = color;
     };
+    // The stored look's key, named only here; main.js stores the player's choice under it.
+    window.chromatronLookKey = "chromatron.look";
     (() => {
       let stored = null;
       try {
-        stored = localStorage.getItem("chromatron.look");
+        stored = localStorage.getItem(chromatronLookKey);
       } catch {}
       const forced = new URLSearchParams(location.search).get("look");
       const look = forced === "classic" || forced === "modern" ? forced : stored === "classic" ? "classic" : "modern";

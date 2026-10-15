@@ -222,11 +222,12 @@ impl Shape {
         self.signed(p)
     }
 
-    /// `distance`, inlined into the loops that measure px by px (`fill`, the walls' mask, the
-    /// page's bake), where the call was much of the cost; other callers share one copy. Not in
-    /// `vitrine::soft_shape`: it would grow past being inlined where it blends into a known
-    /// target, and its blends would go through the vtable (the level sheet's frames, 0.4–0.9 ms
-    /// slower).
+    /// `distance`, inlined into the three loops that measure every px and measured faster with
+    /// it (ruling G9): `fill`'s culled fold, the walls' mask and the light page's bake. Through
+    /// `distance`, the bake's cold phone frames paint about 3% slower, and `fill`'s and the
+    /// walls' cold frames 2–4%. Every other caller, `vitrine::soft_shape` among them (on a
+    /// rounded rect most px skip it), shares one copy through `distance`: each inlined copy costs
+    /// page bytes (about 0.9 KB gzip for the bake's, 1 KB for `fill`'s and the walls').
     #[inline(always)]
     pub(crate) fn signed(&self, p: Pt) -> f32 {
         match *self {
@@ -354,28 +355,94 @@ impl Shape {
         }
     }
 
-    /// The x range on the row whose pixel centres are at `y` where coverage can be non-zero.
-    /// Exact for capsules (so a diagonal beam costs its own area), the outer circle's chord within
-    /// the bounds for arcs (so a quarter arc costs about its own quarter), the bounds otherwise.
-    pub fn row_span(&self, y: f32) -> Option<(f32, f32)> {
+    /// The x ranges on the row whose pixel centres are at `y` where coverage can be non-zero:
+    /// one, or two flanks where the row crosses a hollow shape's hole (ruling G5). Exact for
+    /// capsules (so a diagonal beam costs its own area), the outer circle's chord within the
+    /// bounds for arcs (so a quarter arc costs about its own quarter), the bounds otherwise; a
+    /// full ring and a rounded rect's outline leave out their holes, every px of which is at
+    /// least `stroke + 1.5` px from the stroke (so `fill`'s 1-px growth still measures nothing
+    /// there that could be covered). The two flanks are more than 2 px apart, so grown by 1 px
+    /// they never overlap.
+    pub fn row_spans(&self, y: f32) -> [Option<(f32, f32)>; 2] {
         let (l, t, r, b) = self.bounds();
         if y < t || y > b {
-            return None;
+            return [None, None];
         }
+        // The row's x range (lo, hi) less the hole `cx ± w_in`, when the hole is wider than 2 px.
+        let flanks = |(lo, hi): (f32, f32), cx: f32, w_in: f32| {
+            if w_in > 1.0 && lo < cx - w_in && cx + w_in < hi {
+                [Some((lo, cx - w_in)), Some((cx + w_in, hi))]
+            } else {
+                [Some((lo, hi)), None]
+            }
+        };
         match *self {
-            Shape::Capsule { a, b, radius } => capsule_span(a, b, radius + 0.5, y),
+            Shape::Capsule { a, b, radius } => [capsule_span(a, b, radius + 0.5, y), None],
             Shape::Arc {
                 centre,
                 radius,
                 half_width,
+                sweep,
                 ..
             } => {
                 let (reach, dy) = (radius + half_width + 0.5, y - centre.y);
                 let w = (reach * reach - dy * dy).max(0.0).sqrt();
                 let (lo, hi) = ((centre.x - w).max(l), (centre.x + w).min(r));
-                (lo <= hi).then_some((lo, hi))
+                // (False for NaN too: nothing drawn, as before.)
+                let ordered = lo <= hi;
+                if !ordered {
+                    return [None, None];
+                }
+                // A full ring's hole: every point nearer its centre than `radius − half_width −
+                // 1.5` is at least 1.5 px inside the stroke's inner edge.
+                let inner = radius - half_width - 1.5;
+                if sweep >= TAU - 1e-4 && dy.abs() < inner {
+                    flanks((lo, hi), centre.x, (inner * inner - dy * dy).sqrt())
+                } else {
+                    [Some((lo, hi)), None]
+                }
             }
-            _ => Some((l, r)),
+            Shape::RoundRect {
+                left,
+                top,
+                right,
+                bottom,
+                radii,
+                stroke,
+            } if stroke > 0.0 => {
+                // The hole is the rounded rect inset by `s`: half sizes `h − s`, its corners of
+                // radius `r − s` (square when `r ≤ s`). Taking the largest radius at every corner
+                // gives a smaller hole (rounded rects of one size nest by radius).
+                let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
+                let (hx, hy) = ((right - left) / 2.0, (bottom - top) / 2.0);
+                let (s, dy) = (stroke + 1.5, (y - cy).abs());
+                let r_max = radii.into_iter().fold(0.0f32, f32::max);
+                let round = (r_max - s).max(0.0);
+                // The hole's straight band, then its corner rows (when `r_max > s`).
+                let band = hy - s - round;
+                // (Radii past the half sizes, which `round_rect` never makes, keep one span.)
+                let w_in = if r_max > hx.min(hy) {
+                    0.0
+                } else if dy <= band {
+                    hx - s
+                } else if dy < hy - s {
+                    let e = dy - band;
+                    hx - s - round + (round * round - e * e).max(0.0).sqrt()
+                } else {
+                    0.0
+                };
+                flanks((l, r), cx, w_in)
+            }
+            _ => [Some((l, r)), None],
+        }
+    }
+
+    /// `row_spans` as one range: their hull.
+    #[cfg(test)]
+    pub fn row_span(&self, y: f32) -> Option<(f32, f32)> {
+        match self.row_spans(y) {
+            [Some((a, _)), Some((_, b))] => Some((a, b)),
+            [one, _] => one,
         }
     }
 }
@@ -551,8 +618,49 @@ pub trait Target {
     fn size(&self) -> (usize, usize);
     /// Blends `c` (straight alpha, already scaled by coverage) into pixel (`x`, `y`).
     fn blend(&mut self, x: usize, y: usize, c: Rgba, blend: Blend);
+    /// Blends `colours[i]` into px (`x0 + i`, `y`) as `blend` does, skipping any with zero alpha
+    /// (ruling G4: one call per span, not per px; every target overrides it with its own loop).
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        for (i, &c) in colours.iter().enumerate() {
+            if c.a > 0.0 {
+                self.blend(x0 + i, y, c, blend);
+            }
+        }
+    }
 }
 
+/// `v.round()` (half away from zero) through `trunc`, which wasm has as an instruction (its
+/// `round` is a libm call, ruling G3). Exact for every f32: below 2²³ the fraction `v − t` is
+/// exact; past it `v` is whole and the fraction 0; NaN and ±0 come back as `round` gives them
+/// (a step of ±0 keeps `t`'s sign). Branchless: px values make the step unpredictable, and
+/// branches on it made a web drag frame 35% slower than libm's `roundf`. Compiled everywhere,
+/// so its test runs natively; only wasm calls it.
+#[inline(always)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub(crate) fn round_by_trunc(v: f32) -> f32 {
+    let t = v.trunc();
+    let step = f32::from(u8::from((v - t).abs() >= 0.5));
+    t + step.copysign(v)
+}
+
+/// `v.round()`, as one instruction on every target this ships to (ruling G3).
+#[inline(always)]
+pub fn round_away(v: f32) -> f32 {
+    #[cfg(target_arch = "wasm32")]
+    return round_by_trunc(v);
+    #[cfg(not(target_arch = "wasm32"))]
+    return v.round();
+}
+
+/// `round_away(v).clamp(0.0, 255.0) as u32`, a code value, in fewer steps: `as` already takes
+/// everything below 0 (and NaN) to 0, so only the top needs a bound, and natively the round and
+/// the conversion are one instruction.
+#[inline(always)]
+pub(crate) fn code_value(v: f32) -> u32 {
+    (round_away(v) as u32).min(255)
+}
+
+#[inline(always)]
 fn channel(dst: u32, src: f32, a: f32, blend: Blend) -> u32 {
     let (d, s) = (dst as f32, src * 255.0);
     let v = match blend {
@@ -560,7 +668,7 @@ fn channel(dst: u32, src: f32, a: f32, blend: Blend) -> u32 {
         Blend::Add => d + s * a,
         Blend::Multiply => d * (1.0 - a + a * src),
     };
-    v.round().clamp(0.0, 255.0) as u32
+    code_value(v)
 }
 
 /// An opaque `0x00RRGGBB` layer: `base`, the macOS canvas.
@@ -570,16 +678,29 @@ pub struct Layer<'a> {
     pub height: usize,
 }
 
+/// `d` with `c` blended in: `Layer`'s px, one at a time or by spans.
+#[inline(always)]
+fn layer_px(d: u32, c: Rgba, blend: Blend) -> u32 {
+    channel(d >> 16 & 0xff, c.r, c.a, blend) << 16
+        | channel(d >> 8 & 0xff, c.g, c.a, blend) << 8
+        | channel(d & 0xff, c.b, c.a, blend)
+}
+
 impl Target for Layer<'_> {
     fn size(&self) -> (usize, usize) {
         (self.width, self.height)
     }
     fn blend(&mut self, x: usize, y: usize, c: Rgba, blend: Blend) {
         let i = y * self.width + x;
-        let d = self.px[i];
-        self.px[i] = channel(d >> 16 & 0xff, c.r, c.a, blend) << 16
-            | channel(d >> 8 & 0xff, c.g, c.a, blend) << 8
-            | channel(d & 0xff, c.b, c.a, blend);
+        self.px[i] = layer_px(self.px[i], c, blend);
+    }
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let row = y * self.width + x0;
+        for (d, &c) in self.px[row..row + colours.len()].iter_mut().zip(colours) {
+            if c.a > 0.0 {
+                *d = layer_px(*d, c, blend);
+            }
+        }
     }
 }
 
@@ -590,16 +711,32 @@ pub struct RgbaBytes<'a> {
     pub height: usize,
 }
 
+/// `d` (RGBA bytes) with `c` blended in, alpha 255: `RgbaBytes`' px.
+#[inline(always)]
+fn rgba_px(d: &mut [u8; 4], c: Rgba, blend: Blend) {
+    for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
+        d[k] = channel(u32::from(d[k]), s, c.a, blend) as u8;
+    }
+    d[3] = 0xff;
+}
+
 impl Target for RgbaBytes<'_> {
     fn size(&self) -> (usize, usize) {
         (self.width, self.height)
     }
     fn blend(&mut self, x: usize, y: usize, c: Rgba, blend: Blend) {
         let i = (y * self.width + x) * 4;
-        for (k, s) in [c.r, c.g, c.b].into_iter().enumerate() {
-            self.px[i + k] = channel(u32::from(self.px[i + k]), s, c.a, blend) as u8;
+        let d: &mut [u8; 4] = (&mut self.px[i..i + 4]).try_into().unwrap();
+        rgba_px(d, c, blend);
+    }
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let row = (y * self.width + x0) * 4;
+        let (px, _) = self.px[row..row + 4 * colours.len()].as_chunks_mut::<4>();
+        for (d, &c) in px.iter_mut().zip(colours) {
+            if c.a > 0.0 {
+                rgba_px(d, c, blend);
+            }
         }
-        self.px[i + 3] = 0xff;
     }
 }
 
@@ -609,31 +746,63 @@ pub struct SpriteCanvas<'a> {
     pub size: usize,
 }
 
+/// `d` (premultiplied) with `c` blended in: `SpriteCanvas`' px.
+#[inline(always)]
+fn sprite_px(d: u32, c: Rgba, blend: Blend) -> u32 {
+    let (da, a) = ((d >> 24) as f32, c.a);
+    let mix = |dv: u32, s: f32| {
+        let s = s * 255.0 * a;
+        let v = match blend {
+            Blend::Over | Blend::Multiply => s + dv as f32 * (1.0 - a),
+            Blend::Add => dv as f32 + s,
+        };
+        code_value(v)
+    };
+    let alpha = match blend {
+        Blend::Over | Blend::Multiply => a * 255.0 + da * (1.0 - a),
+        Blend::Add => da + a * 255.0,
+    };
+    code_value(alpha) << 24
+        | mix(d >> 16 & 0xff, c.r) << 16
+        | mix(d >> 8 & 0xff, c.g) << 8
+        | mix(d & 0xff, c.b)
+}
+
 impl Target for SpriteCanvas<'_> {
     fn size(&self) -> (usize, usize) {
         (self.size, self.size)
     }
     fn blend(&mut self, x: usize, y: usize, c: Rgba, blend: Blend) {
         let i = y * self.size + x;
-        let d = self.px[i];
-        let (da, a) = ((d >> 24) as f32, c.a);
-        let mix = |dv: u32, s: f32| {
-            let s = s * 255.0 * a;
-            let v = match blend {
-                Blend::Over | Blend::Multiply => s + dv as f32 * (1.0 - a),
-                Blend::Add => dv as f32 + s,
-            };
-            v.round().clamp(0.0, 255.0) as u32
-        };
-        let alpha = match blend {
-            Blend::Over | Blend::Multiply => a * 255.0 + da * (1.0 - a),
-            Blend::Add => da + a * 255.0,
-        };
-        self.px[i] = (alpha.round().clamp(0.0, 255.0) as u32) << 24
-            | mix(d >> 16 & 0xff, c.r) << 16
-            | mix(d >> 8 & 0xff, c.g) << 8
-            | mix(d & 0xff, c.b);
+        self.px[i] = sprite_px(self.px[i], c, blend);
     }
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let row = y * self.size + x0;
+        for (d, &c) in self.px[row..row + colours.len()].iter_mut().zip(colours) {
+            if c.a > 0.0 {
+                *d = sprite_px(*d, c, blend);
+            }
+        }
+    }
+}
+
+/// Colours for a span test: every fifth transparent, the rest across the range, from `seed`.
+#[cfg(test)]
+pub(crate) fn span_colours(n: usize, mut seed: u32) -> Vec<Rgba> {
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed % 1001) as f32 / 1000.0
+    };
+    (0..n)
+        .map(|i| Rgba {
+            r: next(),
+            g: next(),
+            b: next(),
+            a: if i % 5 == 0 { 0.0 } else { next() },
+        })
+        .collect()
 }
 
 /// The part of `a` inside `b`, or `None` when nothing is left.
@@ -650,6 +819,9 @@ pub fn clip_rect(a: DeviceRect, b: DeviceRect) -> Option<DeviceRect> {
 /// The most shapes a row culls: a row of `fill` with more near shapes than this measures
 /// every shape at every pixel it walks.
 const NEAR_SHAPES: usize = 64;
+
+/// The most px `fill` and the soft shapes gather before blending them by one `blend_span`.
+pub(crate) const SPAN: usize = 64;
 
 // The pixels `fill` has measured on this thread (each test runs on its own thread).
 #[cfg(test)]
@@ -680,18 +852,21 @@ pub fn fill(
         bottom = bottom.max(b);
     }
     let y0 = (top.floor() as i32).max(clip.top);
-    let y1 = (bottom.ceil() as i32 + 1).min(clip.bottom);
+    // Saturating: a shape at ±∞ or ±1e30 px draws nothing and never overflows (ruling G13).
+    let y1 = (bottom.ceil() as i32).saturating_add(1).min(clip.bottom);
     // A row's shapes with their spans grown by 1 px: a pixel more than 1 px outside a shape's
     // span is at distance > 1.5 from it, so it changes no coverage and is not measured (the
     // result is the same min).
     let mut near = [(0.0f32, 0.0f32, 0u16); NEAR_SHAPES];
     let mut spans = [(0i32, 0i32); NEAR_SHAPES];
+    let mut run = [Rgba::CLEAR; SPAN];
     for y in y0..y1 {
         let cy = y as f32 + 0.5;
         let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
         let (mut n, mut crowded) = (0, false);
+        // Up to two entries a shape (a hollow one's flanks, ruling G5), each counted.
         for (i, s) in shapes.iter().enumerate() {
-            if let Some((a, b)) = s.row_span(cy) {
+            for (a, b) in s.row_spans(cy).into_iter().flatten() {
                 lo = lo.min(a);
                 hi = hi.max(b);
                 match u16::try_from(i) {
@@ -731,8 +906,8 @@ pub fn fill(
             n
         } else {
             spans[0] = (
-                (lo.floor() as i32 - 1).max(clip.left),
-                (hi.ceil() as i32 + 1).min(clip.right),
+                (lo.floor() as i32).saturating_sub(1).max(clip.left),
+                (hi.ceil() as i32).saturating_add(1).min(clip.right),
             );
             1
         };
@@ -744,6 +919,9 @@ pub fn fill(
                 x1 = x1.max(spans[k].1);
                 k += 1;
             }
+            // The walk's colours, a chunk at a time, blended by one call per chunk (ruling G4);
+            // an uncovered px is clear, which `blend_span` skips.
+            let (mut start, mut len) = (x0, 0);
             for x in x0..x1 {
                 #[cfg(test)]
                 VISITS.with(|v| v.set(v.get() + 1));
@@ -760,17 +938,46 @@ pub fn fill(
                         .fold(f32::INFINITY, |m, s| m.min(s.distance(p)))
                 };
                 let coverage = (0.5 - d).clamp(0.0, 1.0);
-                if coverage <= 0.0 {
-                    continue;
+                run[len] = if coverage > 0.0 {
+                    let mut c = paint.at(p);
+                    c.a *= coverage * alpha;
+                    c
+                } else {
+                    Rgba::CLEAR
+                };
+                len += 1;
+                if len == SPAN {
+                    target.blend_span(start as usize, y as usize, &run, blend);
+                    (start, len) = (x + 1, 0);
                 }
-                let mut c = paint.at(p);
-                c.a *= coverage * alpha;
-                if c.a > 0.0 {
-                    target.blend(x as usize, y as usize, c, blend);
-                }
+            }
+            if len > 0 {
+                target.blend_span(start as usize, y as usize, &run[..len], blend);
             }
         }
     }
+}
+
+/// Layer px `d` with premultiplied sprite px `p` over it: `p` itself where opaque (its keep is 0),
+/// `d` where clear, else `p + d·(255 − a)/255` rounded, per channel.
+#[inline(always)]
+fn over_sprite(d: u32, p: u32) -> u32 {
+    let a = p >> 24;
+    if a == 255 {
+        return p & 0x00ff_ffff;
+    }
+    if a == 0 {
+        return d;
+    }
+    let keep = 255 - a;
+    let ch = |shift: u32| ((p >> shift & 0xff) + div255((d >> shift & 0xff) * keep + 127)).min(255);
+    ch(16) << 16 | ch(8) << 8 | ch(0)
+}
+
+/// `v / 255` for `v` ≤ 255·255 + 127 (every product here), in shifts and adds so it vectorises.
+#[inline(always)]
+pub(crate) fn div255(v: u32) -> u32 {
+    (v + 1 + (v >> 8)) >> 8
 }
 
 /// Draws premultiplied `sprite` (`size × size`) with its top-left at (`left`, `top`), over the
@@ -798,15 +1005,7 @@ pub fn blit_sprite(
             .iter_mut()
             .zip(src)
         {
-            let a = p >> 24;
-            if a == 0 {
-                continue;
-            }
-            let keep = 255 - a;
-            let ch = |shift: u32| {
-                ((p >> shift & 0xff) + ((*dst >> shift & 0xff) * keep + 127) / 255).min(255)
-            };
-            *dst = ch(16) << 16 | ch(8) << 8 | ch(0);
+            *dst = over_sprite(*dst, p);
         }
     }
 }
@@ -815,6 +1014,324 @@ pub fn blit_sprite(
 mod tests {
     use super::*;
     use crate::spectrum::Rgb;
+
+    /// Ruling G4: a span blends exactly as its px one by one, zero alphas untouched, in every
+    /// target `etch` owns and every blend.
+    #[test]
+    fn spans_blend_like_single_px_in_every_target() {
+        for blend in [Blend::Over, Blend::Add, Blend::Multiply] {
+            let colours = span_colours(150, 9);
+            let start: Vec<u32> = (0..200u32)
+                .map(|i| i.wrapping_mul(0x9e37_79b9) & 0x00ff_ffff)
+                .collect();
+            let (mut one, mut span) = (start.clone(), start.clone());
+            let (w, h) = (200, 1);
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    Layer {
+                        px: &mut one,
+                        width: w,
+                        height: h,
+                    }
+                    .blend(30 + i, 0, c, blend);
+                }
+            }
+            Layer {
+                px: &mut span,
+                width: w,
+                height: h,
+            }
+            .blend_span(30, 0, &colours, blend);
+            assert!(one == span, "Layer {blend:?}");
+            assert!(one != start, "Layer {blend:?} drew");
+
+            // RgbaBytes: alpha stays 255 where drawn, and only there.
+            let bytes: Vec<u8> = start
+                .iter()
+                .flat_map(|p| (p | 0x7f00_0000).to_le_bytes())
+                .collect();
+            let (mut one, mut span) = (bytes.clone(), bytes.clone());
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    RgbaBytes {
+                        px: &mut one,
+                        width: w,
+                        height: h,
+                    }
+                    .blend(30 + i, 0, c, blend);
+                }
+            }
+            RgbaBytes {
+                px: &mut span,
+                width: w,
+                height: h,
+            }
+            .blend_span(30, 0, &colours, blend);
+            assert!(one == span, "RgbaBytes {blend:?}");
+            assert!(one != bytes, "RgbaBytes {blend:?} drew");
+
+            // SpriteCanvas (premultiplied, 15 × 15): a span along row 7 from column 2.
+            let sprite: Vec<u32> = (0..225u32)
+                .map(|i| {
+                    let a = i.wrapping_mul(0x9e37_79b9) >> 24;
+                    let v = a * (i % 7) / 7;
+                    a << 24 | v << 16 | (a / 2) << 8 | (a / 3)
+                })
+                .collect();
+            let colours = &colours[..13];
+            let (mut one, mut span) = (sprite.clone(), sprite.clone());
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    SpriteCanvas {
+                        px: &mut one,
+                        size: 15,
+                    }
+                    .blend(2 + i, 7, c, blend);
+                }
+            }
+            SpriteCanvas {
+                px: &mut span,
+                size: 15,
+            }
+            .blend_span(2, 7, colours, blend);
+            assert!(one == span, "SpriteCanvas {blend:?}");
+            assert!(one != sprite, "SpriteCanvas {blend:?} drew");
+        }
+    }
+
+    /// Ruling G5: outlines and rings, thin and thick, small and large, at fractional places, fill
+    /// exactly as every px's nearest-shape measure gives.
+    #[test]
+    fn hollow_shapes_fill_like_their_nearest_one() {
+        let mut shapes = Vec::new();
+        for (k, size) in [3.0f32, 7.5, 18.25, 40.0, 61.7].into_iter().enumerate() {
+            let o = 2.3 + k as f32 * 0.37;
+            for stroke in [0.6f32, 1.0, 2.5, 6.0] {
+                let rr = Shape::round_rect(o, o + 1.0, o + size, o + 1.0 + size * 0.8, size * 0.16);
+                shapes.push(rr.outline(stroke));
+                shapes.push(Shape::ring(
+                    pt(o + size / 2.0, o + size / 2.0),
+                    size * 0.4,
+                    stroke,
+                ));
+            }
+        }
+        // Deep corners (the hole's own round corner rows), uneven corners, and shapes crossing
+        // the canvas's edges.
+        for stroke in [0.6f32, 2.5] {
+            let deep = Shape::round_rect(6.3, 4.9, 66.2, 51.4, 22.7).outline(stroke);
+            shapes.push(deep);
+            if let Shape::RoundRect { radii, .. } = &mut shapes.last_mut().unwrap() {
+                *radii = [22.7, 3.0, 0.0, 14.1];
+            }
+            shapes.push(deep);
+            // Radii past the half sizes (as `RoundRect` may be built, not by `round_rect`).
+            shapes.push(deep);
+            if let Shape::RoundRect { radii, .. } = &mut shapes.last_mut().unwrap() {
+                *radii = [40.0, 0.0, 33.0, 0.0];
+            }
+            shapes.push(Shape::round_rect(-20.4, 30.2, 40.1, 90.0, 9.0).outline(stroke));
+            shapes.push(Shape::ring(pt(4.0, 66.5), 25.3, stroke));
+        }
+        for s in &shapes {
+            let (px, want) = filled_and_nearest(std::slice::from_ref(s), 72);
+            assert!(px == want, "{s:?}");
+        }
+        // And all together (overlapping holes and rims).
+        let (px, want) = filled_and_nearest(&shapes[..12], 72);
+        assert!(px == want);
+    }
+
+    /// Ruling G5: a large outline and a large ring walk their rims, not their holes.
+    #[test]
+    fn a_hollow_shape_walks_only_its_rim() {
+        let mut px = vec![0u32; 300 * 300];
+        let mut layer = Layer {
+            px: &mut px,
+            width: 300,
+            height: 300,
+        };
+        let all = DeviceRect::new(0, 0, 300, 300);
+        let paint = Paint::Solid(Rgb(255, 255, 255).opaque());
+        VISITS.with(|v| v.set(0));
+        let outline = Shape::round_rect(20.0, 20.0, 280.0, 280.0, 30.0).outline(2.0);
+        fill(&mut layer, all, &[outline], &paint, 1.0, Blend::Over);
+        let ring = Shape::ring(pt(150.0, 150.0), 120.0, 3.0);
+        fill(&mut layer, all, &[ring], &paint, 1.0, Blend::Over);
+        let visits = VISITS.with(|v| v.get());
+        // Measured (ruling P1): 117 708 px before holes (rect 70 224, ring 47 484); with them
+        // 12 012 (rect 6 812, its corner rows' holes rounded; ring 5 200). Corner rows walked
+        // whole would give about 25 000.
+        assert!(visits < 14_000, "{visits} px measured");
+    }
+
+    /// Ruling G4 at a chunk's edges: walks of 62–67 px (one chunk, exactly one, one and a px),
+    /// and a clip cutting each in two, fill as every px's nearest-shape measure gives.
+    #[test]
+    fn walks_across_a_chunk_edge_fill_like_the_nearest_shape() {
+        for width in 60..=65 {
+            // A rect `width` px wide walks `width + 2` px or so (its span grown by 1 px).
+            let left = 3.25 + width as f32 * 0.01;
+            let shapes = [Shape::round_rect(left, 2.5, left + width as f32, 9.5, 2.0)];
+            let (px, want) = filled_and_nearest(&shapes, 72);
+            assert!(px == want, "{width} px");
+            assert!(px.iter().any(|&p| p != 0), "{width} px drew");
+            // The same in two clips, cut at every column across the first chunk's end.
+            for cut in [30, 63, 64, 65, 66] {
+                let mut halves = vec![0u32; 72 * 72];
+                let mut layer = Layer {
+                    px: &mut halves,
+                    width: 72,
+                    height: 72,
+                };
+                let paint = Paint::Solid(Rgb(255, 255, 255).alpha(0.6));
+                for clip in [
+                    DeviceRect::new(0, 0, cut, 72),
+                    DeviceRect::new(cut, 0, 72, 72),
+                ] {
+                    fill(&mut layer, clip, &shapes, &paint, 1.0, Blend::Over);
+                }
+                assert!(halves == want, "{width} px cut at {cut}");
+            }
+        }
+    }
+
+    #[test]
+    fn dividing_by_255_in_shifts_is_exact_for_every_product() {
+        for v in 0..=255 * 255 + 127 {
+            assert_eq!(div255(v), v / 255, "{v}");
+        }
+    }
+
+    /// A blit's px are the plain formula's, `p + (d·(255 − a) + 127) / 255` per channel
+    /// (capped), for 2 000 random pairs: premultiplied or not, clear, opaque and between.
+    #[test]
+    fn blits_match_the_plain_formula() {
+        let plain = |d: u32, p: u32| {
+            let a = p >> 24;
+            if a == 0 {
+                return d;
+            }
+            let keep = 255 - a;
+            let ch = |shift: u32| {
+                ((p >> shift & 0xff) + ((d >> shift & 0xff) * keep + 127) / 255).min(255)
+            };
+            ch(16) << 16 | ch(8) << 8 | ch(0)
+        };
+        let mut seed = 0x1234_5678u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let (mut sprite, mut layer) = (Vec::new(), Vec::new());
+        for k in 0..2000 {
+            let (p, d) = (next(), next());
+            let p = match k % 4 {
+                0 => p & 0x00ff_ffff,
+                1 => p | 0xff00_0000,
+                _ => p,
+            };
+            sprite.push(p);
+            layer.push(d);
+        }
+        let want: Vec<u32> = layer
+            .iter()
+            .zip(&sprite)
+            .map(|(&d, &p)| plain(d, p))
+            .collect();
+        let mut px = layer.clone();
+        let mut target = Layer {
+            px: &mut px,
+            width: 2000,
+            height: 1,
+        };
+        // The 2 000 px as one row of 2 000 one-px sprites: each blit a px.
+        for (x, p) in sprite.iter().enumerate() {
+            let clip = DeviceRect::new(0, 0, 2000, 1);
+            blit_sprite(&mut target, clip, std::slice::from_ref(p), 1, x as i32, 0);
+        }
+        assert!(px == want);
+        // And as one 40 × 40 sprite (its rows, clipped to the layer), over the same px.
+        let mut px = layer[..1600].to_vec();
+        let mut target = Layer {
+            px: &mut px,
+            width: 40,
+            height: 40,
+        };
+        blit_sprite(
+            &mut target,
+            DeviceRect::new(0, 0, 40, 40),
+            &sprite[..1600],
+            40,
+            0,
+            0,
+        );
+        assert!(px[..] == want[..1600]);
+    }
+
+    /// Ruling G3: the trunc form rounds exactly as `f32::round`, sign and NaN included.
+    #[test]
+    fn rounding_by_trunc_is_round() {
+        let same = |v: f32| {
+            let (a, b) = (round_by_trunc(v), v.round());
+            a.to_bits() == b.to_bits() || (a.is_nan() && b.is_nan())
+        };
+        // Every 97th bit pattern: every exponent, both signs, NaN and the infinities.
+        let mut bits = 0u32;
+        loop {
+            assert!(same(f32::from_bits(bits)), "{bits:#010x}");
+            match bits.checked_add(97) {
+                Some(b) => bits = b,
+                None => break,
+            }
+        }
+        // Every half and its neighbours up to 2²⁴, where rounding ties live.
+        for k in -(1i32 << 24)..=(1 << 24) {
+            let h = k as f32 / 2.0;
+            for v in [
+                h,
+                f32::from_bits(h.to_bits().wrapping_add(1)),
+                f32::from_bits(h.to_bits().wrapping_sub(1)),
+            ] {
+                assert!(same(v), "{v}");
+            }
+        }
+    }
+
+    /// `code_value` is the rounded, clamped cast it replaces, both natively and through the
+    /// wasm `round_by_trunc`; so are the plain saturating casts to `u8` and `u16`.
+    #[test]
+    fn code_values_are_clamped_rounds() {
+        let check = |v: f32| {
+            let clamped = |r: f32, top: f32| r.clamp(0.0, top);
+            for r in [round_away(v), round_by_trunc(v)] {
+                let (code, plain) = ((r as u32).min(255), clamped(r, 255.0) as u32);
+                assert_eq!(code, plain, "{v:?} ({:#010x})", v.to_bits());
+                assert_eq!(r as u8, clamped(r, 255.0) as u8, "{v:?}");
+                assert_eq!(r as u16, clamped(r, 65_535.0) as u16, "{v:?}");
+            }
+            assert_eq!(code_value(v), round_away(v).clamp(0.0, 255.0) as u32);
+        };
+        // Every 97th bit pattern: every exponent, both signs, NaN and the infinities.
+        let mut bits = 0u32;
+        loop {
+            check(f32::from_bits(bits));
+            match bits.checked_add(97) {
+                Some(b) => bits = b,
+                None => break,
+            }
+        }
+        // Every half from −2 to 65 538 and its neighbours, where the bounds and every rounding
+        // step lie.
+        for k in -4..=131_076 {
+            let h = k as f32 / 2.0;
+            for v in [h, h.next_up(), h.next_down()] {
+                check(v);
+            }
+        }
+    }
 
     #[test]
     fn the_small_trigonometry_matches_libm() {
@@ -1358,5 +1875,55 @@ mod tests {
             Blend::Over,
         );
         assert_eq!(px, [0, 0xffffff, 0, 0xffffff], "only the clip is touched");
+    }
+
+    /// Ruling G13: shapes at absurd coordinates never panic (debug builds check overflow) and a
+    /// shape wholly off the canvas draws nothing.
+    #[test]
+    fn extreme_coordinates_draw_nothing_and_never_panic() {
+        const EXTREMES: [f32; 7] = [
+            1e30,
+            -1e30,
+            3e9,
+            -3e9,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ];
+        let mut px = vec![0u32; 64 * 64];
+        let all = DeviceRect::new(0, 0, 64, 64);
+        let paint = Paint::Solid(Rgb(255, 255, 255).opaque());
+        for v in EXTREMES {
+            let mut layer = Layer {
+                px: &mut px,
+                width: 64,
+                height: 64,
+            };
+            for shape in [
+                Shape::disc(pt(v, 10.0), 5.0),
+                Shape::disc(pt(10.0, v), 5.0),
+                Shape::rect(v, v, v, v),
+                Shape::ring(pt(v, -v), 4.0, 1.0),
+            ] {
+                fill(&mut layer, all, &[shape], &paint, 1.0, Blend::Over);
+            }
+            // Lines from far away may cross the canvas: they only must not panic.
+            let line = Shape::line(pt(v, v), pt(10.0, 10.0), 2.0);
+            fill(&mut layer, all, &[line], &paint, 1.0, Blend::Over);
+        }
+        let mut clean = vec![0u32; 64 * 64];
+        let mut layer = Layer {
+            px: &mut clean,
+            width: 64,
+            height: 64,
+        };
+        for v in EXTREMES {
+            let shapes = [Shape::disc(pt(v, 10.0), 5.0), Shape::rect(v, v, v, v)];
+            fill(&mut layer, all, &shapes, &paint, 1.0, Blend::Over);
+            // More near shapes on a row than `fill` culls: the whole-row span from `lo`/`hi`.
+            let crowd = [Shape::disc(pt(v, 10.0), 5.0); NEAR_SHAPES + 1];
+            fill(&mut layer, all, &crowd, &paint, 1.0, Blend::Over);
+        }
+        assert!(clean.iter().all(|&p| p == 0), "an off-canvas shape drew");
     }
 }

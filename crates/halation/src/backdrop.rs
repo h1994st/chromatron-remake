@@ -2,7 +2,7 @@
 //! vignette and grain. It is baked per resize at ¼ resolution plus a 256² grain tile, so there
 //! is no full-size buffer; `fill` upsamples it in fixed point, a row at a time.
 
-use crate::etch::{Layer, Pt, Shape, Stops, clip_rect, pt};
+use crate::etch::{Layer, Pt, Shape, Stops, clip_rect, code_value, pt, round_away};
 use crate::spectrum::{Palette, Rgb, Rgba};
 use crate::vitrine::falloff;
 use crate::{DeviceRect, fit_buffer};
@@ -75,13 +75,15 @@ pub fn grain_tile(seed: u32) -> Vec<u8> {
 pub struct Backdrop {
     quarter: Vec<u32>,
     grain: Vec<u8>,
-    overlay: Vec<u8>,
+    /// The overlay blend of grain `g` over code `b` at `g * 256 + b`: its size is in its type,
+    /// so `fill` indexes it with no length check to fail.
+    overlay: Box<[u8; 256 * 256]>,
     /// The grain strength `overlay` was made for: it depends on nothing else, so a resize keeps
     /// it.
     overlay_grain: Option<f32>,
     /// Whether `overlay` is the identity (a grain of 0): `fill` then skips the grain.
     grainless: bool,
-    /// One vertically blended quarter row, channels in `lanes`.
+    /// One vertically blended quarter row, channels in 16-bit lanes (red at bit 32).
     row: Vec<u64>,
     width: usize,
     height: usize,
@@ -104,7 +106,7 @@ impl Backdrop {
         Backdrop {
             quarter: Vec::new(),
             grain: grain_tile(GRAIN_SEED),
-            overlay: vec![0; 256 * 256],
+            overlay: Box::new([0u8; 256 * 256]),
             overlay_grain: None,
             grainless: false,
             row: Vec::new(),
@@ -226,7 +228,7 @@ impl Backdrop {
                         fill.map_or(c, |s| over(c, s))
                     }
                 };
-                let code = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u32;
+                let code = |v: f32| code_value(v * 255.0);
                 self.quarter[qy * qw + qx] = code(c.r) << 16 | code(c.g) << 8 | code(c.b);
             }
         }
@@ -246,7 +248,7 @@ impl Backdrop {
                     1.0 - 2.0 * (1.0 - bv) * (1.0 - gv)
                 };
                 self.overlay[g * 256 + b] =
-                    (255.0 * (bv + grain * (o - bv))).round().clamp(0.0, 255.0) as u8;
+                    round_away(255.0 * (bv + grain * (o - bv))).clamp(0.0, 255.0) as u8;
             }
         }
         // No grain (the light page): every grain value leaves every code as it is.
@@ -266,16 +268,16 @@ impl Backdrop {
             return;
         };
         let (qw, qh) = (self.quarter_width, self.quarter_height);
-        let Ok(overlay) = <&[u8; 256 * 256]>::try_from(self.overlay.as_slice()) else {
-            return;
-        };
+        let overlay = &*self.overlay;
         let grainless = self.grainless;
         let (x0, x1) = (r.left as usize, r.right as usize);
         // The quarter columns with pixels in the span, `first..=last`; the row holds them with one
-        // more each side, clamped to the edge as the bilinear taps are.
+        // more each side, clamped to the edge as the bilinear taps are: entry k is column
+        // `first + k − 1`, the first entry column 0 when `first` is 0 and the entries from `end`
+        // column `qw − 1`.
         let (first, last) = (x0 / 4, (x1 - 1) / 4);
         let columns = last - first + 3;
-        let column = |k: usize| (first + k).saturating_sub(1).min(qw - 1);
+        let (start, end) = (usize::from(first == 0), columns.min(qw + 1 - first));
         for y in r.top as usize..r.bottom as usize {
             let (iy, ky) = (y / 4, y % 4);
             let (a, b) = if ky < 2 {
@@ -284,13 +286,29 @@ impl Backdrop {
                 (iy, (iy + 1).min(qh - 1))
             };
             let (wa, wb) = WEIGHTS[ky];
-            let (wa, wb) = (u64::from(wa), u64::from(wb));
             let top = &self.quarter[a * qw..][..qw];
             let bottom = &self.quarter[b * qw..][..qw];
-            for (k, dst) in self.row[..columns].iter_mut().enumerate() {
-                *dst = lanes(top[column(k)]) * wa + lanes(bottom[column(k)]) * wb;
+            // The two texels' channels weighted, in 16-bit lanes of a u64 (red at bit 32), so one
+            // multiply-add weighs all three in `texel`. Worked out in 32 bits (red and blue in one
+            // word, green in another; each field ≤ 255·8 < 2¹⁶, so none carries), which
+            // vectorises.
+            let blend = |t: u32, b: u32| {
+                let (wa, wb) = (u32::from(wa), u32::from(wb));
+                let rb = (t & 0xff_00ff) * wa + (b & 0xff_00ff) * wb;
+                let g = (t >> 8 & 0xff) * wa + (b >> 8 & 0xff) * wb;
+                u64::from(rb >> 16) << 32 | u64::from(g) << 16 | u64::from(rb & 0xffff)
+            };
+            let row = &mut self.row[..columns];
+            row[..start].fill(blend(top[0], bottom[0]));
+            let from = first + start - 1;
+            for (dst, (&t, &b)) in row[start..end]
+                .iter_mut()
+                .zip(top[from..].iter().zip(&bottom[from..]))
+            {
+                *dst = blend(t, b);
             }
-            let cells = &self.row[..columns];
+            row[end..].fill(blend(top[qw - 1], bottom[qw - 1]));
+            let cells = &*row;
             let grain_row = &self.grain[(y % GRAIN_SIDE) * GRAIN_SIDE..][..GRAIN_SIDE];
             let out = &mut layer.px[y * layer.width..][..layer.width];
             // Pixel x from its quarter column's row entry and the near neighbour's. Each lane is
@@ -338,17 +356,9 @@ impl Backdrop {
     pub fn bytes(&self) -> usize {
         self.quarter.capacity() * size_of::<u32>()
             + self.grain.capacity()
-            + self.overlay.capacity()
+            + size_of::<[u8; 256 * 256]>()
             + self.row.capacity() * size_of::<u64>()
     }
-}
-
-/// `0x00RRGGBB` spread to 16-bit lanes of a u64 (red at bit 32), so one multiply-add weighs all
-/// three channels.
-#[inline(always)]
-fn lanes(rgb: u32) -> u64 {
-    let rgb = u64::from(rgb);
-    (rgb & 0xff_0000) << 16 | (rgb & 0xff00) << 8 | rgb & 0xff
 }
 
 /// The bilinear rounding term, 32, in every lane.
@@ -678,7 +688,7 @@ mod tests {
     fn fills_match_plain_bilinear_texels() {
         // Odd canvas widths, odd and even starts, spans of 1–3 px and longer, rows of every phase;
         // with grain (dark) and without (light: the overlay is skipped).
-        let sizes = [(37, 23), (101, 9), (8, 8), (5, 6)];
+        let sizes = [(37, 23), (101, 9), (8, 8), (5, 6), (263, 7)];
         for (palette, (w, h)) in [Palette::DARK, Palette::LIGHT]
             .into_iter()
             .flat_map(|p| sizes.map(|s| (p, s)))

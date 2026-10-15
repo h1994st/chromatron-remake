@@ -21,12 +21,8 @@ pub fn clip_to_frame(rect: Rect) -> Option<Rect> {
 /// (640 × 480 × 4) as `[r, g, b, 255]` per pixel and returns the clipped rect, or `None` when the
 /// rect is off the frame. Allocation-free.
 pub fn rgba_rect(frame: &[u32], rgba: &mut [u8], rect: Rect) -> Option<Rect> {
-    assert_eq!(
-        frame.len(),
-        FRAME_WIDTH * FRAME_HEIGHT,
-        "frame must be 640 × 480"
-    );
-    assert_eq!(rgba.len(), RGBA_LEN, "rgba must be 640 × 480 × 4");
+    // frame: 640 × 480; rgba: 640 × 480 × 4.
+    assert!(frame.len() == FRAME_WIDTH * FRAME_HEIGHT && rgba.len() == RGBA_LEN);
     let clipped = clip_to_frame(rect)?;
     let (left, right) = (clipped.left as usize, clipped.right as usize);
     for y in clipped.top as usize..clipped.bottom as usize {

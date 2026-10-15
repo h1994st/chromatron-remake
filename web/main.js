@@ -681,7 +681,8 @@ function applyTheme() {
 // Switches the look (spec §11), storing it as the player's choice when `store`: the drag ends (the
 // piece stays put), the session starts the look cold, and the page lays out again.
 function setLook(next, { store = false } = {}) {
-  if (store) storage.write("chromatron.look", next);
+  // index.html's head script names the key (and reads it before the first paint).
+  if (store) storage.write(window.chromatronLookKey, next);
   if (next === look) return;
   closeMenu();
   endDrag();

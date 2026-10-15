@@ -920,7 +920,11 @@ fn glint_at(board: &Board, field: &BeamField, cell: usize, hidden: Option<usize>
             kind: GlintKind::Crossing,
         });
     }
-    if matches!(piece, Piece::Empty | Piece::Laser | Piece::Wall) || hidden == Some(cell) {
+    // A gate's light is its aperture dot (ruling G11): it emits, it doesn't bounce, so it gets no
+    // bounce glint at its centre, as a target gets none. A gate whose inputs cross still got its
+    // Crossing glint above.
+    let emits = matches!(piece, Piece::LogicGate | Piece::PrimaryLogicGate);
+    if matches!(piece, Piece::Empty | Piece::Laser | Piece::Wall) || emits || hidden == Some(cell) {
         return None;
     }
     let bounce = (0..8)
@@ -1369,6 +1373,36 @@ mod tests {
         assert_eq!(reach.leaving(gate, 0, 4), 6);
         assert_exact(&b, &field, &reach);
         assert_eq!(reach.guessed, 0);
+    }
+
+    /// Ruling G11: an emitting gate's light is its aperture dot alone; it gets no bounce glint at
+    /// its centre, as a target gets no glint (a gate emits, it doesn't bounce).
+    #[test]
+    fn an_emitting_gate_has_one_hot_spot() {
+        // The board of `a_gate_sends_its_light_once_both_inputs_have_it` (C3's gate at (7, 7)
+        // pointing north, both inputs lit, so it emits red north), and C4's primary gate there.
+        for (game, piece) in [
+            (Game::C3, Piece::LogicGate),
+            (Game::C4, Piece::PrimaryLogicGate),
+        ] {
+            let (b, field) = board_in(
+                game,
+                &[
+                    (5, 9, Piece::Laser, 4, 1),
+                    (7, 7, piece, 4, 0),
+                    (7, 2, Piece::Pinwheel, 4, 0),
+                    (13, 13, Piece::Laser, 4, 7),
+                ],
+            );
+            let gate = board_index(7, 7);
+            assert_eq!(field.outbound[gate][0], 4, "{piece:?}: red north");
+            let mut line = Beamline::new();
+            line.rebuild(&b, &field, None);
+            assert!(
+                line.glints().iter().all(|g| g.cell != gate),
+                "{piece:?}: no glint on the gate"
+            );
+        }
     }
 
     #[test]

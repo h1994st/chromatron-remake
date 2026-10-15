@@ -217,11 +217,13 @@ assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), fals
   assert.ok(source?.includes("chromatronTheme"), "index.html's head script");
   const firstPaint = ({ search = "", stored = null, dark = true, storage = true }) => {
     const metas = [{ content: "#06070b" }, { content: "#eef1f6" }];
+    const asked = [];
     const page = {
       document: { documentElement: { dataset: {} }, querySelectorAll: () => metas },
       location: { search },
       localStorage: {
         getItem: (key) => {
+          asked.push(key);
           if (!storage) throw new Error("SecurityError");
           return key === "chromatron.look" ? stored : null;
         },
@@ -231,6 +233,9 @@ assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), fals
     };
     page.window = page;
     runInNewContext(source, page);
+    // The stored look's key is named once, by the head script, and read under that name.
+    assert.equal(page.window.chromatronLookKey, "chromatron.look", "the head script names the stored look's key");
+    assert.deepEqual(asked, ["chromatron.look"], "the head script reads the stored look by that key");
     const { look, theme } = page.document.documentElement.dataset;
     return { look, theme, colors: metas.map((meta) => meta.content) };
   };
@@ -242,6 +247,8 @@ assert.equal(t.scrollEndsPress(t.startPress("mouse", 0, 0), at, 160, 2000), fals
   assert.deepEqual(firstPaint({ search: "?shot=x&look=classic", dark: false }), { look: "classic", theme: "dark", colors: both("#25272a") });
   assert.equal(firstPaint({ search: "?look=bogus", stored: "nonsense" }).look, "modern");
   assert.deepEqual(firstPaint({ stored: "classic", storage: false, dark: false }), { look: "modern", theme: "light", colors: both("#eef1f6") }, "storage that throws: modern");
+  const main = readFileSync(join(dir, "main.js"), "utf8");
+  assert.ok(!main.includes('"chromatron.look"'), "main.js stores the look under the head script's chromatronLookKey");
 }
 
 console.log("ok: touch layout rules");

@@ -8,8 +8,8 @@
 
 use lumen::layout::STRIP_SLOTS;
 use lumen::{
-    BOARD_CELLS, BeamField, Board, Cell, Colour, DX, DY, Dir, Drag, GameState, Piece, SlotState,
-    VISIBLE_TOOLBOX_SLOTS, WHITE,
+    BOARD_CELLS, BeamField, Board, Cell, Colour, DX, DY, Dir, Drag, GameState, Piece, SIDE,
+    SlotState, VISIBLE_TOOLBOX_SLOTS, WHITE,
 };
 use spectrograph::Game;
 
@@ -17,12 +17,12 @@ use crate::backdrop::{Backdrop, Casting, Ground, MAX_CASTINGS, PanelFill};
 use crate::beamline::{Beamline, GlintKind, Partial, Run, SweepView};
 use crate::bloom::{
     ONE, Planes, add_upsampled, block_mean, blur, blur_plane, blur_scratch, box_radius, downsample,
-    scale, upsampled_at,
+    downsampled_row, scale, scale_values, taps,
 };
 use crate::choreography::SheetPose;
 use crate::etch::{
     Blend, Layer, Paint, Pt, RgbaBytes, Shape, SpriteCanvas, Stops, Target, blit_sprite, clip_rect,
-    fill, pt,
+    fill, pt, round_away,
 };
 use crate::gouache::{
     BOUNCE_DOT, CROSSING_DOT, ITEM_SLACK, MARGIN, STROKE_REACH, Stroked, Wash, mix_dot, passes,
@@ -504,7 +504,7 @@ pub(crate) fn bake_taps(taps: &mut Vec<Tap>, n: usize, s: f32, halve: bool, len:
             p = (p + 0.5) / 2.0 - 0.5;
         }
         let f = p.floor();
-        (pad(f), pad(f + 1.0), ((p - f) * 256.0).round() as u16)
+        (pad(f), pad(f + 1.0), round_away((p - f) * 256.0) as u16)
     }));
 }
 
@@ -673,6 +673,16 @@ impl<T: Target> Target for Posed<T> {
             blend,
         );
     }
+
+    /// Each painted px through `inner`'s own `blend`, inlined (a px whose alpha the pose takes
+    /// to 0 is still handed on, as `blend` hands it).
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        for (i, &c) in colours.iter().enumerate() {
+            if c.a > 0.0 {
+                self.blend(x0 + i, y, c, blend);
+            }
+        }
+    }
 }
 
 /// The output's pixels as a target drawn at `alpha`.
@@ -685,18 +695,18 @@ fn posed<P: Texel>(px: &mut [P], (w, h): (usize, usize), alpha: f32) -> impl Tar
 
 /// `alpha` (0 → 1) in 255ths, as the integer passes scale by it.
 fn alpha_255(alpha: f32) -> u32 {
-    (alpha.clamp(0.0, 1.0) * 255.0).round() as u32
+    round_away(alpha.clamp(0.0, 1.0) * 255.0) as u32
 }
 
 /// Integer source-over of `c` at `alpha` × its alpha on `rect` of the output (the scrim; the
 /// sheet's interior), as `vitrine::tint` does on `base`. `rect` must lie inside the canvas.
 fn tint_texels<P: Texel>(px: &mut [P], width: usize, rect: DeviceRect, c: Rgba, alpha: f32) {
-    let a = ((c.a * alpha).clamp(0.0, 1.0) * 255.0).round() as u32;
+    let a = round_away((c.a * alpha).clamp(0.0, 1.0) * 255.0) as u32;
     if a == 0 {
         return;
     }
     let keep = 255 - a;
-    let lift = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32 * a + 127;
+    let lift = |v: f32| round_away(v.clamp(0.0, 1.0) * 255.0) as u32 * a + 127;
     let (lr, lg, lb) = (lift(c.r), lift(c.g), lift(c.b));
     let (x0, x1) = (rect.left as usize, rect.right as usize);
     for y in rect.top as usize..rect.bottom as usize {
@@ -766,6 +776,19 @@ impl Target for Exposure<'_> {
         self.planes.blend(x, y, c, blend);
         let b = &mut self.bounds;
         (b[0], b[1], b[2], b[3]) = (b[0].min(x), b[1].min(y), b[2].max(x + 1), b[3].max(y + 1));
+    }
+
+    /// Widens its bounds once, over the px the span paints (none for an all-clear one).
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let painted = |c: &Rgba| c.a > 0.0;
+        let Some(first) = colours.iter().position(painted) else {
+            return;
+        };
+        let last = colours.iter().rposition(painted).unwrap_or(first);
+        let (x, x1) = (x0 + first, x0 + last + 1);
+        self.planes.blend_span(x, y, &colours[first..=last], blend);
+        let b = &mut self.bounds;
+        (b[0], b[1], b[2], b[3]) = (b[0].min(x), b[1].min(y), b[2].max(x1), b[3].max(y + 1));
     }
 }
 
@@ -972,6 +995,119 @@ fn draw_bill(
     (x0 < x1).then(|| DeviceRect::new(x0 as i32, y0 as i32, x1 as i32, y1 as i32))
 }
 
+/// How far short of a target's centre (u) the glow and bloom of a beam that ends there stop:
+/// past the disc's arcs (r 0.3u), so the disc shows no haze (ruling G11, still review item 9).
+const TARGET_CLEAR: f32 = 0.35;
+
+/// The cell whose centre is the half-cell point `p`, if `p` is a centre.
+fn centre_cell((x, y): (i16, i16)) -> Option<usize> {
+    let side = 2 * SIDE as i16;
+    (x > 0 && y > 0 && x < side && y < side && x % 2 == 1 && y % 2 == 1)
+        .then(|| (y as usize / 2) * SIDE + x as usize / 2)
+}
+
+/// Whether run `r` covers the half-cell point `q`.
+fn covers(r: &Run, q: (i16, i16)) -> bool {
+    let (dx, dy) = (i32::from(r.to.0 - r.from.0), i32::from(r.to.1 - r.from.1));
+    let (qx, qy) = (i32::from(q.0 - r.from.0), i32::from(q.1 - r.from.1));
+    let along = dx * qx + dy * qy;
+    dx * qy == dy * qx && (0..=dx * dx + dy * dy).contains(&along)
+}
+
+/// Whether `bill` draws any of `mask` on the half from cell centre `p` one step `out`.
+fn carries(bill: &Playbill, p: (i16, i16), out: (i16, i16), mask: Colour) -> bool {
+    let q = (p.0 + out.0, p.1 + out.1);
+    let cell = centre_cell(p);
+    let runs = bill.line.runs().iter();
+    let partials = bill.line.partials().iter();
+    runs.filter(|r| r.mask & mask != 0)
+        .any(|r| covers(r, p) && covers(r, q))
+        || partials.filter(|h| h.mask & mask != 0).any(|h| {
+            let side = usize::from(h.side);
+            Some(usize::from(h.cell)) == cell && (i16::from(DX[side]), i16::from(DY[side])) == out
+        })
+}
+
+/// Whether a beam of `mask` ends at `p`, a shown target's centre, going no further `out`.
+fn ends_in_target(bill: &Playbill, p: (i16, i16), out: (i16, i16), mask: Colour) -> bool {
+    centre_cell(p).is_some_and(|cell| {
+        let light = &bill.lights[cell];
+        light.shown && light.cell.piece == Piece::Pinwheel && !carries(bill, p, out, mask)
+    })
+}
+
+/// Run `run`'s glow and bloom ends (`a`, `b`, light px): an end at a target's centre where
+/// the beam goes no further (the pieces sheet's one-sided beams) is drawn back `TARGET_CLEAR`,
+/// so it leaves no haze in the disc. Settled, in play, a beam runs on through a target: no end
+/// moves. Mid-sweep, a front exactly on a target's centre trims the run that reaches it until
+/// the outgoing half begins; `trim_targets` grows a patched frame's damage to match.
+fn clear_of_targets(map: &LightMap, bill: &Playbill, run: &Run, (a, b): (Pt, Pt)) -> (Pt, Pt) {
+    let len = (b - a).len();
+    if len <= 0.0 {
+        return (a, b);
+    }
+    let along = (b - a) * (TARGET_CLEAR * map.u * map.s / len);
+    let step = (
+        (run.to.0 - run.from.0).signum(),
+        (run.to.1 - run.from.1).signum(),
+    );
+    let back = (-step.0, -step.1);
+    let a = if ends_in_target(bill, run.from, back, run.mask) {
+        a + along
+    } else {
+        a
+    };
+    let b = if ends_in_target(bill, run.to, step, run.mask) {
+        b - along
+    } else {
+        b
+    };
+    (a, b)
+}
+
+/// Partial `p` as its glow and bloom draw it: from `TARGET_CLEAR` out when it reaches a
+/// target's centre where the beam goes no further (as `clear_of_targets`).
+fn partial_clear_of_target(bill: &Playbill, p: &Partial) -> Partial {
+    let (cell, side) = (usize::from(p.cell), usize::from(p.side));
+    let centre = (
+        (2 * (cell % SIDE) + 1) as i16,
+        (2 * (cell / SIDE) + 1) as i16,
+    );
+    let back = (i16::from(-DX[side]), i16::from(-DY[side]));
+    if p.from > 0.0 || !ends_in_target(bill, centre, back, p.mask) {
+        return *p;
+    }
+    let half = if side % 2 == 1 {
+        std::f32::consts::FRAC_1_SQRT_2
+    } else {
+        0.5
+    };
+    Partial {
+        from: TARGET_CLEAR / half,
+        ..*p
+    }
+}
+
+/// The shown targets' cells (in either frame's bill) whose haze trim `change` may flip: a run's
+/// end or a partial at a target's centre. `carries` reads every run and partial there, so a
+/// neighbour's change can trim or restore an unchanged run's last `TARGET_CLEAR`, past its own
+/// change box (mid-sweep, a front exactly on the centre, then the outgoing half begun).
+fn trim_targets(bills: [&Playbill; 2], change: &Change) -> [Option<usize>; 2] {
+    let target = |cell: Option<usize>| {
+        cell.filter(|&i| {
+            bills.iter().any(|b| {
+                let light = &b.lights[i];
+                light.shown && light.cell.piece == Piece::Pinwheel
+            })
+        })
+    };
+    match *change {
+        Change::Run(r) => [target(centre_cell(r.from)), target(centre_cell(r.to))],
+        Change::Partial(p) => [target(Some(usize::from(p.cell))), None],
+        Change::Glint(_) | Change::Light(..) => [None, None],
+    }
+}
+
 /// Paints `bill` into the wash (ruling L3), only inside `clip` (sharp px), which the caller
 /// wiped. Each layer, at `f` sharp px per its px (bloom 4, glow 2, sharp 1), draws every item
 /// whose box (grown by `ITEM_SLACK`) meets the sharp-px extent of `coarser(clip, f)`: each mask's
@@ -1021,12 +1157,23 @@ fn draw_wash(
                 shapes.clear();
                 for run in bill.line.runs().iter().filter(|r| r.mask == mask) {
                     if meets(&Change::Run(*run)) {
-                        let (a, b) = run_ends(map, run);
+                        let (mut a, mut b) = run_ends(map, run);
+                        if f != 1 {
+                            (a, b) = clear_of_targets(map, bill, run, (a, b));
+                        }
                         shapes.push(Shape::line(a * k, b * k, width * u * s * k));
                     }
                 }
                 for p in bill.line.partials().iter().filter(|p| p.mask == mask) {
                     if meets(&Change::Partial(*p)) {
+                        let p = &if f == 1 {
+                            *p
+                        } else {
+                            partial_clear_of_target(bill, p)
+                        };
+                        if p.from >= p.to {
+                            continue;
+                        }
                         let (a, b) = partial_ends(tableau, p);
                         let w = width * u * s * k;
                         shapes.push(Shape::line(map.map(a) * k, map.map(b) * k, w));
@@ -1190,8 +1337,14 @@ pub(crate) const BAND: usize = 64;
 /// Most rects a light tile's changes and windows are kept in.
 pub const LIGHT_PATCHES: usize = 16;
 
-/// A frame's develop windows covering more than 1 / this of `half` develop whole instead.
-pub(crate) const WHOLE_PAST: i64 = 8;
+/// A frame's develop windows covering more than 1 / this of `half` develop whole instead (the
+/// same light, pixel for pixel). Measured at 4, 8, 16 and 32 (ruling G7), on the sweep and level
+/// frames of each game's densest and most-walled levels at 2560 × 1600 and the phone in both
+/// themes, and on the web's sweeps. The worst p90 (the web's C4 sweep) is within 1% at 4 and 8
+/// (13.4 and 13.2 ms, inside the noise), but at 4 most other p90s are lower, many by far (the
+/// web's C2 light sweep 7.3 → 3.5 ms, its C3 dark sweep 4.3 → 3.3 ms, native level frames
+/// 10–20%) and the dark sweeps' medians 25–35%; 16 and 32 double the dark sweeps' p90s.
+pub(crate) const WHOLE_PAST: i64 = 4;
 
 /// The px of a plane `factor` times smaller that hold any of `r`'s.
 pub(crate) fn coarser(r: DeviceRect, factor: i32) -> DeviceRect {
@@ -1278,7 +1431,9 @@ impl LightTile {
         self.half.reshape(hw, hh);
         self.eighth.reshape(hw.div_ceil(4), hh.div_ceil(4));
         self.coarse.reshape(hw.div_ceil(4), hh.div_ceil(4));
-        make_room(&mut self.scratch, blur_scratch(sw, sh));
+        // The tile blurs `half`, `eighth` and `develop_patches`' bands (at most `half`'s width
+        // and height), never `sharp`: the scratch is sized for `half`.
+        make_room(&mut self.scratch, blur_scratch(hw, hh));
         bake_taps(&mut self.halo_cols, w, s, true, hw);
         self.halo_halves =
             s >= 1.0 && (self.halo_cols.iter().enumerate()).all(|(c, &tap)| tap == half_tap(c));
@@ -1299,17 +1454,7 @@ impl LightTile {
     /// Zeroes what the last paint drew into `sharp`; the tile no longer holds a lettering.
     fn wipe(&mut self) {
         self.lettered = None;
-        let d = self.drawn;
-        if is_empty(d) {
-            return;
-        }
-        let w = self.sharp.width;
-        let (x0, x1) = (d.left as usize, d.right as usize);
-        for plane in [&mut self.sharp.r, &mut self.sharp.g, &mut self.sharp.b] {
-            for y in d.top as usize..d.bottom as usize {
-                plane[y * w + x0..y * w + x1].fill(0);
-            }
-        }
+        self.wipe_rect(self.drawn);
         self.drawn = DeviceRect::default();
     }
 
@@ -1354,8 +1499,19 @@ impl LightTile {
     /// Adds to `device` every device rect whose compose that changes: each dirty rect's own (its
     /// sharp light) and each window's (its halo). Needs a `develop` since the last `reshape`.
     /// A tile with no band reserved (`reserve_band`: the lettering tiles) has no room for the
-    /// windows, so it develops whole and reports its whole rect, which is the same light.
+    /// windows, so here it develops whole and reports its whole rect, which is the same light
+    /// (`develop_changed`'s whole branch reports the windows instead, for any tile).
     fn develop_patches(&mut self, dirty: &[DeviceRect], device: &mut Patchwork<LIGHT_PATCHES>) {
+        self.develop_patches_in(dirty, self.windows_of(dirty), device);
+    }
+
+    /// `develop_patches` in `windows_of(dirty)`, worked out by the caller.
+    fn develop_patches_in(
+        &mut self,
+        dirty: &[DeviceRect],
+        windows: Patchwork<LIGHT_PATCHES>,
+        device: &mut Patchwork<LIGHT_PATCHES>,
+    ) {
         if self.band_cap == 0 {
             if dirty.iter().any(|&d| !is_empty(d)) {
                 self.develop(self.sigmas.0, self.sigmas.1);
@@ -1377,16 +1533,29 @@ impl LightTile {
                     self.coarse.b[y * cw + x] = eighth_mean(&self.sharp.b, sw, sh, x, y);
                 }
             }
+        }
+        if !windows.is_empty() {
+            self.eighth.copy_from(&self.coarse);
+            blur(&mut self.eighth, self.sigmas.1 / 8.0, &mut self.scratch);
+            for &w in windows.as_slice() {
+                self.halo_window(w);
+            }
+        }
+        self.report(dirty, &windows, device);
+    }
+
+    /// Adds to `device` the device rects whose compose a change inside `dirty` (sharp px)
+    /// changes, developed in `windows` (½ px): each dirty rect's own and each window's.
+    fn report(
+        &self,
+        dirty: &[DeviceRect],
+        windows: &Patchwork<LIGHT_PATCHES>,
+        device: &mut Patchwork<LIGHT_PATCHES>,
+    ) {
+        for &d in dirty.iter().filter(|&&d| !is_empty(d)) {
             device.add(self.device_of_sharp(d));
         }
-        let windows = self.windows_of(dirty);
-        if windows.is_empty() {
-            return;
-        }
-        self.eighth.copy_from(&self.coarse);
-        blur(&mut self.eighth, self.sigmas.1 / 8.0, &mut self.scratch);
         for &w in windows.as_slice() {
-            self.halo_window(w);
             device.add(self.device_of_half(w));
         }
     }
@@ -1421,29 +1590,38 @@ impl LightTile {
     }
 
     /// The cheaper of two equal develops after `sharp` changed only inside `dirty` (sharp px):
-    /// by patches, or whole (reporting the whole tile) once the windows cover more than
-    /// 1 / `WHOLE_PAST` of `half`, where their per-px work (scalar, ~6× a whole develop's per px)
-    /// costs more than developing it all. The light is the same either way.
+    /// by patches, or whole once the windows cover more than 1 / `WHOLE_PAST` of `half`, where
+    /// their per-px work costs more than developing it all. The light is the same either way, so
+    /// either reports only the rects it changed in (ruling G7), as `develop_patches` does.
     fn develop_changed(&mut self, dirty: &[DeviceRect], device: &mut Patchwork<LIGHT_PATCHES>) {
         let windows = self.windows_of(dirty);
         let covered: i64 = windows.as_slice().iter().map(|&w| area(w)).sum();
         let whole = (self.half.width * self.half.height) as i64;
         if covered * WHOLE_PAST > whole {
             self.develop(self.sigmas.0, self.sigmas.1);
-            device.add(self.rect);
+            self.report(dirty, &windows, device);
         } else {
-            self.develop_patches(dirty, device);
+            self.develop_patches_in(dirty, windows, device);
         }
     }
 
     /// `half` inside window `w` (½ px), as `develop` computes it: the glow in bands of `BAND`
-    /// rows, each blurred from `sharp`'s 2×2 means over the band grown by the glow's reach (so
-    /// the band's own edges never reach the window), scaled, plus the upsampled bloom.
+    /// rows, each blurred from `sharp`'s 2×2 means (by rows) over the band grown by the glow's
+    /// reach (so the band's own edges never reach the window), scaled, plus the bloom upsampled
+    /// as `add_upsampled` does: per row its two ⅛ rows' taps, per column (in chunks of
+    /// `TAP_RUN`, for every row of the band) its two ⅛ columns' taps.
     fn halo_window(&mut self, w: DeviceRect) {
+        /// Columns whose ⅛ taps are held on the stack at a time.
+        const TAP_RUN: usize = 64;
         let rg = 3 * self.radii.0 as i32;
         let (sw, sh) = (self.sharp.width, self.sharp.height);
         let (hw, hh) = (self.half.width, self.half.height);
+        let (ew, eh) = (self.eighth.width, self.eighth.height);
         let cap = self.band_cap;
+        // `add_upsampled`'s weight (1/256) and divisor at ×4.
+        let weight = round_away(BLOOM_WEIGHT * 256.0) as u32;
+        let denom = 8 * 8 * 256;
+        let mut cols = [[(0, 0); 2]; TAP_RUN];
         let mut y0 = w.top;
         while y0 < w.bottom {
             let y1 = (y0 + BAND as i32).min(w.bottom);
@@ -1458,28 +1636,38 @@ impl LightTile {
             );
             // Plain asserts: no panic messages in the shipped code (the page's size cap).
             assert!(bw * bh <= cap);
+            let (left, top) = (src.left as usize, src.top as usize);
             let sharps = [&self.sharp.r, &self.sharp.g, &self.sharp.b];
             for (c, sharp) in sharps.into_iter().enumerate() {
                 let band = &mut self.band[c * cap..][..bw * bh];
-                for (y, row) in band.chunks_exact_mut(bw).enumerate() {
-                    let (x0, y) = (src.left as usize, src.top as usize + y);
-                    for (x, v) in row.iter_mut().enumerate() {
-                        *v = block_mean(sharp, sw, sh, x0 + x, y, 2);
-                    }
+                for (y, row) in (top..).zip(band.chunks_exact_mut(bw)) {
+                    downsampled_row(sharp, (sw, sh), (left, y), row);
                 }
                 blur_plane(band, bw, bh, self.sigmas.0 / 2.0, &mut self.scratch);
             }
-            for y in y0..y1 {
-                for x in w.left..w.right {
-                    let i = (y - src.top) as usize * bw + (x - src.left) as usize;
-                    let up = upsampled_at(&self.eighth, 4, BLOOM_WEIGHT, x as usize, y as usize);
-                    let o = y as usize * hw + x as usize;
-                    let halves = [&mut self.half.r, &mut self.half.g, &mut self.half.b];
-                    for (c, half) in halves.into_iter().enumerate() {
-                        let glow = (f32::from(self.band[c * cap + i]) * GLOW_WEIGHT)
-                            .round()
-                            .min(65_535.0);
-                        half[o] = (glow as u32 + up[c]).min(65_535) as u16;
+            for x0 in (w.left as usize..w.right as usize).step_by(TAP_RUN) {
+                let n = TAP_RUN.min(w.right as usize - x0);
+                for (x, t) in (x0..).zip(&mut cols[..n]) {
+                    *t = taps(x, 4, ew);
+                }
+                for y in y0 as usize..y1 as usize {
+                    let [(ra, wa), (rb, wb)] = taps(y, 4, eh);
+                    let at = (y - top) * bw + x0 - left;
+                    let planes = [
+                        (&mut self.half.r, &self.eighth.r),
+                        (&mut self.half.g, &self.eighth.g),
+                        (&mut self.half.b, &self.eighth.b),
+                    ];
+                    for (c, (half, eighth)) in planes.into_iter().enumerate() {
+                        let out = &mut half[y * hw + x0..][..n];
+                        out.copy_from_slice(&self.band[c * cap + at..][..n]);
+                        scale_values(out, GLOW_WEIGHT);
+                        let (a, b) = (&eighth[ra * ew..][..ew], &eighth[rb * ew..][..ew]);
+                        let column = |j: usize| u32::from(a[j]) * wa + u32::from(b[j]) * wb;
+                        for (o, &[(i0, w0), (i1, w1)]) in out.iter_mut().zip(&cols[..n]) {
+                            let up = (column(i0) * w0 + column(i1) * w1) * weight + denom / 2;
+                            *o = (u32::from(*o) + up / denom).min(65_535) as u16;
+                        }
                     }
                 }
             }
@@ -1623,8 +1811,9 @@ pub struct Darkroom {
     lit: Patchwork<LIGHT_PATCHES>,
     /// The pose this frame paints at.
     pose: Pose,
-    /// `round(255·T(i / ONE))` for light `i` up to `SHOULDER_TOP`.
-    lut: Vec<u8>,
+    /// `round(255·T(i / ONE))` for light `i` up to `SHOULDER_TOP`: its size is in its type, so
+    /// the composes index it with no length check to fail.
+    lut: Box<[u8; SHOULDER_TOP + 1]>,
     regions: Regions,
     /// What a piece laid into `base` for one frame covers (`lay`), and where.
     underlay: Vec<u32>,
@@ -1671,9 +1860,9 @@ impl Darkroom {
             shown: Playbill::new(),
             lit: Patchwork::new(),
             pose: Pose::SETTLED,
-            lut: (0..=SHOULDER_TOP)
-                .map(|i| (255.0 * shoulder(i as f32 / ONE as f32)).round() as u8)
-                .collect(),
+            lut: Box::new(std::array::from_fn(|i| {
+                (255.0 * shoulder(i as f32 / ONE as f32)).round() as u8
+            })),
             regions: Regions::default(),
             underlay: Vec::new(),
             laid: None,
@@ -1913,9 +2102,7 @@ impl Darkroom {
             }
             return;
         }
-        let Ok(lut) = <&[u8; SHOULDER_TOP + 1]>::try_from(self.lut.as_slice()) else {
-            return;
-        };
+        let lut = &*self.lut;
         let w = self.width;
         let Letters {
             brand,
@@ -2084,6 +2271,16 @@ impl Darkroom {
         };
         let pool = &mut self.sprites.board;
         let size = pool.size;
+        // The grid's overhang past the board: 0.35u (§7.2); in light it ends 1.5 px inside the
+        // board panel's rim, never short of the board (ruling G11, still review item 10).
+        let u = tableau.cell as f32;
+        let over = match palette.light_mode {
+            LightMode::Additive => 0.35 * u,
+            LightMode::Over => {
+                let pad = (tableau.board.left - tableau.board_panel().left) as f32;
+                (0.35 * u).min(pad - 1.5).max(0.0)
+            }
+        };
         for &part in self.regions.board_parts() {
             let Some(part) = clip_rect(part, clip) else {
                 continue;
@@ -2100,13 +2297,7 @@ impl Darkroom {
                 };
                 vitrine::panel_edges(&mut layer, part, &rim);
             }
-            draw_grid(
-                &mut layer,
-                part,
-                palette,
-                tableau.board,
-                tableau.cell as f32,
-            );
+            draw_grid(&mut layer, part, palette, tableau.board, u, over);
             for i in 0..BOARD_CELLS {
                 let r = tableau.cell_rect(i);
                 let cell = if hidden == Some(i) || landing == Some(i) {
@@ -2282,12 +2473,21 @@ impl Darkroom {
             self.lit.add(self.wash.rect);
         } else {
             let mut dirty = Patchwork::<LIGHT_PATCHES>::new();
+            let bills: [&Playbill; 2] = [&self.bill, &self.shown];
             self.bill.changes(&self.shown, |c| {
                 dirty.add(clip_to(
                     map.change_box(tableau, &c, STROKE_REACH),
                     plane.right,
                     plane.bottom,
                 ));
+                for cell in trim_targets(bills, &c).into_iter().flatten() {
+                    let centre = tableau.cell_centre(cell);
+                    dirty.add(clip_to(
+                        map.around(centre, centre, TARGET_CLEAR + STROKE_REACH),
+                        plane.right,
+                        plane.bottom,
+                    ));
+                }
             });
             for &d in dirty.as_slice() {
                 self.wash.wipe(d);
@@ -2752,9 +2952,7 @@ impl Darkroom {
     /// Adds the sheet tile's light to `clip` of the output, over what is drawn there, with the
     /// tile `dy` px lower; below `alpha` 1 each span is then mixed back with what was there.
     fn relight_sheet<P: Texel>(&mut self, px: &mut [P], clip: DeviceRect, alpha: f32, dy: i32) {
-        let Ok(lut) = <&[u8; SHOULDER_TOP + 1]>::try_from(self.lut.as_slice()) else {
-            return;
-        };
+        let lut = &*self.lut;
         let w = self.width;
         let Letters { sheet, row, .. } = &mut self.letters;
         if is_empty(sheet.drawn) {
@@ -2812,9 +3010,7 @@ impl Darkroom {
         let Some(r) = clip_rect(rect, canvas) else {
             return;
         };
-        let Ok(lut) = <&[u8; SHOULDER_TOP + 1]>::try_from(self.lut.as_slice()) else {
-            return;
-        };
+        let lut = &*self.lut;
         let over = self.mode == LightMode::Over;
         let light = &mut self.light;
         let wash = &mut self.wash;
@@ -2967,7 +3163,7 @@ impl Darkroom {
             + self.chrome.bytes()
             + self.walls.bytes()
             + 2 * (size_of::<Playbill>() + size_of::<Beamline>())
-            + self.lut.capacity()
+            + size_of::<[u8; SHOULDER_TOP + 1]>()
             + self.underlay.capacity() * size_of::<u32>()
             + self.fade.capacity() * size_of::<[u8; 3]>()
     }
@@ -3090,6 +3286,73 @@ mod tests {
     use crate::spectrum::Theme;
     use crate::{Easel, vitrine};
     use lumen::{BOARD_CELLS, Cell, Piece, board_index, trace};
+
+    /// Ruling G4: a span blends exactly as its px one by one, zero alphas untouched, through
+    /// `Exposure` (the same planes and bounds) and `Posed` over both texel kinds.
+    #[test]
+    fn spans_blend_like_single_px_in_exposures_and_poses() {
+        for blend in [Blend::Over, Blend::Add, Blend::Multiply] {
+            let mut colours = crate::etch::span_colours(150, 23);
+            colours[..2].fill(Rgba::CLEAR);
+            colours[148..].fill(Rgba::CLEAR);
+            let mut start = Planes::new(200, 3);
+            for (i, v) in start.r.iter_mut().enumerate() {
+                *v = (i * 977 % 65_536) as u16;
+            }
+            start.g.fill(3000);
+            let (mut one, mut span) = (start.clone(), start.clone());
+            let mut a = Exposure {
+                planes: &mut one,
+                bounds: [usize::MAX, usize::MAX, 0, 0],
+            };
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    a.blend(30 + i, 1, c, blend);
+                }
+            }
+            let mut b = Exposure {
+                planes: &mut span,
+                bounds: [usize::MAX, usize::MAX, 0, 0],
+            };
+            b.blend_span(30, 1, &colours, blend);
+            b.blend_span(5, 2, &[Rgba::CLEAR; 4], blend);
+            assert_eq!(a.bounds, b.bounds, "Exposure {blend:?}");
+            assert_eq!(a.bounds, [32, 1, 178, 2]);
+            let planes = |p: &Planes| [p.r.clone(), p.g.clone(), p.b.clone()];
+            assert!(planes(&one) == planes(&span), "Exposure {blend:?}");
+            assert!(planes(&one) != planes(&start), "Exposure {blend:?} drew");
+
+            // Posed, at α 0.6 and α 0 (which still hands each px on), over both texel kinds.
+            for alpha in [0.6, 0.0] {
+                let xrgb: Vec<u32> = (0..600u32)
+                    .map(|i| i.wrapping_mul(0x9e37_79b9) >> 8)
+                    .collect();
+                let (mut one, mut span) = (xrgb.clone(), xrgb.clone());
+                for (i, &c) in colours.iter().enumerate() {
+                    if c.a > 0.0 {
+                        posed(&mut one, (200, 3), alpha).blend(30 + i, 1, c, blend);
+                    }
+                }
+                posed(&mut span, (200, 3), alpha).blend_span(30, 1, &colours, blend);
+                assert!(one == span, "Posed u32 {blend:?} {alpha}");
+                assert_eq!(one != xrgb, alpha > 0.0, "Posed u32 {blend:?} {alpha} drew");
+
+                let rgba: Vec<[u8; 4]> = xrgb
+                    .iter()
+                    .map(|p| (p | 0x0100_0000).to_le_bytes())
+                    .collect();
+                let (mut one, mut span) = (rgba.clone(), rgba.clone());
+                for (i, &c) in colours.iter().enumerate() {
+                    if c.a > 0.0 {
+                        posed(&mut one, (200, 3), alpha).blend(30 + i, 1, c, blend);
+                    }
+                }
+                posed(&mut span, (200, 3), alpha).blend_span(30, 1, &colours, blend);
+                assert!(one == span, "Posed RGBA {blend:?} {alpha}");
+                assert!(one != rgba, "Posed RGBA {blend:?} {alpha} drew");
+            }
+        }
+    }
 
     fn lit_board() -> (Board, BeamField) {
         let mut board = Board::default();
@@ -3584,7 +3847,20 @@ mod tests {
             }
             assert!(dark_bytes > 100_000, "{easel:?}: dark tiles {dark_bytes} B");
             room.reshape(&tableau, &Palette::DARK);
-            assert_eq!(tiles(&room), dark, "{easel:?}: sized again in dark");
+            // Sized again in dark: the same rects, in at most 1/8 more room (natively a buffer
+            // grown from what light kept takes `make_room`'s growth slack, ruling G13), and a
+            // second round trip holds exactly what the first did.
+            let again = tiles(&room);
+            for (k, ((rect, bytes), (was, held))) in again.into_iter().zip(dark).enumerate() {
+                assert_eq!(rect, was, "{easel:?}: tile {k} placed again in dark");
+                assert!(
+                    (held..=held + held / 8).contains(&bytes),
+                    "{easel:?}: tile {k} sized again in dark: {bytes} B, first {held} B"
+                );
+            }
+            room.reshape(&tableau, &Palette::LIGHT);
+            room.reshape(&tableau, &Palette::DARK);
+            assert_eq!(tiles(&room), again, "{easel:?}: the slack is taken once");
         }
     }
 
@@ -3943,6 +4219,27 @@ mod tests {
         }
     }
 
+    /// Ruling G8 (an exact trim): a tile never blurs `sharp`, only `half`, `eighth` and bands
+    /// within `half`, so its blur scratch is sized for `half`, and a whole develop and a patched
+    /// one over the whole plane (its widest, tallest bands) never grow it.
+    #[test]
+    fn a_tiles_blur_scratch_is_sized_for_half_and_suffices() {
+        let mut dice = Dice(0x5eed_1e55);
+        for (w, h, max_px) in [
+            (799, 780, f32::INFINITY),
+            (345, 117, f32::INFINITY),
+            (2100, 48, 1800.0),
+        ] {
+            let [mut patched, _] = twin_tiles(DeviceRect::new(0, 0, w, h), max_px, 52.0, &mut dice);
+            let room = blur_scratch(patched.half.width, patched.half.height);
+            assert_eq!(patched.scratch.capacity(), room, "{w}×{h}: sized for half");
+            let (sw, sh) = (patched.sharp.width as i32, patched.sharp.height as i32);
+            let mut device = Patchwork::<LIGHT_PATCHES>::new();
+            patched.develop_patches(&[DeviceRect::new(0, 0, sw, sh)], &mut device);
+            assert_eq!(patched.scratch.capacity(), room, "{w}×{h}: never grown");
+        }
+    }
+
     #[test]
     fn a_halo_windows_device_rect_holds_every_px_that_reads_it() {
         // Scale 1, odd offsets, and tiles drawn at 1800 / 2100 and 1800 / 3001 of their size.
@@ -4090,17 +4387,50 @@ mod tests {
                 dice.below(40_000) as u16,
             );
             speck([&mut patched, &mut whole], x, y, dice.below(40_000) as u16);
+            // A patched develop blurs its windows in the glow band; a whole one leaves it.
+            patched.band.fill(u16::MAX);
             let mut device = Patchwork::new();
             patched.develop_changed(&[dirty], &mut device);
             whole.develop(whole.sigmas.0, whole.sigmas.1);
             assert!(same(&patched.half, &whole.half), "{dirty:?}: halo");
             assert!(same(&patched.eighth, &whole.eighth), "{dirty:?}: bloom");
-            assert_eq!(
-                device.as_slice() != [rect],
-                by_patches,
-                "{dirty:?}: {device:?}"
-            );
+            let banded = patched.band.iter().any(|&v| v != u16::MAX);
+            assert_eq!(banded, by_patches, "{dirty:?}: by patches");
+            // Ruling G7: either way, only the rects the light changed in are reported.
+            assert!(!device.as_slice().contains(&rect), "{dirty:?}: {device:?}");
         }
+    }
+
+    /// Ruling G7: a change past 1/WHOLE_PAST of the tile develops whole, but reports only the rects
+    /// its light changed in: every ½ px whose halo changed lies inside a reported rect, and the
+    /// tile's whole rect is not reported.
+    #[test]
+    fn a_whole_develop_reports_only_what_changed() {
+        let mut dice = Dice(0x51ed_270b);
+        let rect = DeviceRect::new(0, 0, 801, 801);
+        let [mut tile, mut twin] = twin_tiles(rect, f32::INFINITY, 53.0, &mut dice);
+        let mut before = Planes::new(tile.half.width, tile.half.height);
+        before.copy_from(&tile.half);
+        // Light inside a dirty rect wide enough to take the whole path.
+        let dirty = DeviceRect::new(100, 100, 700, 700);
+        speck([&mut tile, &mut twin], 400, 400, dice.below(40_000) as u16);
+        speck([&mut tile, &mut twin], 699, 100, dice.below(40_000) as u16);
+        let mut device = Patchwork::new();
+        tile.develop_changed(&[dirty], &mut device);
+        assert!(!device.as_slice().contains(&rect), "{device:?}");
+        let inside = |d: DeviceRect| device.as_slice().iter().any(|&r| hull(r, d) == r);
+        let mut changed = 0;
+        for y in 0..tile.half.height {
+            for x in 0..tile.half.width {
+                if tile.half.at(x, y) != before.at(x, y) {
+                    changed += 1;
+                    let (x, y) = (x as i32, y as i32);
+                    let d = tile.device_of_half(DeviceRect::new(x, y, x + 1, y + 1));
+                    assert!(inside(d), "½ px ({x}, {y}) changed outside the reports");
+                }
+            }
+        }
+        assert!(changed > 0, "the light changed");
     }
 
     #[test]
@@ -4130,7 +4460,8 @@ mod tests {
 
     /// A darkroom painted cold for `a`, then its light framed incrementally for `b`, against one
     /// painted cold for `b`: their light tiles (sharp, its ⅛ means, halo and bloom) match in
-    /// every channel. Returns whether it developed by patches (not whole).
+    /// every channel. Returns whether it developed by patches (not whole): a patched develop
+    /// blurs its windows in the glow band, a whole one leaves it.
     fn light_after(easel: Easel, a: (&Board, &BeamField), b: (&Board, &BeamField)) -> bool {
         let tableau = Tableau::arrange(&easel);
         let palette = Theme::Dark.palette();
@@ -4139,6 +4470,7 @@ mod tests {
             Darkroom::new(&tableau, palette),
         );
         incremental.paint_all(&tableau, palette, &Scene::bare(a.0, a.1, Game::C1));
+        incremental.light.band.fill(u16::MAX);
         incremental.light_frame(
             &tableau,
             palette,
@@ -4152,7 +4484,7 @@ mod tests {
         assert!(same(&x.coarse, &y.coarse), "{easel:?}: ⅛ means");
         assert!(same(&x.half, &y.half), "{easel:?}: halo");
         assert!(same(&x.eighth, &y.eighth), "{easel:?}: bloom");
-        incremental.lit.as_slice() != [incremental.light.rect]
+        x.band.iter().any(|&v| v != u16::MAX)
     }
 
     #[test]
@@ -4353,7 +4685,7 @@ mod tests {
 
     /// The light twin of `light_after` (ruling L4): cold for `a`, then framed incrementally for
     /// `b`, against cold for `b`. Every wash layer matches byte for byte. Returns whether it
-    /// developed by windows.
+    /// developed by windows (blurred in its band, which a whole develop leaves).
     fn wash_after(easel: Easel, a: (&Board, &BeamField), b: (&Board, &BeamField)) -> bool {
         let tableau = Tableau::arrange(&easel);
         let palette = Theme::Light.palette();
@@ -4362,6 +4694,7 @@ mod tests {
             Darkroom::new(&tableau, palette),
         );
         incremental.paint_all(&tableau, palette, &Scene::bare(a.0, a.1, Game::C1));
+        incremental.wash.band.fill(u8::MAX);
         incremental.light_frame(
             &tableau,
             palette,
@@ -4380,7 +4713,7 @@ mod tests {
         ] {
             assert!(p.planes() == q.planes(), "{easel:?}: {name}");
         }
-        incremental.lit.as_slice() != [incremental.wash.rect]
+        x.band.iter().any(|&v| v != u8::MAX)
     }
 
     #[test]
@@ -4419,6 +4752,52 @@ mod tests {
                 }
             }
             assert!(by_windows >= 2, "{easel:?}: some edits develop by windows");
+        }
+    }
+
+    /// The haze trim reads its neighbours (`carries`): a run that ends at a target's centre is
+    /// drawn back `TARGET_CLEAR` only while nothing leaves the centre. A sweep whose front lies
+    /// exactly on the centre trims the incoming run; a frame later the outgoing half is a partial
+    /// and the run, unchanged, is drawn whole again. The patched frame must redraw that run's end
+    /// as a whole frame does.
+    #[test]
+    fn a_sweep_front_at_a_target_centre_patches_like_a_whole_frame() {
+        let (board, field) = lit(&[(2, 5, Piece::Laser, 7, 2), (6, 5, Piece::Pinwheel, 7, 0)]);
+        let old = BeamField::default();
+        let reach = crate::beamline::Reach::compute(&board, &field);
+        // The end of (6, 5)'s inbound west half: its centre.
+        let centre = f32::from(reach.cells[board_index(5, 5)]) + 1.0;
+        let view = |front| SweepView {
+            old: &old,
+            reach: &reach,
+            front,
+        };
+        let scene = Scene::bare(&board, &field, Game::C1);
+        let easel = Easel::new(800, 600, 1.0);
+        let tableau = Tableau::arrange(&easel);
+        let palette = Theme::Light.palette();
+        let (mut incremental, mut fresh) = (
+            Darkroom::new(&tableau, palette),
+            Darkroom::new(&tableau, palette),
+        );
+        incremental.paint_all_at(&tableau, palette, &scene, Some(&view(centre)));
+        let shown = &incremental.shown.line;
+        let (a, b) = (shown.runs()[0], shown.partials());
+        assert!(
+            (a.to, b.len()) == ((13, 11), 0),
+            "the front stops at the centre: {a:?}, {b:?}"
+        );
+        incremental.light_frame(&tableau, palette, &scene, Some(&view(centre + 0.25)), false);
+        fresh.paint_all_at(&tableau, palette, &scene, Some(&view(centre + 0.25)));
+        let (x, y) = (&incremental.wash, &fresh.wash);
+        for (name, p, q) in [
+            ("sharp", &x.sharp, &y.sharp),
+            ("glow", &x.glow, &y.glow),
+            ("bloom raw", &x.bloom_raw, &y.bloom_raw),
+            ("bloom", &x.bloom, &y.bloom),
+            ("halo", &x.half, &y.half),
+        ] {
+            assert!(p.planes() == q.planes(), "{name}");
         }
     }
 
@@ -4470,13 +4849,17 @@ mod tests {
                 let mut stale = [false; BOARD_CELLS];
                 stale[edited] = true;
                 room.paint_cells(&tableau, &Palette::DARK, &scene, &stale);
+                // A patched develop blurs its windows in the glow band; a whole one leaves it.
+                room.light.band.fill(u16::MAX);
                 let lit = room
                     .light_frame(&tableau, &Palette::DARK, &scene, None, false)
                     .to_vec();
                 if let Some(by_patches) = by_patches {
-                    let whole = lit == [room.light_rect()];
-                    assert_eq!(!whole, by_patches, "{easel:?}: {lit:?}");
+                    let banded = room.light.band.iter().any(|&v| v != u16::MAX);
+                    assert_eq!(banded, by_patches, "{easel:?}: {lit:?}");
                 }
+                // Ruling G7: whole or by patches, only the rects the light changed in.
+                assert!(!lit.contains(&room.light_rect()), "{easel:?}: {lit:?}");
                 let far = tableau.cell_centre(board_index(far.0, far.1));
                 let (fx, fy) = (far.x as i32, far.y as i32);
                 assert!(

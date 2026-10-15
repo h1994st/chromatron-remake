@@ -4,11 +4,11 @@
 use lumen::{BOARD_CELLS, Board, Piece, SIDE, board_index};
 
 use crate::bloom::{blur_plane, blur_scratch};
-use crate::etch::{Blend, Layer, Paint, Pt, Shape, Stops, Target, clip_rect, fill, pt};
+use crate::etch::{Blend, Layer, Paint, Pt, Shape, Stops, Target, clip_rect, code_value, fill, pt};
 use crate::spectrum::{Palette, Rgba};
 use crate::{DeviceRect, fit_buffer, make_room, vitrine};
 
-/// Grid lines 0.35u past the board, `max(1 px, 0.014u)` wide, and crossing dots of radius
+/// Grid lines `over` px past the board, `max(1 px, 0.014u)` wide, and crossing dots of radius
 /// `max(1 px, 0.022u)`; both fade radially over 0.75 × the board diagonal.
 pub fn draw_grid(
     t: &mut dyn Target,
@@ -16,6 +16,7 @@ pub fn draw_grid(
     palette: &Palette,
     board: DeviceRect,
     u: f32,
+    over: f32,
 ) {
     let (l, tp, r, b) = (
         board.left as f32,
@@ -36,7 +37,6 @@ pub fn draw_grid(
         ]),
     };
     let half = (0.014 * u).max(1.0) / 2.0;
-    let over = 0.35 * u;
     for k in 0..=15 {
         let x = l + k as f32 * u;
         fill(
@@ -284,15 +284,29 @@ impl Target for SlabMask<'_> {
     }
     fn blend(&mut self, x: usize, y: usize, c: Rgba, _: Blend) {
         let p = &mut self.px[y * self.width + x];
-        *p = (*p).max((c.a * 255.0).round().clamp(0.0, 255.0) as u8);
+        *p = mask_px(*p, c);
     }
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], _: Blend) {
+        let row = y * self.width + x0;
+        for (p, &c) in self.px[row..row + colours.len()].iter_mut().zip(colours) {
+            if c.a > 0.0 {
+                *p = mask_px(*p, c);
+            }
+        }
+    }
+}
+
+/// Mask byte `p` with `c`'s coverage joined: `SlabMask`'s px.
+#[inline(always)]
+fn mask_px(p: u8, c: Rgba) -> u8 {
+    p.max(code_value(c.a * 255.0) as u8)
 }
 
 /// What `fill` with an opaque ink leaves in a `SlabMask` pixel at signed distance `d`.
 #[inline(always)]
 fn coverage_byte(d: f32) -> u8 {
     let coverage = (0.5 - d).clamp(0.0, 1.0);
-    (coverage * 255.0).round().clamp(0.0, 255.0) as u8
+    code_value(coverage * 255.0) as u8
 }
 
 /// `cover`'s mark for a column's coverage not yet measured (a coverage is a byte).
@@ -341,11 +355,15 @@ fn cover(mask: &mut SlabMask, shape: Shape, columns: &mut [u16]) {
     }
     // Every other pixel `fill` would visit (any wider set adds only zeros).
     let (bl, bt, br, bb) = shape.bounds();
+    // Saturating, as `fill` (ruling G13).
     let (x0, x1) = (
-        (bl.floor() as i32 - 1).max(0),
-        (br.ceil() as i32 + 1).min(w),
+        (bl.floor() as i32).saturating_sub(1).max(0),
+        (br.ceil() as i32).saturating_add(1).min(w),
     );
-    let (y0, y1) = ((bt.floor() as i32).max(0), (bb.ceil() as i32 + 1).min(h));
+    let (y0, y1) = (
+        (bt.floor() as i32).max(0),
+        (bb.ceil() as i32).saturating_add(1).min(h),
+    );
     // `Shape::distance`'s terms: a pixel whose |dx| term `qx` is ≤ 0 on a row whose `qy` is
     // > 0 is at distance `|(0, qy)| − r` whatever its x.
     let (cx, cy) = ((left + right) / 2.0, (top + bottom) / 2.0);
@@ -354,7 +372,7 @@ fn cover(mask: &mut SlabMask, shape: Shape, columns: &mut [u16]) {
     // `qx ≥ qy` (its row's terms drop out: `max(qy, 0)` squares to 0 and `max(qx, qy)` is
     // `qx`), which holds for its column in that half (top or bottom: the radii), and
     // `0 + min(qy, 0) − r` where `qx < qy` (`max(qx, 0)` is 0), which holds for the row.
-    let span = (x1 - x0).max(0) as usize;
+    let span = x1.saturating_sub(x0).max(0) as usize;
     let columns = &mut columns[..2 * span];
     columns.fill(UNMEASURED);
     for y in y0..y1 {
@@ -430,8 +448,7 @@ fn unpack(p: u32) -> [f32; 3] {
 }
 
 fn pack(d: [f32; 3]) -> u32 {
-    let ch = |v: f32| v.round().clamp(0.0, 255.0) as u32;
-    ch(d[0]) << 16 | ch(d[1]) << 8 | ch(d[2])
+    code_value(d[0]) << 16 | code_value(d[1]) << 8 | code_value(d[2])
 }
 
 /// A wall paint's colours (code values) and sizes.
@@ -622,6 +639,8 @@ impl Window<'_> {
         }
         let shadow_row = &*shadow_row;
         let deep = self.deep_row(ly, style, &mut rows.near, &mut rows.deep);
+        // A core row is always inside its strip's window, which holds the core and a halo.
+        debug_assert!((0..self.height as i32).contains(&ly));
         let Some(mask) = self.mask_row(ly) else {
             return;
         };
@@ -926,6 +945,37 @@ mod tests {
         vec![0u32; w * h]
     }
 
+    /// Ruling G4: a span joins the slab mask exactly as its px one by one, zero alphas untouched.
+    #[test]
+    fn spans_blend_like_single_px_in_the_mask() {
+        for blend in [Blend::Over, Blend::Add, Blend::Multiply] {
+            // The mask keeps the larger coverage: mostly low bytes, so most px take the span's;
+            // the last px nearly covered, so a span one px short shows.
+            let mut colours = crate::etch::span_colours(150, 19);
+            colours[149].a = 0.9;
+            let start: Vec<u8> = (0..600).map(|i| (i * 89 % 256 / 4) as u8).collect();
+            let (mut one, mut span) = (start.clone(), start.clone());
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    SlabMask {
+                        px: &mut one,
+                        width: 200,
+                        height: 3,
+                    }
+                    .blend(30 + i, 1, c, blend);
+                }
+            }
+            SlabMask {
+                px: &mut span,
+                width: 200,
+                height: 3,
+            }
+            .blend_span(30, 1, &colours, blend);
+            assert!(one == span, "{blend:?}");
+            assert!(one != start, "{blend:?} drew");
+        }
+    }
+
     /// Spec §7.2 Light tile: nearly white glass, a shadow 0.03u down (σ 0.04u) inside its
     /// cell, darker below the tile than above it.
     #[test]
@@ -1174,6 +1224,7 @@ mod tests {
                 &sentinel,
                 DeviceRect::new(0, 0, 300, 300),
                 20.0,
+                7.0,
             );
             draw_tile(&mut layer, region, &sentinel, pt(150.0, 150.0), 40.0, true);
             for &p in &px {
@@ -1269,6 +1320,7 @@ mod tests {
             &Palette::DARK,
             board,
             30.0,
+            0.35 * 30.0,
         );
         let at = |x: usize, y: usize| px[y * w + x] & 0xff;
         assert!(at(25, 16) > 0, "lines overhang 0.35u above the board");

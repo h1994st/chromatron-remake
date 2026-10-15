@@ -8,7 +8,9 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use lumen::SlotState;
 
 use crate::DeviceRect;
-use crate::etch::{Blend, Layer, Paint, Pt, Shape, Stops, Target, clip_rect, fill, pt};
+use crate::etch::{
+    Blend, Layer, Paint, Pt, SPAN, Shape, Stops, Target, clip_rect, fill, pt, round_away,
+};
 use crate::lettering::{Align, flat_line, number};
 use crate::spectrum::{Glaze, Palette, Rgba};
 
@@ -19,12 +21,12 @@ pub fn tint(layer: &mut Layer, rect: DeviceRect, c: Rgba) {
     let Some(r) = clip_rect(rect, full) else {
         return;
     };
-    let a = (c.a.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let a = round_away(c.a.clamp(0.0, 1.0) * 255.0) as u32;
     if a == 0 {
         return;
     }
     let keep = 255 - a;
-    let lift = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32 * a + 127;
+    let lift = |v: f32| round_away(v.clamp(0.0, 1.0) * 255.0) as u32 * a + 127;
     let (lr, lg, lb) = (lift(c.r), lift(c.g), lift(c.b));
     let (x0, x1) = (r.left as usize, r.right as usize);
     for y in r.top as usize..r.bottom as usize {
@@ -310,17 +312,84 @@ pub fn soft_shape(
     else {
         return;
     };
+    // The colour of the px centred at `p`. (The shared distance, not one inlined here: on a
+    // rounded rect most px skip it.)
+    let measure = |p: Pt| {
+        let k = falloff(shape.distance(p), sigma);
+        if k > 0.0 {
+            c.with_alpha(c.a * k)
+        } else {
+            Rgba::CLEAR
+        }
+    };
+    // A filled rounded rect with one radius, within 2¹⁶ px of the origin (where f32 rounding
+    // stays far below the 1 px margins below; false for NaN and ∞ too), measures less:
+    // - Its rows at least `max(radius, reach) + 1` px inside its top and bottom are alike. A
+    //   px's distance there depends on its column alone (`qx ≥ qy` in `signed`), or is past
+    //   `reach` inside either way (falloff 1). The first is measured; the rest reuse its colours.
+    // - In every other row, the px nearest the top or the bottom (`qx ≤ min(qy, 0)`, less 1 px)
+    //   all measure the same distance: one colour, measured once.
+    let tame = l.abs() + tp.abs() + r.abs() + b.abs() + reach <= 65_536.0;
+    let rect = match *shape {
+        Shape::RoundRect {
+            left,
+            top,
+            right,
+            bottom,
+            radii: [r0, r1, r2, r3],
+            stroke,
+        } if stroke <= 0.0 && tame && r0 == r1 && r0 == r2 && r0 == r3 => Some((
+            ((left + right) / 2.0, (top + bottom) / 2.0),
+            ((right - left) / 2.0, (bottom - top) / 2.0, r0),
+        )),
+        _ => None,
+    };
+    // Each row's colours, a chunk at a time, by one `blend_span` per chunk (ruling G4): a px in
+    // `skip` or past the falloff is clear, which the span skips. A row of one chunk stays in
+    // `run` for the next if they are alike (`kept`).
+    const ROW: usize = 2 * SPAN;
+    let width = (area.right - area.left) as usize;
+    let mut run = [Rgba::CLEAR; ROW];
+    let mut kept = false;
     for y in area.top..area.bottom {
-        for x in area.left..area.right {
-            if skip
-                .is_some_and(|s| (s.left..s.right).contains(&x) && (s.top..s.bottom).contains(&y))
-            {
+        let skipped = skip.filter(|s| (s.top..s.bottom).contains(&y));
+        let cy = y as f32 + 0.5;
+        // The px centred strictly inside `flat` are `level`.
+        let (mut flat, mut level, mut alike) = ((0.0, 0.0), c, false);
+        if let Some(((mx, my), (hx, hy, radius))) = rect {
+            let dy = (cy - my).abs();
+            alike = skipped.is_none() && width <= ROW && dy <= hy - radius.max(reach) - 1.0;
+            if alike && kept {
+                t.blend_span(area.left as usize, y as usize, &run[..width], Blend::Over);
                 continue;
             }
-            let k = falloff(shape.distance(pt(x as f32 + 0.5, y as f32 + 0.5)), sigma);
-            if k > 0.0 {
-                t.blend(x as usize, y as usize, c.with_alpha(c.a * k), Blend::Over);
+            let w = if dy <= hy - radius {
+                hx - hy + dy
+            } else {
+                hx - radius
+            } - 1.0;
+            if w > 1.0 {
+                flat = (mx - w, mx + w);
+                level = measure(pt(mx.floor() + 0.5, cy));
             }
+        }
+        kept = alike;
+        let mut x = area.left;
+        while x < area.right {
+            let n = ((area.right - x) as usize).min(ROW);
+            for (i, slot) in run[..n].iter_mut().enumerate() {
+                let x = x + i as i32;
+                let cx = x as f32 + 0.5;
+                *slot = if skipped.is_some_and(|s| (s.left..s.right).contains(&x)) {
+                    Rgba::CLEAR
+                } else if flat.0 < cx && cx < flat.1 {
+                    level
+                } else {
+                    measure(pt(cx, cy))
+                };
+            }
+            t.blend_span(x as usize, y as usize, &run[..n], Blend::Over);
+            x += n as i32;
         }
     }
 }
@@ -351,21 +420,32 @@ pub fn soft_ellipse(
         return;
     };
     let (rx, ry) = (rx.max(1e-3), ry.max(1e-3));
+    // By chunks of a row, as `soft_shape`.
+    let mut run = [Rgba::CLEAR; SPAN];
     for y in area.top..area.bottom {
-        for x in area.left..area.right {
-            let (px, py) = (x as f32 + 0.5 - centre.x, y as f32 + 0.5 - centre.y);
-            let k0 = ((px / rx).powi(2) + (py / ry).powi(2)).sqrt();
-            let k1 = ((px / (rx * rx)).powi(2) + (py / (ry * ry)).powi(2)).sqrt();
-            // At the exact centre the gradient vanishes: the nearest edge is the short radius.
-            let d = if k1 < 1e-9 {
-                -rx.min(ry)
-            } else {
-                k0 * (k0 - 1.0) / k1
-            };
-            let k = falloff(d, sigma);
-            if k > 0.0 {
-                t.blend(x as usize, y as usize, c.with_alpha(c.a * k), Blend::Over);
+        let mut x = area.left;
+        while x < area.right {
+            let n = ((area.right - x) as usize).min(SPAN);
+            for (i, slot) in run[..n].iter_mut().enumerate() {
+                let x = x + i as i32;
+                let (px, py) = (x as f32 + 0.5 - centre.x, y as f32 + 0.5 - centre.y);
+                let k0 = ((px / rx).powi(2) + (py / ry).powi(2)).sqrt();
+                let k1 = ((px / (rx * rx)).powi(2) + (py / (ry * ry)).powi(2)).sqrt();
+                // At the exact centre the gradient vanishes: the nearest edge is the short radius.
+                let d = if k1 < 1e-9 {
+                    -rx.min(ry)
+                } else {
+                    k0 * (k0 - 1.0) / k1
+                };
+                let k = falloff(d, sigma);
+                *slot = if k > 0.0 {
+                    c.with_alpha(c.a * k)
+                } else {
+                    Rgba::CLEAR
+                };
             }
+            t.blend_span(x as usize, y as usize, &run[..n], Blend::Over);
+            x += n as i32;
         }
     }
 }
@@ -1097,5 +1177,148 @@ mod tests {
         assert_eq!(ChipState::from(SlotState::Completed), ChipState::Solved);
         assert_eq!(ChipState::from(SlotState::Unlocked), ChipState::Open);
         assert_eq!(ChipState::from(SlotState::Locked), ChipState::Locked);
+    }
+
+    /// `soft_shape` as it measured every px of its box, blending one px at a time.
+    fn soft_shape_by_px(
+        layer: &mut Layer,
+        clip: DeviceRect,
+        shape: &Shape,
+        sigma: f32,
+        c: Rgba,
+        skip: Option<DeviceRect>,
+    ) {
+        let (l, tp, r, b) = shape.bounds();
+        let reach = 2.0 * sigma;
+        let area = DeviceRect::new(
+            (l - reach).floor() as i32,
+            (tp - reach).floor() as i32,
+            (r + reach).ceil() as i32,
+            (b + reach).ceil() as i32,
+        );
+        let canvas = DeviceRect::new(0, 0, layer.width as i32, layer.height as i32);
+        let Some(area) = clip_rect(area, clip).and_then(|a| clip_rect(a, canvas)) else {
+            return;
+        };
+        for y in area.top..area.bottom {
+            for x in area.left..area.right {
+                let skipped = skip.is_some_and(|s| {
+                    (s.left..s.right).contains(&x) && (s.top..s.bottom).contains(&y)
+                });
+                let k = falloff(shape.signed(pt(x as f32 + 0.5, y as f32 + 0.5)), sigma);
+                if k > 0.0 && !skipped {
+                    layer.blend(x as usize, y as usize, c.with_alpha(c.a * k), Blend::Over);
+                }
+            }
+        }
+    }
+
+    /// Task 6: a rounded rect's soft shadow, reusing alike rows and measuring each flat run
+    /// once, paints exactly as measuring every px: rects of every size and radius (square, pill,
+    /// a radius under and over 2σ), at fractional places, partly off the canvas, clipped and
+    /// with a rect skipped.
+    #[test]
+    fn soft_rounded_rects_paint_as_measured_px_by_px() {
+        let (w, h) = (160usize, 120usize);
+        let ground: Vec<u32> = (0..w * h)
+            .map(|i| (i as u32).wrapping_mul(2_654_435_761) & 0x00ff_ffff)
+            .collect();
+        let mut seed = 0x2545_f491u32;
+        let mut next = |n: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (seed % 10_000) as f32 / 10_000.0 * n
+        };
+        let (mut alike, mut flat) = (0, 0);
+        for case in 0..600 {
+            let (cx, cy) = (next(240.0) - 40.0, next(200.0) - 40.0);
+            let (hx, hy) = (next(70.0) + 0.2, next(70.0) + 0.2);
+            let radius = match case % 4 {
+                0 => 0.0,
+                1 => hx.min(hy),
+                _ => next(hx.min(hy)),
+            };
+            let shape = Shape::round_rect(cx - hx, cy - hy, cx + hx, cy + hy, radius);
+            let sigma = if case % 5 == 0 {
+                next(0.5) + 0.05
+            } else {
+                next(25.0) + 0.05
+            };
+            let c = Rgb(27, 35, 64).alpha(next(1.0));
+            let clip = if case % 3 == 0 {
+                let (l, t) = (next(120.0) as i32, next(90.0) as i32);
+                DeviceRect::new(l, t, l + next(80.0) as i32, t + next(80.0) as i32)
+            } else {
+                DeviceRect::new(0, 0, w as i32, h as i32)
+            };
+            let skip = (case % 7 == 0).then(|| {
+                let (l, t) = (next(160.0) as i32, next(120.0) as i32);
+                DeviceRect::new(l, t, l + next(60.0) as i32, t + next(60.0) as i32)
+            });
+            // The rows each shortcut takes (as `soft_shape` decides them).
+            let (r, reach) = (radius.min(hx).min(hy), 2.0 * sigma);
+            for y in 0..h {
+                let dy = (y as f32 + 0.5 - cy).abs();
+                let one_chunk = 2.0 * (hx + reach) + 2.0 <= 2.0 * SPAN as f32;
+                alike += usize::from(one_chunk && dy <= hy - r.max(reach) - 1.0);
+                let w = if dy <= hy - r { hx - hy + dy } else { hx - r } - 1.0;
+                flat += usize::from(dy < hy + reach && w > 1.0);
+            }
+            let (mut fast, mut slow) = (ground.clone(), ground.clone());
+            let mut layer = Layer {
+                px: &mut fast,
+                width: w,
+                height: h,
+            };
+            soft_shape(&mut layer, clip, &shape, sigma, c, skip);
+            let mut layer = Layer {
+                px: &mut slow,
+                width: w,
+                height: h,
+            };
+            soft_shape_by_px(&mut layer, clip, &shape, sigma, c, skip);
+            if let Some(i) = (0..w * h).find(|&i| fast[i] != slow[i]) {
+                panic!(
+                    "case {case}: {shape:?} σ {sigma} clip {clip:?}: px ({}, {}) {:06x} vs {:06x}",
+                    i % w,
+                    i / w,
+                    fast[i],
+                    slow[i]
+                );
+            }
+        }
+        assert!(
+            alike > 5_000 && flat > 10_000,
+            "{alike} alike rows, {flat} with a flat run"
+        );
+    }
+
+    /// Ruling G13: soft shapes at absurd coordinates never panic and, off the canvas, draw
+    /// nothing.
+    #[test]
+    fn extreme_soft_shapes_draw_nothing_and_never_panic() {
+        let mut px = black(64, 64);
+        let mut layer = Layer {
+            px: &mut px,
+            width: 64,
+            height: 64,
+        };
+        let all = DeviceRect::new(0, 0, 64, 64);
+        let c = Rgb(255, 255, 255).opaque();
+        for v in [
+            1e30f32,
+            -1e30,
+            3e9,
+            -3e9,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+        ] {
+            let rect = Shape::round_rect(v, v, v, v, 4.0);
+            soft_shape(&mut layer, all, &rect, 3.0, c, None);
+            soft_ellipse(&mut layer, all, pt(v, 10.0), 6.0, 4.0, 3.0, c);
+        }
+        assert!(px.iter().all(|&p| p == 0), "an off-canvas soft shape drew");
     }
 }

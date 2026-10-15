@@ -17,7 +17,7 @@ use crate::darkroom::{
     BAND, LIGHT_PATCHES, Tap, Texel, WHOLE_PAST, bake_taps, clip_to, coarser, device_of_half,
     device_of_sharp, grow, half_tap, plane_row, tap,
 };
-use crate::etch::{Blend, Paint, Pt, Shape, Stops, Target, fill};
+use crate::etch::{Blend, Paint, Pt, Shape, Stops, Target, code_value, div255, fill};
 use crate::patchwork::{Patchwork, area, hull, is_empty};
 use crate::spectrum::{Palette, Rgba};
 use crate::{fit_buffer, make_room};
@@ -38,7 +38,7 @@ const BLOOM_WIDTH: f32 = 0.27;
 const BLOOM_SIGMA: f32 = 0.12;
 const GLOW_ALPHA: f32 = 0.6;
 const GLOW_ALPHA_WHITE: f32 = 0.75;
-const GLOW_WIDTH: f32 = 0.1;
+const GLOW_WIDTH: f32 = 0.12;
 const GLOW_SIGMA: f32 = 0.04;
 const LINE_WIDTH: f32 = 0.036;
 const WHITE_HALO_ALPHA: f32 = 0.9;
@@ -119,18 +119,39 @@ impl Target for Pigment {
     /// Premultiplied source-over, whatever the blend: the wash only paints (L14(a)).
     fn blend(&mut self, x: usize, y: usize, c: Rgba, _: Blend) {
         let i = y * self.width + x;
-        let a = c.a.clamp(0.0, 1.0);
-        let keep = 1.0 - a;
-        let mix = |d: u8, s: f32| {
-            (s * a * 255.0 + f32::from(d) * keep)
-                .round()
-                .clamp(0.0, 255.0) as u8
-        };
-        self.r[i] = mix(self.r[i], c.r);
-        self.g[i] = mix(self.g[i], c.g);
-        self.b[i] = mix(self.b[i], c.b);
-        self.a[i] = mix(self.a[i], 1.0);
+        [self.r[i], self.g[i], self.b[i], self.a[i]] =
+            pigment_px([self.r[i], self.g[i], self.b[i], self.a[i]], c);
     }
+
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], _: Blend) {
+        let row = y * self.width + x0;
+        let n = colours.len();
+        let (r, g, b, a) = (
+            &mut self.r[row..row + n],
+            &mut self.g[row..row + n],
+            &mut self.b[row..row + n],
+            &mut self.a[row..row + n],
+        );
+        for (i, &c) in colours.iter().enumerate() {
+            if c.a > 0.0 {
+                [r[i], g[i], b[i], a[i]] = pigment_px([r[i], g[i], b[i], a[i]], c);
+            }
+        }
+    }
+}
+
+/// Premultiplied `d` (r, g, b, a) with `c` painted over: `Pigment`'s px.
+#[inline(always)]
+fn pigment_px(d: [u8; 4], c: Rgba) -> [u8; 4] {
+    let a = c.a.clamp(0.0, 1.0);
+    let keep = 1.0 - a;
+    let mix = |d: u8, s: f32| code_value(s * a * 255.0 + f32::from(d) * keep) as u8;
+    [
+        mix(d[0], c.r),
+        mix(d[1], c.g),
+        mix(d[2], c.b),
+        mix(d[3], 1.0),
+    ]
 }
 
 /// A layer being painted that remembers the bounds of every px it paints, so the next whole
@@ -168,6 +189,19 @@ impl Target for Stroked<'_> {
         self.pigment.blend(x, y, c, blend);
         let b = &mut self.bounds;
         (b[0], b[1], b[2], b[3]) = (b[0].min(x), b[1].min(y), b[2].max(x + 1), b[3].max(y + 1));
+    }
+
+    /// Widens its bounds once, over the px the span paints (none for an all-clear one).
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let painted = |c: &Rgba| c.a > 0.0;
+        let Some(first) = colours.iter().position(painted) else {
+            return;
+        };
+        let last = colours.iter().rposition(painted).unwrap_or(first);
+        let (x, x1) = (x0 + first, x0 + last + 1);
+        self.pigment.blend_span(x, y, &colours[first..=last], blend);
+        let b = &mut self.bounds;
+        (b[0], b[1], b[2], b[3]) = (b[0].min(x), b[1].min(y), b[2].max(x1), b[3].max(y + 1));
     }
 }
 
@@ -279,12 +313,6 @@ pub fn paint_over(base: u32, halo: [u32; 4], sharp: [u32; 4]) -> u32 {
     ch(16, 0) << 16 | ch(8, 1) << 8 | ch(0, 2)
 }
 
-/// `v / 255` for `v` ≤ 255·255 + 127 (every product here), in shifts and adds so it vectorises.
-#[inline(always)]
-fn div255(v: u32) -> u32 {
-    (v + 1 + (v >> 8)) >> 8
-}
-
 /// Pixels composed together: their halo and sharp paint gathered, then laid over `base`.
 const RUN: usize = 64;
 
@@ -370,7 +398,7 @@ pub struct Wash {
     /// What the last paints drew into `sharp` (sharp px): a whole repaint clears that.
     pub drawn: DeviceRect,
     /// Four planes of up to `band_cap` u8: the windows' blur band (Task 7).
-    band: Vec<u8>,
+    pub(crate) band: Vec<u8>,
     band_cap: usize,
     scratch: Vec<u16>,
     /// σ and box radius of the glow (½ px) and the bloom (¼ px).
@@ -544,9 +572,6 @@ impl Wash {
         (blooms, halos): (Patchwork<LIGHT_PATCHES>, Patchwork<LIGHT_PATCHES>),
         device: &mut Patchwork<LIGHT_PATCHES>,
     ) {
-        for &d in dirty.iter().filter(|&&d| !is_empty(d)) {
-            device.add(device_of_sharp(self.rect, self.scale, d));
-        }
         let (rg, rb) = self.radii;
         for &w in blooms.as_slice() {
             let Wash {
@@ -574,20 +599,37 @@ impl Wash {
             for y in w.top as usize..w.bottom as usize {
                 self.under(y, (w.left as usize, w.right as usize));
             }
+        }
+        self.report(dirty, &halos, device);
+    }
+
+    /// Adds to `device` the device rects whose compose a change inside `dirty` (sharp px)
+    /// changes, developed in the halo windows `halos` (½ px): each dirty rect's own and each
+    /// window's.
+    fn report(
+        &self,
+        dirty: &[DeviceRect],
+        halos: &Patchwork<LIGHT_PATCHES>,
+        device: &mut Patchwork<LIGHT_PATCHES>,
+    ) {
+        for &d in dirty.iter().filter(|&&d| !is_empty(d)) {
+            device.add(device_of_sharp(self.rect, self.scale, d));
+        }
+        for &w in halos.as_slice() {
             device.add(device_of_half(self.rect, self.scale, w));
         }
     }
 
     /// The cheaper of two equal develops (as the dark tile's `develop_changed`): by windows, or
-    /// whole (reporting the whole wash) once the halo windows cover more than 1/`WHOLE_PAST` of
-    /// `half`. The light is the same either way.
+    /// whole once the halo windows cover more than 1/`WHOLE_PAST` of `half`. The light is the
+    /// same either way, so either reports only the rects it changed in (ruling G7).
     pub fn develop_changed(&mut self, dirty: &[DeviceRect], device: &mut Patchwork<LIGHT_PATCHES>) {
         let windows = self.windows_of(dirty);
         let covered: i64 = windows.1.as_slice().iter().map(|&w| area(w)).sum();
         let whole = (self.half.width * self.half.height) as i64;
         if covered * WHOLE_PAST > whole {
             self.develop();
-            device.add(self.rect);
+            self.report(dirty, &windows.1, device);
         } else if self.band_cap != 0 {
             self.develop_windows(dirty, windows, device);
         }
@@ -838,6 +880,53 @@ mod tests {
     use crate::spectrum::Rgb;
     use lumen::RED;
 
+    /// Ruling G4: a span paints the wash's planes exactly as its px one by one, zero alphas
+    /// untouched, in every blend; through `Stroked` too, whose `drawn` box is the same.
+    #[test]
+    fn spans_blend_like_single_px_in_the_wash() {
+        let fresh = || {
+            let mut p = Pigment::default();
+            p.reshape(200, 3);
+            for (k, plane) in p.planes_mut().into_iter().enumerate() {
+                for (i, v) in plane.iter_mut().enumerate() {
+                    *v = ((i * 37 + k * 71) % 256) as u8;
+                }
+            }
+            p
+        };
+        for blend in [Blend::Over, Blend::Add, Blend::Multiply] {
+            let colours = crate::etch::span_colours(150, 17);
+            let start = fresh();
+            let (mut one, mut span) = (fresh(), fresh());
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    one.blend(30 + i, 1, c, blend);
+                }
+            }
+            span.blend_span(30, 1, &colours, blend);
+            assert!(one.planes() == span.planes(), "Pigment {blend:?}");
+            assert!(one.planes() != start.planes(), "Pigment {blend:?} drew");
+
+            // Stroked: the same px and the same box. Clear ends, so the box is the painted px'.
+            let mut colours = colours;
+            colours[..3].fill(Rgba::CLEAR);
+            colours[147..].fill(Rgba::CLEAR);
+            let (mut one, mut span) = (fresh(), fresh());
+            let mut a = Stroked::new(&mut one);
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    a.blend(30 + i, 1, c, blend);
+                }
+            }
+            let mut b = Stroked::new(&mut span);
+            b.blend_span(30, 1, &colours, blend);
+            b.blend_span(10, 2, &[Rgba::CLEAR; 5], blend);
+            assert_eq!(a.drawn(2), b.drawn(2), "Stroked {blend:?}");
+            assert_eq!(a.drawn(1), DeviceRect::new(33, 1, 177, 2));
+            assert!(one.planes() == span.planes(), "Stroked {blend:?}");
+        }
+    }
+
     #[test]
     fn paint_over_is_sharp_over_halo_over_base() {
         // base grey 100; halo red 50 at α 128 (premultiplied); no sharp.
@@ -850,13 +939,6 @@ mod tests {
         );
         // Nothing over the base: the base.
         assert_eq!(paint_over(base, [0; 4], [0; 4]), base);
-    }
-
-    #[test]
-    fn dividing_by_255_in_shifts_is_exact_for_every_product() {
-        for v in 0..=255 * 255 + 127 {
-            assert_eq!(div255(v), v / 255, "{v}");
-        }
     }
 
     #[test]
@@ -905,11 +987,11 @@ mod tests {
         );
         assert_eq!(
             passes(pal, RED, 2),
-            [Some((0.1, pal.mix(RED).alpha(0.6))), None]
+            [Some((0.12, pal.mix(RED).alpha(0.6))), None]
         );
         assert_eq!(
             passes(pal, WHITE, 2),
-            [Some((0.1, pal.halo(WHITE).alpha(0.75))), None]
+            [Some((0.12, pal.halo(WHITE).alpha(0.75))), None]
         );
         assert_eq!(
             passes(pal, RED, 4),
@@ -1233,6 +1315,42 @@ mod tests {
         }
         assert_eq!(radii, (1, 7), "the box radii covered");
         assert!(merged, "more rects than windows: the windows merged");
+    }
+
+    /// Ruling G7, at the wash: a change past 1/`WHOLE_PAST` of it develops whole, but reports
+    /// only the rects its light changed in, not the whole wash.
+    #[test]
+    fn a_whole_wash_develop_reports_only_what_changed() {
+        let mut wash = developed(400, 400, f32::INFINITY, false);
+        let mut before = Pigment::default();
+        before.reshape(wash.half.width, wash.half.height);
+        before.copy_from(&wash.half);
+        let dirty = [DeviceRect::new(60, 60, 340, 340)];
+        let (_, halos) = wash.windows_of(&dirty);
+        let covered: i64 = halos.as_slice().iter().map(|&w| area(w)).sum();
+        let whole = (wash.half.width * wash.half.height) as i64;
+        assert!(covered * WHOLE_PAST > whole, "the whole path");
+        let mut paint = 29u32;
+        repaint(&mut wash.glow, coarser(dirty[0], 2), &mut paint);
+        repaint(&mut wash.bloom_raw, coarser(dirty[0], 4), &mut paint);
+        let mut device = Patchwork::new();
+        wash.develop_changed(&dirty, &mut device);
+        assert!(!device.as_slice().contains(&wash.rect), "{device:?}");
+        let (hw, mut changed) = (wash.half.width, 0);
+        for y in 0..wash.half.height {
+            for x in 0..hw {
+                let px = |p: &Pigment| p.planes().map(|c| c[y * hw + x]);
+                if px(&wash.half) != px(&before) {
+                    changed += 1;
+                    let (x, y) = (x as i32, y as i32);
+                    let one = DeviceRect::new(x, y, x + 1, y + 1);
+                    let d = device_of_half(wash.rect, wash.scale, one);
+                    let inside = device.as_slice().iter().any(|&r| hull(r, d) == r);
+                    assert!(inside, "½ px ({x}, {y}) changed outside the reports");
+                }
+            }
+        }
+        assert!(changed > 0, "the light changed");
     }
 
     /// A resize that only moves the wash (the same size, scale and σ) takes `reshape`'s early

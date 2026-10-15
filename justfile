@@ -151,6 +151,10 @@ web-check: web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/lightbox_budgets.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions" light-memory
     node "{{justfile_directory()}}/crates/chromatron-web/tests/lightbox_budgets.mjs" "{{justfile_directory()}}/dist/web" "{{justfile_directory()}}/tests/solutions"
 
+# Build dist/web/ and print FNV-1a hashes of its modern canvas, per game at the desktop and phone sizes, in a theme (dark or light): after a cold paint, then a win's and a level change's frames; the web's pixel-identity check
+web-canvas-fnv theme="dark": web
+    node "{{justfile_directory()}}/crates/chromatron-web/tests/canvas_fnv.mjs" "{{justfile_directory()}}/dist/web" {{theme}}
+
 # Build dist/web/ and photograph it in headless Google Chrome (both looks; phone portrait and landscape, small phones, desktop) into <dir> (relative to the repo; default dist/web-shots, git-ignored), checking each view; local only, needs Chrome
 web-shots dir="dist/web-shots": web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"

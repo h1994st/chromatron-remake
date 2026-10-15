@@ -153,7 +153,8 @@ fn a_drag_repaints_only_what_it_touches() {
         .paint(&game, SETTLED, Output::Xrgb(&mut out))
         .damage
         .to_vec();
-    assert_eq!(moved.len(), 2, "the old and new lifted boxes: {moved:?}");
+    // The old and new lifted boxes overlap: one rect, their hull (ruling G6).
+    assert_eq!(moved.len(), 1, "the lifted boxes' hull: {moved:?}");
     let at = b.y as usize * EASEL.0 as usize + b.x as usize + 5;
     let mut resting = Scene::of(&game);
     resting.drag = None;
@@ -172,7 +173,7 @@ fn a_drag_repaints_only_what_it_touches() {
 fn a_risen_drag_repaints_only_its_boxes() {
     // As a shell paints a drag: picked up at 16 ms, painted again at 216 ms (the lift has risen
     // and its boxes are recomposed), then moved and painted at 232 ms: just the old and new
-    // lifted boxes.
+    // lifted boxes (merged into their hull).
     let mut game = state(Game::C1, 0, false);
     let mut lightbox = Lightbox::new(easel(), Theme::Dark, false);
     let mut out = canvas(easel());
@@ -206,11 +207,56 @@ fn a_risen_drag_repaints_only_its_boxes() {
         .paint(&game, 232.0, Output::Xrgb(&mut out))
         .damage
         .to_vec();
-    assert_eq!(moved.len(), 2, "the old and new lifted boxes: {moved:?}");
+    // The old and new lifted boxes overlap: one rect, their hull (ruling G6).
+    assert_eq!(moved.len(), 1, "the lifted boxes' hull: {moved:?}");
     assert!(
         out == cold(easel(), Scene::of(&game)),
         "and the picture equals a cold paint"
     );
+}
+
+/// Ruling G6: a drag frame's old and new lifted boxes, overlapping, are composed once: one
+/// rect, their hull, and the frame equals a whole repaint.
+#[test]
+fn overlapping_damage_is_composed_once() {
+    for theme in Theme::ALL {
+        let easel = easel_1280();
+        let mut game = state(Game::C1, 41, true);
+        let mut lightbox = Lightbox::new(easel, theme, false);
+        let mut out = canvas(easel);
+        lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+        let tableau = lightbox.tableau().clone();
+        let from = (0..BOARD_CELLS)
+            .find(|&i| game.board().cells[i].piece.is_movable())
+            .unwrap();
+        let c = tableau.cell_centre(from);
+        let (x, y) = (c.x as i32, c.y as i32);
+        game.handle_on(&lightbox, InputEvent::MouseDown { x, y, alt: false });
+        game.handle_on(&lightbox, InputEvent::MouseDragged { x: x + 20, y });
+        lightbox.paint(&game, SETTLED, Output::Xrgb(&mut out));
+        game.handle_on(
+            &lightbox,
+            InputEvent::MouseDragged {
+                x: x + 23,
+                y: y + 2,
+            },
+        );
+        let damage = lightbox
+            .paint(&game, SETTLED, Output::Xrgb(&mut out))
+            .damage
+            .to_vec();
+        // Still over its own cell: no drop ring, so every rect wider than a cell is a lift box.
+        let lifted: Vec<_> = damage
+            .iter()
+            .filter(|r| r.right - r.left > tableau.cell)
+            .collect();
+        assert_eq!(
+            lifted.len(),
+            1,
+            "{theme:?}: the two lifted boxes merge: {damage:?}"
+        );
+        assert!(out == common::cold_with_in(theme, easel, Scene::of(&game), false));
+    }
 }
 
 /// Drags tray slot 0's piece over `cell` (off its centre, see `off_centre`) and holds it there.

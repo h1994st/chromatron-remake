@@ -28,6 +28,7 @@ use crate::etch::Layer;
 use crate::etch::{Pt, RgbaBytes, Target, clip_rect, pt};
 use crate::flourish::{self, Cast, MAX_FLOURISH};
 use crate::masonry::draw_tile;
+use crate::patchwork::{area, hull};
 use crate::piece_art::{draw_body, turn_period};
 use crate::spectrum::{Palette, Rgba, Theme};
 use crate::tableau::{Control, Tableau};
@@ -48,15 +49,15 @@ const SHADOW_DROP: f32 = 0.16;
 const SHADOW_SIGMA: f32 = 0.1;
 /// How far from the piece's centre the shadow reaches (`2σ` past the ellipse), in `ku`.
 const SHADOW_REACH: f32 = 0.66;
+// The lift box holds the tile, the body and the shadow.
 const _: () = assert!(
     SHADOW_REACH >= 0.6
         && SHADOW_RADII.0 + 2.0 * SHADOW_SIGMA <= SHADOW_REACH
-        && SHADOW_DROP + SHADOW_RADII.1 + 2.0 * SHADOW_SIGMA <= SHADOW_REACH,
-    "the lift box holds the tile, the body and the shadow"
+        && SHADOW_DROP + SHADOW_RADII.1 + 2.0 * SHADOW_SIGMA <= SHADOW_REACH
 );
+// The darkroom's underlay holds every land box.
 const _: () = assert!(
-    LIFT <= UNDERLAY_SCALE && LIFT_TOUCH <= UNDERLAY_SCALE && SHADOW_REACH <= UNDERLAY_REACH,
-    "the darkroom's underlay holds every land box"
+    LIFT <= UNDERLAY_SCALE && LIFT_TOUCH <= UNDERLAY_SCALE && SHADOW_REACH <= UNDERLAY_REACH
 );
 
 /// More changed board cells than this (a new level) repaint the whole board and its light.
@@ -101,6 +102,26 @@ impl Damage {
         }
     }
 
+    /// The rects to compose (ruling G6): each pair whose hull is no bigger than the two together
+    /// is one rect, until no pair is. A px is then composed (and overlaid) once, not once per
+    /// overlapping rect; the hull's extra px are recomposed to what a whole repaint gives.
+    fn merged(&mut self) -> &[DeviceRect] {
+        'again: loop {
+            let rects = self.patches.as_slice();
+            for i in 0..rects.len() {
+                for j in i + 1..rects.len() {
+                    let (a, b) = (rects[i], rects[j]);
+                    if area(hull(a, b)) <= area(a) + area(b) {
+                        self.patches.replace_pair(i, j, hull(a, b));
+                        continue 'again;
+                    }
+                }
+            }
+            return self.patches.as_slice();
+        }
+    }
+
+    /// The rects as they stand: merged once `merged` has run this paint.
     fn rects(&self) -> &[DeviceRect] {
         self.patches.as_slice()
     }
@@ -637,7 +658,7 @@ impl Lightbox {
                 .lay(land_box(l), |t, clip| lift_onto(t, palette, l, clip))
         });
         let over = [settling.as_ref().filter(|_| !laid), held.as_ref()];
-        for &rect in self.damage.rects() {
+        for &rect in self.damage.merged() {
             self.darkroom.compose(rect, &mut out);
             if let Some(k) = moment.level {
                 self.darkroom.fade_into(rect, &mut out, k);

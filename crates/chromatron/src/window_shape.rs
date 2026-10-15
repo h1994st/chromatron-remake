@@ -2,7 +2,7 @@
 //! and modern's resizable one (default 1280 × 800 pt within 90% of the screen, minimum 800 × 600);
 //! the modern easel for a window size; the theme for the window's appearance and the ground
 //! its layer shows; and AppKit's
-//! word that the window has left fullscreen, which a look's shape waits for.
+//! word that the window is leaving and has left fullscreen, which a look's shape waits for.
 
 use std::ptr::NonNull;
 
@@ -12,8 +12,12 @@ use lumen::{FRAME_HEIGHT, FRAME_WIDTH};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{MainThreadMarker, msg_send};
-use objc2_app_kit::{NSScreen, NSWindowDidExitFullScreenNotification};
-use objc2_foundation::{NSNotification, NSNotificationCenter, NSOperationQueue};
+use objc2_app_kit::{
+    NSScreen, NSWindowDidExitFullScreenNotification, NSWindowWillExitFullScreenNotification,
+};
+use objc2_foundation::{
+    NSNotification, NSNotificationCenter, NSNotificationName, NSOperationQueue,
+};
 use winit::dpi::{LogicalSize, PhysicalSize, Size};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::{Window, WindowButtons};
@@ -117,44 +121,74 @@ pub fn centre_window(window: &Window) {
     }
 }
 
-/// Calls `on_exit` on the main queue each time AppKit has finished taking the window out of
-/// fullscreen (`NSWindowDidExitFullScreenNotification`, after winit has restored its frame and
-/// style), whichever way it left: View ▸ Exit Full Screen, the green button or the system's
-/// shortcut. The observer is removed when this is dropped.
-pub struct FullscreenExitObserver {
-    token: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+/// Watches the window's fullscreen exits, whichever way it leaves (View ▸ Exit Full Screen, the
+/// green button or the system's shortcut), on the main queue: `on_leaving` when AppKit begins an
+/// exit (`NSWindowWillExitFullScreenNotification`, which also covers an exit winit deferred and
+/// replays, ruling G12), and `on_exit` once it has finished taking the window out
+/// (`NSWindowDidExitFullScreenNotification`, after winit has restored its frame and style). Both
+/// observers are removed when this is dropped.
+pub struct FullscreenObserver {
+    will_exit: Retained<ProtocolObject<dyn NSObjectProtocol>>,
+    did_exit: Retained<ProtocolObject<dyn NSObjectProtocol>>,
 }
 
-impl FullscreenExitObserver {
-    /// The marker proves the main thread. `on_exit` may still run after the observer is
-    /// dropped, so it must tolerate a closed event loop (ignore a failed send). `None` when the
-    /// window has no `NSWindow`.
+impl FullscreenObserver {
+    /// The marker proves the main thread. Either callback may still run after the observer is
+    /// dropped, so each must tolerate a closed event loop (ignore a failed send). `None` when
+    /// the window has no `NSWindow`.
     pub fn install(
         _main: MainThreadMarker,
         window: &Window,
+        on_leaving: impl Fn() + 'static,
         on_exit: impl Fn() + 'static,
-    ) -> Option<FullscreenExitObserver> {
+    ) -> Option<FullscreenObserver> {
         let ns_window = ns_window(window)?;
-        let block = RcBlock::new(move |_: NonNull<NSNotification>| on_exit());
-        // SAFETY: the name is an immutable NSString constant; the object filter is this
-        // window's NSWindow (the center keeps no reference to it); the main queue runs the
-        // block on the main thread, where the event loop and its proxy live.
-        let token = unsafe {
-            NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
-                Some(NSWindowDidExitFullScreenNotification),
-                Some(&ns_window),
-                Some(&NSOperationQueue::mainQueue()),
-                &block,
-            )
-        };
-        Some(FullscreenExitObserver { token })
+        // SAFETY (both): the names are AppKit's immutable notification-name constants.
+        let will_exit = observe(
+            &ns_window,
+            unsafe { NSWindowWillExitFullScreenNotification },
+            on_leaving,
+        );
+        let did_exit = observe(
+            &ns_window,
+            unsafe { NSWindowDidExitFullScreenNotification },
+            on_exit,
+        );
+        Some(FullscreenObserver {
+            will_exit,
+            did_exit,
+        })
     }
 }
 
-impl Drop for FullscreenExitObserver {
+/// Calls `call` on the main queue each time `ns_window` posts `name`; the token removes it.
+fn observe(
+    ns_window: &AnyObject,
+    name: &NSNotificationName,
+    call: impl Fn() + 'static,
+) -> Retained<ProtocolObject<dyn NSObjectProtocol>> {
+    let block = RcBlock::new(move |_: NonNull<NSNotification>| call());
+    // SAFETY: the name is an immutable NSString constant; the object filter is this window's
+    // NSWindow (the center keeps no reference to it); the main queue runs the block on the main
+    // thread, where the event loop and its proxy live.
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserverForName_object_queue_usingBlock(
+            Some(name),
+            Some(ns_window),
+            Some(&NSOperationQueue::mainQueue()),
+            &block,
+        )
+    }
+}
+
+impl Drop for FullscreenObserver {
     fn drop(&mut self) {
-        // SAFETY: `token` is the observer `addObserverForName…` returned on this center.
-        unsafe { NSNotificationCenter::defaultCenter().removeObserver(self.token.as_ref()) };
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: each token is an observer `addObserverForName…` returned on this center.
+        unsafe {
+            center.removeObserver(self.will_exit.as_ref());
+            center.removeObserver(self.did_exit.as_ref());
+        }
     }
 }
 
@@ -182,13 +216,13 @@ pub fn theme_for(appearance: Option<winit::window::Theme>) -> Theme {
 }
 
 /// The window's ground in `look` and `theme`, as [r, g, b]: what shows where the presented
-/// canvas doesn't reach yet (final review M1). Classic: its letterbox; modern: the page's
-/// ground at its edge (the palette's bottom ground).
+/// canvas doesn't reach yet (final review M1). Classic: its letterbox; modern: the page colour,
+/// `palette.ink` (§12: `#eef1f6` light; dark's equals its bottom ground).
 pub fn ground_for(look: Look, theme: Theme) -> [u8; 3] {
     match look {
         Look::Classic => [LETTERBOX >> 16, LETTERBOX >> 8, LETTERBOX].map(|c| c as u8),
         Look::Modern => {
-            let halation::Rgb(r, g, b) = theme.palette().ground[1];
+            let halation::Rgb(r, g, b) = theme.palette().ink;
             [r, g, b]
         }
     }
@@ -284,7 +318,11 @@ mod tests {
         for theme in Theme::ALL {
             assert_eq!(ground_for(Look::Classic, theme), [0, 0, 0], "the letterbox");
         }
+        assert_eq!(
+            ground_for(Look::Modern, Theme::Light),
+            [0xee, 0xf1, 0xf6],
+            "the page colour (§12)"
+        );
         assert_eq!(ground_for(Look::Modern, Theme::Dark), [0x06, 0x07, 0x0b]);
-        assert_eq!(ground_for(Look::Modern, Theme::Light), [0xe9, 0xec, 0xf3]);
     }
 }

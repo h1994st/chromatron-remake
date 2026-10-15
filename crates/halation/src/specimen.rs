@@ -31,7 +31,8 @@ impl Page {
 
     fn put(&mut self, piece: Piece, colour: u8, dir: u8) -> usize {
         let i = self.next;
-        assert!(i < board_index(0, 13), "rows 13–14 are kept for walls");
+        // Rows 13–14 are kept for walls.
+        assert!(i < board_index(0, 13));
         self.specimen.board.cells[i] = Cell { piece, colour, dir };
         self.next += 1;
         i

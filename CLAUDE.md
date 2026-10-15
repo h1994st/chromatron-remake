@@ -50,6 +50,7 @@ Design specs and implementation plans live locally in `docs/superpowers/`. Read 
 | `just lint` / `just test` | rustfmt + clippy / the whole test suite (needs the originals) |
 | `just run <game>` | run a macOS app (game 1–4) |
 | `just bundle` | build the four `.app`s into `dist/` |
+| `just screenshots` / `just smoke <game> <look>` | regenerate the README screenshots (both looks) / launch a bundled app, check it idles at ~0% CPU and saves |
 | `just bench` | engine benchmarks against the performance budgets |
 | `just web` / `just web-serve` | build the browser page into `dist/web/` / serve it locally |
 | `just web-check` | Node smoke test of the built page (CI runs it) |

@@ -46,8 +46,8 @@ use crate::user_defaults::Preferences;
 use crate::viewport::{DeviceRect, Viewport, window_size};
 use crate::wake_schedule::wake_flow;
 use crate::window_shape::{
-    FullscreenExitObserver, apply_shape, centre_window, easel_for, ground_for, shape_for,
-    theme_for, visible_frame,
+    FullscreenObserver, apply_shape, centre_window, easel_for, ground_for, shape_for, theme_for,
+    visible_frame,
 };
 
 /// The whole frame, as a damage rect.
@@ -78,11 +78,13 @@ enum PaintTimes {
 }
 
 /// Events sent to the loop from outside winit: menu commands, the system's reduced-motion
-/// setting changing, and AppKit having taken the window out of fullscreen.
+/// setting changing, and AppKit beginning and having finished taking the window out of
+/// fullscreen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UserEvent {
     Menu(MenuCommand),
     MotionChanged,
+    FullscreenLeaving,
     FullscreenExited,
 }
 
@@ -254,9 +256,10 @@ struct App {
     _motion_observer: Option<MotionObserver>,
     /// Wakes the loop from the window's AppKit notifications.
     proxy: Option<EventLoopProxy<UserEvent>>,
-    /// Keeps the window's fullscreen exit observed (a look's shape waits for it). `None` when
-    /// winit gave no AppKit handle: the shape then waits only for `fullscreen()` to clear.
-    fullscreen_exit: Option<FullscreenExitObserver>,
+    /// Keeps the window's fullscreen exits observed, as they begin and end (a look's shape waits
+    /// for them). `None` when winit gave no AppKit handle: the shape then waits only for
+    /// `fullscreen()` to clear.
+    fullscreen_exit: Option<FullscreenObserver>,
     modifiers: ModifiersState,
     wheel: WheelGate,
     /// The origin of the wheel gate's and the lightbox's millisecond clock.
@@ -377,9 +380,17 @@ impl App {
         if let Some(proxy) = self.proxy.clone() {
             let main = MainThreadMarker::new().expect("the event loop runs on the main thread");
             // Fails only once the loop has exited, when nothing is left to do.
-            self.fullscreen_exit = FullscreenExitObserver::install(main, &window, move || {
-                let _ = proxy.send_event(UserEvent::FullscreenExited);
-            });
+            let leaving = proxy.clone();
+            self.fullscreen_exit = FullscreenObserver::install(
+                main,
+                &window,
+                move || {
+                    let _ = leaving.send_event(UserEvent::FullscreenLeaving);
+                },
+                move || {
+                    let _ = proxy.send_event(UserEvent::FullscreenExited);
+                },
+            );
         }
         self.theme = theme_for(window.theme());
         self.presenter = Some(
@@ -949,21 +960,25 @@ impl App {
                         Some(_) => None,
                         None => Some(Fullscreen::Borderless(None)),
                     };
-                    // winit reports no fullscreen from here, before AppKit's exit has run: a
-                    // look's shape keeps waiting for `fullscreen_exited` (only if the exit is
-                    // observed, or it would wait for ever).
-                    if next.is_none() && self.fullscreen_exit.is_some() {
-                        self.shapes.leaving();
-                    }
+                    let exit = next.is_none();
                     window.set_fullscreen(next);
+                    // An exit that begins makes winit report no fullscreen from here, before
+                    // AppKit's exit has run: a look's shape keeps waiting for
+                    // `fullscreen_exited` (only if the exit is observed, or it would wait for
+                    // ever). winit defers a request made during a transition, and the window
+                    // keeps reporting fullscreen: no leave then (ruling G12); if winit replays
+                    // the exit, AppKit's will-exit marks it.
+                    if exit && self.fullscreen_exit.is_some() {
+                        self.shapes.exit_requested(window.fullscreen().is_some());
+                    }
                 }
             }
             MenuCommand::Scale(scale) => {
                 let Some(window) = self.window.clone() else {
                     return;
                 };
-                // The items are disabled where they don't apply (modern, fullscreen, and View ▸
-                // Exit Full Screen's animation, when AppKit still owns the frame); the same rule
+                // The items are disabled where they don't apply (modern, fullscreen, and while an
+                // exit from fullscreen animates, when AppKit still owns the frame); the same rule
                 // guards a stray event.
                 if self.menu_state().as_ref().is_some_and(scales_enabled) {
                     let (width, height) = window_size(scale);
@@ -1150,6 +1165,8 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Menu(command) => self.menu(event_loop, command),
             UserEvent::MotionChanged => self.refresh_motion(),
+            // The menus follow in `about_to_wait`, as after an exit.
+            UserEvent::FullscreenLeaving => self.shapes.leaving(),
             UserEvent::FullscreenExited => self.fullscreen_exited(),
         }
     }

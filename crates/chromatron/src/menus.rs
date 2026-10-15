@@ -114,8 +114,8 @@ pub const EXIT_FULLSCREEN: &str = "Exit Full Screen";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MenuState {
     pub fullscreen: bool,
-    /// View ▸ Exit Full Screen's exit animation is running (winit already reports no
-    /// fullscreen; AppKit still owns the frame).
+    /// An exit from fullscreen is animating, by the menu, the green button or the system
+    /// shortcut (winit may already report no fullscreen; AppKit still owns the frame).
     pub leaving: bool,
     pub scale: usize,
     pub classic: bool,

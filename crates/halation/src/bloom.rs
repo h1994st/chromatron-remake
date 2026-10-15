@@ -2,7 +2,7 @@
 //! that make glow and bloom from it (spec §8): 2×2 downsamples, three zero-padded box passes per
 //! axis, and a bilinear upsample-add. Loops run over whole rows so they vectorise.
 
-use crate::etch::{Blend, Target};
+use crate::etch::{Blend, Target, round_away};
 use crate::fit_buffer;
 use crate::spectrum::Rgba;
 
@@ -69,7 +69,7 @@ impl Planes {
                 *o += w * v as f32;
             }
         }
-        out.map(|v| v.round() as u32)
+        out.map(|v| round_away(v) as u32)
     }
 
     pub fn total(&self) -> [u64; 3] {
@@ -94,15 +94,39 @@ impl Target for Planes {
     fn blend(&mut self, x: usize, y: usize, c: Rgba, blend: Blend) {
         let i = y * self.width + x;
         for (plane, v) in [(&mut self.r, c.r), (&mut self.g, c.g), (&mut self.b, c.b)] {
-            let add = v * c.a * ONE as f32;
-            let d = f32::from(plane[i]);
-            let out = match blend {
-                Blend::Add => d + add,
-                Blend::Over | Blend::Multiply => d * (1.0 - c.a) + add,
-            };
-            plane[i] = out.round().clamp(0.0, 65_535.0) as u16;
+            plane[i] = light_value(plane[i], v, c.a, blend);
         }
     }
+
+    fn blend_span(&mut self, x0: usize, y: usize, colours: &[Rgba], blend: Blend) {
+        let row = y * self.width + x0;
+        let n = colours.len();
+        let (r, g, b) = (
+            &mut self.r[row..row + n],
+            &mut self.g[row..row + n],
+            &mut self.b[row..row + n],
+        );
+        for (i, &c) in colours.iter().enumerate() {
+            if c.a > 0.0 {
+                r[i] = light_value(r[i], c.r, c.a, blend);
+                g[i] = light_value(g[i], c.g, c.a, blend);
+                b[i] = light_value(b[i], c.b, c.a, blend);
+            }
+        }
+    }
+}
+
+/// A light plane's value `d` with channel `v` at alpha `a` blended in: `Planes`' px.
+#[inline(always)]
+fn light_value(d: u16, v: f32, a: f32, blend: Blend) -> u16 {
+    let add = v * a * ONE as f32;
+    let d = f32::from(d);
+    let out = match blend {
+        Blend::Add => d + add,
+        Blend::Over | Blend::Multiply => d * (1.0 - a) + add,
+    };
+    // `as` saturates at both ends (and takes NaN to 0), as `clamp(0.0, 65 535.0)` then `as` did.
+    round_away(out) as u16
 }
 
 /// `factor × factor` means (2 for ½, 4 for ½ → ⅛ in one pass): `dst` must be
@@ -111,8 +135,20 @@ pub fn downsample(src: &Planes, dst: &mut Planes, factor: usize) {
     // Plain asserts: no panic messages in the shipped code (the page's size cap).
     assert!(dst.width == src.width.div_ceil(factor) && dst.height == src.height.div_ceil(factor));
     assert!(factor == 2 || factor == 4);
+    // An empty plane has nothing to take (`chunks_exact_mut(0)` would panic).
+    if dst.width == 0 || dst.height == 0 {
+        return;
+    }
     if factor == 2 {
-        downsample_by::<2>(src, dst);
+        for (s, d) in [
+            (&src.r, &mut dst.r),
+            (&src.g, &mut dst.g),
+            (&src.b, &mut dst.b),
+        ] {
+            for (y, out) in d.chunks_exact_mut(dst.width).enumerate() {
+                downsampled_row(s, (src.width, src.height), (0, y), out);
+            }
+        }
     } else {
         downsample_by::<4>(src, dst);
     }
@@ -176,6 +212,38 @@ pub fn block_mean(
             .sum::<u32>();
     }
     ((sum + area / 2) / area) as u16
+}
+
+/// `downsample`'s ½ px (`x0 + i`, `y`) into `out[i]`, from a `sw × sh` plane: the 2×2 means of
+/// sharp rows `2y` and `2y + 1` (the second off the plane at an odd last row) by column pairs,
+/// then the part pair at a ragged right edge, each the in-plane sum over 4, as `block_mean`.
+pub(crate) fn downsampled_row(
+    plane: &[u16],
+    (sw, sh): (usize, usize),
+    (x0, y): (usize, usize),
+    out: &mut [u16],
+) {
+    let mean = |sum: u32| ((sum + 2) / 4) as u16;
+    let rows = &plane[2 * y * sw..(2 * y + 2).min(sh) * sw];
+    let whole = out.len().min((sw / 2).saturating_sub(x0));
+    let (body, ragged) = out.split_at_mut(whole);
+    let (first, second) = rows.split_at(sw);
+    let (p0, _) = first[2 * x0..][..2 * whole].as_chunks::<2>();
+    if second.is_empty() {
+        for (o, a) in body.iter_mut().zip(p0) {
+            *o = mean(u32::from(a[0]) + u32::from(a[1]));
+        }
+    } else {
+        let (p1, _) = second[2 * x0..][..2 * whole].as_chunks::<2>();
+        for ((o, a), b) in body.iter_mut().zip(p0).zip(p1) {
+            *o = mean(u32::from(a[0]) + u32::from(a[1]) + u32::from(b[0]) + u32::from(b[1]));
+        }
+    }
+    // At most one: the last ½ column of a plane of odd width holds one sharp column.
+    if let Some(o) = ragged.first_mut() {
+        let last = rows.chunks_exact(sw).map(|row| u32::from(row[sw - 1]));
+        *o = mean(last.sum());
+    }
 }
 
 /// The box radius `blur` uses for `sigma`.
@@ -273,32 +341,40 @@ pub fn blur_plane<P: Lane>(
         return;
     }
     let n = blur_scratch(width, height) / 2;
-    // Every value is written before it is read: only the length matters.
-    if scratch.len() != 2 * n {
+    // Every value is written before it is read: only the length matters, and a longer scratch
+    // (left by a larger plane) serves as well, so planes of two sizes in turn never re-zero it.
+    if scratch.len() < 2 * n {
         scratch.clear();
         scratch.resize(2 * n, 0);
     }
-    let (a, b) = scratch.split_at_mut(n);
+    let (a, b) = scratch[..2 * n].split_at_mut(n);
     // The rows holding any light (first, end): only they, and 3r rows round them, can be lit
     // after the column passes.
     let mut lit_rows = (height, 0);
-    // At box radius 1 or 2 the row pass blurs each row as it lies (`row_boxes`) instead of
+    // Up to box radius 4 the row pass blurs each row as it lies (`row_boxes`) instead of
     // transposing blocks of rows into lanes: the same sums and means, in less time (u8 paint and
     // u16 light alike).
-    let direct = radius <= 2;
+    let direct = radius <= ROW_PAD;
     if direct {
-        let (a, b) = (&mut a[..width + 4], &mut b[..width + 4]);
+        let (a, b) = (&mut a[..width + 2 * ROW_PAD], &mut b[..width + 2 * ROW_PAD]);
+        // The zero pads round the row, which no pass writes.
+        for p in [&mut *a, &mut *b] {
+            p.fill(0);
+        }
         // Each row as it lies (no transpose); a dark row stays dark.
         for (y, row) in plane.chunks_exact_mut(width).enumerate() {
             if row.iter().all(|&v| v.into() == 0u16) {
                 continue;
             }
             lit_rows = (lit_rows.0.min(y), y + 1);
-            if radius == 1 {
-                row_boxes::<P, 1>(row, a, b);
-            } else {
-                row_boxes::<P, 2>(row, a, b);
+            P::load(&mut a[ROW_PAD..ROW_PAD + width], row);
+            match radius {
+                1 => row_boxes::<1>(a, b),
+                2 => row_boxes::<2>(a, b),
+                3 => row_boxes::<3>(a, b),
+                _ => row_boxes::<4>(a, b),
             }
+            P::store(row, &b[ROW_PAD..ROW_PAD + width]);
         }
     }
     // A block of dark lines stays dark: it is skipped.
@@ -351,40 +427,26 @@ pub fn blur_plane<P: Lane>(
     }
 }
 
-/// `three_boxes` of radius `R` (1 or 2) along one row as it lies, through `a` and `b` (each
-/// `row.len() + 4`): the row widened between zero pads, then three box means, each the sum of
-/// the `2R + 1` values round a px (the pads standing for the zero padding) through `BoxMean`,
-/// which is what `box_block`'s running sums hold there.
-fn row_boxes<P: Lane, const R: usize>(row: &mut [P], a: &mut [u16], b: &mut [u16]) {
-    let w = row.len();
-    for p in [&mut *a, &mut *b] {
-        p[..2].fill(0);
-        p[2 + w..].fill(0);
-    }
-    P::load(&mut a[2..2 + w], row);
+/// The zero pad each side of a row `row_boxes` blurs: its widest box's radius.
+const ROW_PAD: usize = 4;
+
+/// `three_boxes` of radius `R` (1 to `ROW_PAD`) along one row as it lies, from `a` into `b`
+/// (each the row between zero pads of `ROW_PAD`): three box means, each the sum of the `2R + 1`
+/// values round a px (the pads standing for the zero padding) through `BoxMean`, which is what
+/// `box_block`'s running sums hold there. Passes write only the row, so the pads stay zero.
+fn row_boxes<const R: usize>(a: &mut [u16], b: &mut [u16]) {
+    let w = a.len() - 2 * ROW_PAD;
     let mean = BoxMean::new((2 * R + 1) as u32);
     let pass = |s: &[u16], d: &mut [u16]| {
-        let d = &mut d[2..2 + w];
-        let at = |k: usize| &s[k..k + w];
-        if R == 1 {
-            for (((o, &x), &y), &z) in d.iter_mut().zip(at(1)).zip(at(2)).zip(at(3)) {
-                *o = mean.of(u32::from(x) + u32::from(y) + u32::from(z));
-            }
-        } else {
-            let lanes = at(0).iter().zip(at(1)).zip(at(2)).zip(at(3)).zip(at(4));
-            for (o, ((((&v, &w), &x), &y), &z)) in d.iter_mut().zip(lanes) {
-                *o = mean.of(u32::from(v)
-                    + u32::from(w)
-                    + u32::from(x)
-                    + u32::from(y)
-                    + u32::from(z));
-            }
+        let d = &mut d[ROW_PAD..ROW_PAD + w];
+        for (o, near) in d.iter_mut().zip(s.array_windows::<{ 2 * ROW_PAD + 1 }>()) {
+            let near = &near[ROW_PAD - R..=ROW_PAD + R];
+            *o = mean.of(near.iter().map(|&v| u32::from(v)).sum());
         }
     };
     pass(a, b);
     pass(b, a);
     pass(a, b);
-    P::store(row, &b[2..2 + w]);
 }
 
 /// `a → b → a → b`, each a running box mean of radius `radius`, zero-padded, over `lanes`
@@ -502,9 +564,14 @@ fn box_lanes(src: &[u16], dst: &mut [u16], radius: usize, lanes: usize) {
 /// Multiplies every value by `weight`.
 pub fn scale(planes: &mut Planes, weight: f32) {
     for plane in [&mut planes.r, &mut planes.g, &mut planes.b] {
-        for v in plane.iter_mut() {
-            *v = (f32::from(*v) * weight).round().min(65_535.0) as u16;
-        }
+        scale_values(plane, weight);
+    }
+}
+
+/// `scale` for one run of values.
+pub(crate) fn scale_values(values: &mut [u16], weight: f32) {
+    for v in values {
+        *v = round_away(f32::from(*v) * weight).min(65_535.0) as u16;
     }
 }
 
@@ -531,7 +598,7 @@ pub fn add_upsampled(dst: &mut Planes, src: &Planes, factor: usize, weight: f32)
     assert!(factor == 2 || factor == 4);
     let w = (weight * 256.0).round() as u32;
     assert!(w <= 256);
-    if src.width == 0 || src.height == 0 {
+    if src.width == 0 || src.height == 0 || dst.width == 0 || dst.height == 0 {
         return;
     }
     if factor == 2 {
@@ -549,7 +616,19 @@ fn add_upsampled_by<const F: usize>(dst: &mut Planes, src: &Planes, w: u32) {
     let span = 2 * F as u32;
     let denom = span * span * 256;
     let (sw, dw) = (src.width, dst.width);
-    let half = F / 2;
+    // A row's first F/2 px and its last ones past the runs take taps of their own, the same in
+    // every row, so they are worked out once: at most F/2 + F ≤ 6 px (a tail px past the first
+    // F would lie past F·sw + F/2, where both taps are off the source and add 0).
+    let lead = (F / 2).min(dw);
+    let runs = (dw - lead).min(F * (sw - 1)) / F;
+    let tail = lead + F * runs;
+    let n = lead + (dw - tail).min(F);
+    const { assert!(F <= 4) };
+    let mut edges = [(0, [(0, 0); 2]); 6];
+    for (k, e) in edges[..n].iter_mut().enumerate() {
+        let x = if k < lead { k } else { tail + k - lead };
+        *e = (x, taps(x, F, sw));
+    }
     for y in 0..dst.height {
         let [(ra, wa), (rb, wb)] = taps(y, F, src.height);
         for (d, s) in [
@@ -563,38 +642,30 @@ fn add_upsampled_by<const F: usize>(dst: &mut Planes, src: &Planes, w: u32) {
                 *d = (u32::from(*d) + (acc * w + denom / 2) / denom).min(65_535) as u16;
             };
             let row = &mut d[y * dw..][..dw];
-            // Pixel x, from source columns i0 and i0 + 1 (either may be past an edge).
-            let edge = |x: usize| {
-                let [(i0, w0), (i1, w1)] = taps(x, F, sw);
-                column(i0) * w0 + column(i1) * w1
-            };
-            let (lead, rest) = row.split_at_mut(half.min(dw));
-            for (x, d) in lead.iter_mut().enumerate() {
-                add(d, edge(x));
-            }
-            let runs = rest.len().min(F * (sw - 1)) / F;
-            let (body, tail) = rest.split_at_mut(F * runs);
-            for (j, run) in body.as_chunks_mut::<F>().0.iter_mut().enumerate() {
+            let (body, _) = row[lead..tail].as_chunks_mut::<F>();
+            for (j, run) in body.iter_mut().enumerate() {
                 let (c0, c1) = (column(j), column(j + 1));
                 for (p, d) in run.iter_mut().enumerate() {
                     let p = p as u32;
                     add(d, c0 * (span - 2 * p - 1) + c1 * (2 * p + 1));
                 }
             }
-            for (k, d) in tail.iter_mut().enumerate() {
-                add(d, edge(half + F * runs + k));
+            // Edge px x, from source columns i0 and i0 + 1 (either may be past an edge).
+            for &(x, [(i0, w0), (i1, w1)]) in &edges[..n] {
+                add(&mut row[x], column(i0) * w0 + column(i1) * w1);
             }
         }
     }
 }
 
 /// What `add_upsampled(dst, src, factor, weight)` adds at destination pixel (`x`, `y`), per
-/// channel: the same taps, weights and rounding, one pixel at a time.
+/// channel: the same taps, weights and rounding, one pixel at a time (the tests' reference).
+#[cfg(test)]
 pub fn upsampled_at(src: &Planes, factor: usize, weight: f32, x: usize, y: usize) -> [u32; 3] {
     if src.width == 0 || src.height == 0 {
         return [0; 3];
     }
-    let w = (weight * 256.0).round() as u32;
+    let w = round_away(weight * 256.0) as u32;
     let span = 2 * factor as u32;
     let denom = span * span * 256;
     let sw = src.width;
@@ -612,6 +683,31 @@ mod tests {
     use crate::DeviceRect;
     use crate::etch::{Paint, Shape, fill, pt};
     use crate::spectrum::Rgb;
+
+    /// Ruling G4: a span blends into the light planes exactly as its px one by one, zero alphas
+    /// untouched, in every blend.
+    #[test]
+    fn spans_blend_like_single_px_in_the_planes() {
+        for blend in [Blend::Over, Blend::Add, Blend::Multiply] {
+            let colours = crate::etch::span_colours(150, 13);
+            let mut start = Planes::new(200, 3);
+            for (i, v) in start.r.iter_mut().enumerate() {
+                *v = (i as u32).wrapping_mul(0x9e37_79b9) as u16;
+            }
+            start.g.fill(7000);
+            start.b.fill(65_000);
+            let (mut one, mut span) = (start.clone(), start.clone());
+            for (i, &c) in colours.iter().enumerate() {
+                if c.a > 0.0 {
+                    one.blend(30 + i, 1, c, blend);
+                }
+            }
+            span.blend_span(30, 1, &colours, blend);
+            let planes = |p: &Planes| [p.r.clone(), p.g.clone(), p.b.clone()];
+            assert!(planes(&one) == planes(&span), "{blend:?}");
+            assert!(planes(&one) != planes(&start), "{blend:?} drew");
+        }
+    }
 
     fn impulse(size: usize, value: u16) -> Planes {
         let mut p = Planes::new(size, size);
@@ -687,6 +783,15 @@ mod tests {
                             "{w}×{h} /{factor} ({x}, {y})"
                         );
                     }
+                    // A row's segments, by rows (the dark glow windows' band), from every start
+                    // to the plane's right edge and one px short of it.
+                    for x0 in (factor == 2).then_some(0..dst.width).into_iter().flatten() {
+                        for x1 in [dst.width - 1, dst.width].into_iter().filter(|&x1| x1 > x0) {
+                            let mut row = vec![0; x1 - x0];
+                            downsampled_row(&src.g, (w, h), (x0, y), &mut row);
+                            assert!(row == dst.g[y * dst.width..][x0..x1], "{w}×{h} y {y} {x0}");
+                        }
+                    }
                 }
             }
         }
@@ -719,9 +824,21 @@ mod tests {
                 }
             }
         };
-        for (w, h) in [(33usize, 17usize), (16, 16), (61, 9), (5, 3), (130, 7)] {
+        // The last two: a destination wider than its source covers (tail px past its taps).
+        let sizes: [(usize, usize); 7] = [
+            (33, 17),
+            (16, 16),
+            (61, 9),
+            (5, 3),
+            (130, 7),
+            (40, 9),
+            (23, 30),
+        ];
+        for (k, (w, h)) in sizes.into_iter().enumerate() {
             for factor in [2, 4] {
-                let mut src = Planes::new(w.div_ceil(factor), h.div_ceil(factor));
+                let fit = (w.div_ceil(factor), h.div_ceil(factor));
+                let (sw, sh) = if k < 5 { fit } else { (3, 4) };
+                let mut src = Planes::new(sw, sh);
                 for (i, v) in src.b.iter_mut().enumerate() {
                     *v = ((i * 7919) % 65_536) as u16;
                 }
@@ -857,12 +974,12 @@ mod tests {
         q
     }
 
-    /// u16 light blurs its rows as they lie at radius 1 and 2, in blocks of lanes past that:
-    /// both as single lines do, up to the largest values (the means' bound).
+    /// u16 light blurs its rows as they lie up to radius 4, in blocks of lanes past that (both
+    /// sides of the cut): both as single lines do, up to the largest values (the means' bound).
     #[test]
     fn u16_planes_blur_like_single_lines() {
         for (w, h) in [(70, 40), (5, 3), (130, 77), (33, 200)] {
-            for r in 1..=4 {
+            for r in 1..=6 {
                 let lit: Vec<u16> = banded(w, h)
                     .iter()
                     .enumerate()
@@ -877,11 +994,11 @@ mod tests {
     }
 
     /// u8 planes blur as single lines of their values widened do (review T13b M2: not against
-    /// the u16 path, which shares `row_boxes` with them at radius 1 and 2).
+    /// the u16 path, which shares `row_boxes` with them up to radius 4).
     #[test]
     fn u8_planes_blur_like_single_lines() {
         for (w, h) in [(70, 40), (5, 3), (130, 77), (33, 200)] {
-            for r in 1..=4 {
+            for r in 1..=6 {
                 let mut p8 = banded(w, h);
                 let wide: Vec<u16> = p8.iter().map(|&v| u16::from(v)).collect();
                 let mut scratch = Vec::new();
@@ -893,6 +1010,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Ruling G7: a scratch left longer by a larger plane is kept as it is (not zeroed again to
+    /// the smaller length), and blurs exactly as a fresh one.
+    #[test]
+    fn a_longer_scratch_is_kept_and_blurs_alike() {
+        let mut scratch = Vec::new();
+        let mut large = impulse(400, 60_000);
+        blur(&mut large, 6.0, &mut scratch);
+        let left = scratch.len();
+        assert!(left > blur_scratch(50, 50));
+        let mut small = Planes::new(50, 50);
+        for (i, v) in small.g.iter_mut().enumerate() {
+            *v = ((i * 7919) % 5000) as u16;
+        }
+        let mut fresh = small.clone();
+        for sigma in [1.0, 6.0] {
+            blur(&mut small, sigma, &mut scratch);
+            blur(&mut fresh, sigma, &mut Vec::new());
+        }
+        assert_eq!(scratch.len(), left);
+        assert!(small.g == fresh.g);
     }
 
     /// Rows of a sparse plane far from its light are left out of the column pass, exactly.
@@ -977,5 +1116,22 @@ mod tests {
         p.reshape(4, 2);
         assert_eq!((p.width, p.height, p.r.len()), (4, 2, 8));
         assert_eq!(p.total(), [0; 3], "reshaping clears");
+    }
+
+    /// Ruling G13: a plane with no width or height is left alone (it panicked in
+    /// `chunks_exact_mut(0)`).
+    #[test]
+    fn zero_sized_planes_are_left_alone() {
+        let mut half = Planes::new(0, 4);
+        downsample(&Planes::new(0, 7), &mut half, 2);
+        let mut flat = Planes::new(2, 0);
+        downsample(&Planes::new(4, 0), &mut flat, 2);
+        let mut dst = Planes::new(5, 5);
+        add_upsampled(&mut dst, &Planes::new(0, 3), 2, 0.5);
+        add_upsampled(&mut Planes::new(0, 0), &Planes::new(2, 2), 2, 0.5);
+        let mut scratch = Vec::new();
+        blur_plane::<u16>(&mut [], 0, 9, 3.0, &mut scratch);
+        blur_plane::<u8>(&mut [], 9, 0, 3.0, &mut scratch);
+        assert_eq!(dst.total(), [0; 3]);
     }
 }

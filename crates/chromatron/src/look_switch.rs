@@ -27,7 +27,7 @@ pub struct ShapeQueue {
     pending: Option<Look>,
     /// The look the window was shaped for when the wait began.
     origin: Option<Look>,
-    /// View ▸ Exit Full Screen asked to leave; AppKit's exit has not finished yet.
+    /// An exit from fullscreen began; AppKit's exit has not finished yet.
     leaving: bool,
 }
 
@@ -47,13 +47,27 @@ impl ShapeQueue {
         }
     }
 
-    /// View ▸ Exit Full Screen began leaving: winit reports no fullscreen from now, but the
-    /// shape still waits for `exited`.
+    /// An exit from fullscreen began: AppKit's `NSWindowWillExitFullScreenNotification`, however
+    /// it left (the green button, the system shortcut, or a menu exit winit replayed; a menu exit
+    /// that begins at once comes through `exit_requested`). winit may report no fullscreen from
+    /// now, but the shape still waits for `exited`.
     pub fn leaving(&mut self) {
         self.leaving = true;
     }
 
-    /// View ▸ Exit Full Screen's exit is still running: winit reports no fullscreen, but AppKit
+    /// View ▸ Exit Full Screen was requested (called right after `set_fullscreen(None)`): a
+    /// leave begins only if the exit did. When the window is `still_fullscreen`, winit deferred
+    /// the request behind a running transition (ruling G12): if that entry fails, winit drops
+    /// the exit and nothing reaches the shell, so marking a leave here would disable Scale for
+    /// ever; if it succeeds, winit replays the exit, and `NSWindowWillExitFullScreenNotification`
+    /// marks the leave then.
+    pub fn exit_requested(&mut self, still_fullscreen: bool) {
+        if !still_fullscreen {
+            self.leaving = true;
+        }
+    }
+
+    /// An exit from fullscreen is still running: winit may report no fullscreen, but AppKit
     /// owns the window's frame until `exited`, so nothing may resize the window yet (classic's
     /// Scale included).
     pub fn is_leaving(&self) -> bool {
@@ -202,8 +216,8 @@ mod tests {
         assert_eq!(q.request(Classic, Modern, false), Some(Modern));
     }
 
-    /// Classic's Scale waits out the exit animation too: `is_leaving` holds from View ▸ Exit Full
-    /// Screen until the exit arrives, re-entered or not.
+    /// Classic's Scale waits out the exit animation too: `is_leaving` holds from the moment an
+    /// exit from fullscreen begins until it arrives, re-entered or not.
     #[test]
     fn shape_queue_is_leaving_until_the_exit_arrives() {
         let mut q = ShapeQueue::default();
@@ -218,6 +232,46 @@ mod tests {
             !q.is_leaving(),
             "back in fullscreen, which guards on its own"
         );
+    }
+
+    /// Ruling G12: Exit Full Screen chosen while an entry animates is deferred by winit (the
+    /// window still reports fullscreen), and dropped if that entry fails: no exit begins, so no
+    /// leave is marked, and Scale stays usable once the window is windowed.
+    #[test]
+    fn an_exit_deferred_behind_a_failed_entry_marks_no_leave() {
+        let mut q = ShapeQueue::default();
+        q.exit_requested(true);
+        // The entry fails: AppKit tells only winit's delegate; nothing reaches the shell.
+        assert!(
+            !q.is_leaving(),
+            "deferred: no exit began, so Scale is usable"
+        );
+    }
+
+    /// The exit winit replays after the entry succeeds begins with `windowWillExitFullScreen`
+    /// (observed), and its DidExit ends the leave as before; a look switched meanwhile waits for
+    /// it.
+    #[test]
+    fn a_replayed_exit_is_a_leave_until_it_ends() {
+        let mut q = ShapeQueue::default();
+        assert_eq!(q.request(Modern, Classic, true), None);
+        q.exit_requested(true);
+        assert!(!q.is_leaving());
+        q.leaving(); // NSWindowWillExitFullScreenNotification
+        assert!(q.is_leaving());
+        assert_eq!(q.exited(false), Some(Classic));
+        assert!(!q.is_leaving());
+    }
+
+    /// An exit that begins at once (winit reports no fullscreen right after the request) is a
+    /// leave from the request on, as before.
+    #[test]
+    fn an_exit_that_begins_is_a_leave_at_once() {
+        let mut q = ShapeQueue::default();
+        q.exit_requested(false);
+        assert!(q.is_leaving());
+        q.exited(false);
+        assert!(!q.is_leaving());
     }
 
     /// Switches that end on the look fullscreen began with leave the window where it was.

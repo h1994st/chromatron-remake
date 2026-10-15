@@ -246,6 +246,26 @@ fn line(out: &[u32], u: i32, x: i32, y: i32) -> [i32; 3] {
     lerp(at(out, 1280, x, y + 1), [0xf0, 0x21, 0x3a], k)
 }
 
+/// Ruling G11 (still review item 10): in light the grid lines end inside the board panel's
+/// rim; the page just outside the rim, on a line's column, is the bare page.
+#[test]
+fn light_grid_lines_end_inside_the_panel() {
+    let (lightbox, out) = bare(&[]);
+    let t = lightbox.tableau();
+    let panel = t.board_panel();
+    let x = t.board.left; // the first vertical grid line's column
+    for y in [panel.top - 2, panel.top - 1] {
+        let p = at(&out, 1280, x, y);
+        // The same row 2 px over, clear of the 1-px line (half a cell over, the panel's corner
+        // shadow already shades the page by 2 code values).
+        let q = at(&out, 1280, x + 2, y);
+        assert!(
+            (lum(p) - lum(q)).abs() <= 1,
+            "a stub at ({x}, {y}): {p:?} vs {q:?}"
+        );
+    }
+}
+
 /// Spec §7.3 Light: a beam is its mix colour on its line, a halo-tinted glow beside it, and
 /// nothing a cell away (no bloom leaks across the board).
 #[test]
@@ -272,6 +292,22 @@ fn a_light_beam_is_its_colour_with_a_soft_glow() {
         (0..3).all(|c| (a[c] - b[c]).abs() <= 2),
         "0.75u away: {a:?} vs {b:?}"
     );
+}
+
+/// Ruling G11 (still review item 8): the light glow is 0.12u wide, nearer comp B than 0.10u.
+/// A red beam's glow takes green off the board beside the line; summed from 2 px to 0.21u
+/// above it (u 48) that is 407 code values at 0.12u, 357 at 0.10u: the wider stroke's mass.
+#[test]
+fn a_light_beams_glow_is_twelve_hundredths_of_a_cell_wide() {
+    let (lightbox, out) = bare(&[(2, 7, Piece::Laser, 4, 2)]);
+    let (_, empty) = bare(&[]);
+    let u = lightbox.tableau().cell;
+    assert_eq!(u, 48, "the sums are measured at this cell");
+    let (x, y) = centre(&lightbox, 7, 7);
+    let tint: i32 = (2..=(0.21 * u as f32) as i32)
+        .map(|dy| at(&empty, 1280, x, y - dy)[1] - at(&out, 1280, x, y - dy)[1])
+        .sum();
+    assert!(tint >= 380, "the glow's tint beside the line: {tint}");
 }
 
 /// At an odd cell size a cell's centre is a px centre, so the 0.036u line covers the px on its
@@ -674,6 +710,53 @@ fn a_white_targets_burst_shows_on_the_light_board() {
     assert!(bluer.count() >= 12, "a blue-grey ring");
 }
 
+/// Ruling G11 (still review item 9, narrow): a beam that ends at a target's centre (the
+/// specimen's one-sided field: light entering from the south and going nowhere) leaves no haze
+/// in the disc off its line; its line still reaches the centre.
+#[test]
+fn a_beam_into_a_target_leaves_no_haze_in_its_disc() {
+    let target = board_index(7, 7);
+    let mut board = Board::default();
+    board.cells[target] = Cell {
+        piece: Piece::Pinwheel,
+        colour: 7,
+        dir: 0,
+    };
+    let mut field = BeamField::default();
+    field.inbound[target][0] = 4; // red, entering from the south, as `specimen::feed` makes it
+    let paint = |field: &BeamField| {
+        let easel = Easel::new(1280, 800, 1.0);
+        let mut lb = Lightbox::new(easel, Theme::Light, false);
+        let mut out = vec![0u32; 1280 * 800];
+        lb.paint_scene(
+            Scene::bare(&board, field, Game::C1),
+            SETTLED,
+            Output::Xrgb(&mut out),
+        );
+        (lb, out)
+    };
+    let (lightbox, out) = paint(&field);
+    let (_, unlit) = paint(&BeamField::default());
+    let u = lightbox.tableau().cell as f32;
+    let (x, y) = centre(&lightbox, 7, 7);
+    // 0.2u either side of the centre, across the beam: in the disc, off the line's own glow.
+    for dx in [-(0.2 * u) as i32, (0.2 * u) as i32] {
+        let (lit_px, bare_px) = (
+            at(&out, 1280, x + dx, y - 2),
+            at(&unlit, 1280, x + dx, y - 2),
+        );
+        assert!(
+            redness(lit_px) <= redness(bare_px) + 4,
+            "haze at dx {dx}: {lit_px:?} vs {bare_px:?}"
+        );
+    }
+    let below = y + (0.2 * u) as i32;
+    assert!(
+        redness(at(&out, 1280, x, below)) > redness(at(&unlit, 1280, x, below)) + 40,
+        "the line still reaches the centre"
+    );
+}
+
 /// A fresh lightbox's cold paint of `st` in `theme` (with the sheet open when `sheet`).
 fn fresh(theme: Theme, easel: Easel, st: &lumen::GameState, sheet: bool) -> Vec<u32> {
     let mut lightbox = Lightbox::new(easel, theme, false);
@@ -839,7 +922,14 @@ fn a_theme_change_keeps_the_held_piece_and_the_sheet() {
 }
 
 /// Ruling L2: a dark → light → dark round trip gives back what it took: the buffers end as a
-/// fresh dark lightbox's (within 1/64), and a switch to light holds what a fresh light one does.
+/// fresh dark lightbox's, and a switch to light holds what a fresh light one does. The web
+/// reserves exactly (within 1/64); natively a buffer grown from one it held takes `make_room`'s
+/// growth slack (ruling G13, pinned exactly by `make_room_reserves_exactly_then_grows_with_slack`),
+/// at most 1/8 of each buffer, so the bound against a fresh lightbox is 1/8 of the total. Which
+/// of the ~30 buffers regrow from held room depends on the darkroom's sizing order, so the
+/// exact total is not restated here; instead a second round trip must hold exactly what the
+/// first did (nothing grows per flip), and a buffer the other theme alone uses (the dark light
+/// tile, the light wash: about a third of the total each) is caught by the bound.
 #[test]
 fn a_theme_round_trip_gives_back_its_buffers() {
     for easel in [
@@ -851,15 +941,20 @@ fn a_theme_round_trip_gives_back_its_buffers() {
         lightbox.set_theme(Theme::Light);
         let switched = lightbox.buffer_bytes();
         assert!(
-            switched <= light + light / 64,
+            switched <= light + light / 8,
             "{easel:?}: light after dark {switched} vs {light}"
         );
         lightbox.set_theme(Theme::Dark);
         let back = lightbox.buffer_bytes();
         assert!(
-            back <= dark + dark / 64,
+            back <= dark + dark / 8,
             "{easel:?}: dark again {back} vs {dark}"
         );
+        // Flipped again, it holds exactly what it did: the slack is taken once.
+        lightbox.set_theme(Theme::Light);
+        assert_eq!(lightbox.buffer_bytes(), switched, "{easel:?}: light, twice");
+        lightbox.set_theme(Theme::Dark);
+        assert_eq!(lightbox.buffer_bytes(), back, "{easel:?}: dark, twice");
     }
 }
 
