@@ -136,6 +136,9 @@ web: _require-originals
     # Every page URL carries a hash of all shipped files (wasm, glue, main.js, touch_layout.js, analytics.js, style.css, index.html template), so a browser never mixes files of two deploys.
     build="$(cd "$out" && cat chromatron_web_bg.wasm chromatron_web.js main.js touch_layout.js analytics.js style.css index.html | shasum -a 256 | cut -c 1-12)"
     perl -pi -e "s/__BUILD__/$build/g" "$out/index.html" "$out/main.js"
+    # The sitemap's lastmod is the date of the commit the page was built from.
+    lastmod="$(git -C "{{justfile_directory()}}" log -1 --format=%cs)"
+    perl -pi -e "s/__LASTMOD__/$lastmod/g" "$out/sitemap.xml"
     for file in "$out"/*; do
         printf '%8d bytes %8d gzip  %s\n' "$(wc -c < "$file")" "$(gzip -9 -c "$file" | wc -c)" "$(basename "$file")"
     done
