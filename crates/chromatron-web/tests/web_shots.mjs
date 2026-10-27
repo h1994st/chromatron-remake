@@ -711,6 +711,12 @@ async function reducedLive(name) {
 function checkModern(facts, touchLayout, light = false) {
   assert.equal(facts.look, "modern");
   assert.equal(facts.game, null, "the classic frame is hidden");
+  // The toolbar's Star (the source on GitHub): shown whole, inside the toolbar and the viewport.
+  const star = facts.toolRects.find((r) => r.id === "star");
+  const bar = facts.toolbarBox;
+  assert.ok(star, `the Star in the toolbar: ${facts.tools}`);
+  const whole = star.left >= Math.max(0, bar.left) - 0.5 && star.right <= Math.min(facts.clientWidth, bar.right) + 0.5 && star.top >= Math.max(0, bar.top) - 0.5 && star.bottom <= Math.min(facts.height, bar.bottom) + 0.5;
+  assert.ok(whole, `the Star ${JSON.stringify(star)} is cut off (toolbar ${JSON.stringify(bar)}, viewport ${facts.clientWidth} × ${facts.height})`);
   const { width, height } = facts.lightbox;
   const scale = glue.render_scale(width, height, facts.ratio, touchLayout);
   assert.deepEqual(facts.lightboxBacking, [Math.round(width * scale), Math.round(height * scale)], "backing = CSS size × render scale");
@@ -846,7 +852,7 @@ const CHECKS = {
     assert.equal(facts.layout, "desktop");
     assert.equal(facts.look, "classic");
     assert.equal(facts.toolbarRows, 1, "one toolbar row");
-    assert.deepEqual(facts.tools, ["game-select", "previous", "next", "actions", "wheel", "fullscreen", "help-open"]);
+    assert.deepEqual(facts.tools, ["game-select", "previous", "next", "actions", "wheel", "fullscreen", "help-open", "star"]);
     const { left, top, width, height } = facts.game;
     assert.deepEqual({ left, width, height }, { left: DESKTOP_GAME.left, width: DESKTOP_GAME.width, height: DESKTOP_GAME.height }, "the desktop game where it was");
     // `top` follows the toolbar's font metrics, so it may differ a little between machines.
@@ -859,7 +865,7 @@ const CHECKS = {
     assert.ok(facts.overflowX <= 0 && facts.overflowY <= 0, `the page does not scroll: ${facts.overflowX}, ${facts.overflowY}`);
     assert.equal(facts.toolbarColumns, 1, "the toolbar is one column down the side");
     assert.ok(facts.toolbarBottom <= facts.height, "the toolbar fits the height");
-    assert.deepEqual(facts.tools, ["game-select", "previous", "next", "actions", "clockwise", "fullscreen", "help-open"]);
+    assert.deepEqual(facts.tools, ["game-select", "previous", "next", "actions", "clockwise", "fullscreen", "help-open", "star"]);
     assert.equal(facts.board, null, "no portrait parts");
     assert.ok(facts.game.left >= facts.header.right, "the frame beside the toolbar");
     const fit = Math.min((facts.clientWidth - facts.header.width) / 640, facts.height / 480);

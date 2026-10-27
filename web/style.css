@@ -123,6 +123,22 @@ button[aria-pressed="true"] {
   border-color: var(--ink);
 }
 button[hidden] { display: none; }
+/* The toolbar's Star: a link to the source on GitHub, in the accent so it stands out. */
+#star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--accent);
+  font-weight: 600;
+  text-decoration: none;
+}
+#star:hover { background: var(--accent); color: var(--page); }
+#star:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+#star .glyph { fill: currentColor; stroke: none; }
 /* Quick taps on buttons never double-tap zoom; panning and pinch-zoom stay the browser's. */
 header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: manipulation; }
 
@@ -232,6 +248,11 @@ header, .toolbar, .menu, .sheet-dialog, .sheet-dialog .sheet { touch-action: man
 .touch .toolbar .spacer { flex: 1 1 0; width: auto; }
 .touch .toolbar button, .touch .toolbar select { height: 36px; }
 .touch .toolbar button { position: relative; min-width: 32px; padding: 0 7px; }
+.touch .toolbar #star { position: relative; height: 36px; min-width: 32px; padding: 0 7px; }
+/* Phones show the GitHub mark alone; classic's crowded portrait toolbar has no room for it, and its
+   credits (with the source link) follow the texts there. */
+.touch #star .twinkle { display: none; }
+[data-look="classic"][data-layout="portrait"] #star { display: none; }
 .touch .toolbar select { padding: 0 22px 0 8px; background-position: right 6px center; }
 #game-short { display: none; }
 /* Modern touch layouts: a compact "C2 ▾" over the select (its options keep their names), which
