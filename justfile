@@ -162,11 +162,11 @@ web-canvas-fnv theme="dark": web
 web-shots dir="dist/web-shots": web
     node "{{justfile_directory()}}/crates/chromatron-web/tests/web_shots.mjs" "{{justfile_directory()}}/dist/web" "{{join(justfile_directory(), dir)}}"
 
-# Render the brand stills (og.png, apple-touch-icon.png, assets/promo/*: banner, portrait cover and three 1280 × 720 video thumbnails for A/B testing) with the trailer renderer; with <dir> (under dist/ or outside the repo), into it for review; local only
+# Render the brand stills (og.png, apple-touch-icon.png, assets/promo/*: banner, portrait covers (Chinese, and English with a QR code to the page) and three 1280 × 720 video thumbnails for A/B testing) with the trailer renderer; with <dir> (under dist/ or outside the repo), into it for review; local only
 social-images dir="":
     node "{{justfile_directory()}}/trailer/reel.mjs" stills {{ if dir == "" { "" } else { quote(join(invocation_directory(), dir)) } }}
 
-# Test the trailer's beam tracer, playback, timeline and lettering
+# Test the trailer's beam tracer, playback, timeline, lettering and QR encoder
 trailer-test:
     node --test "{{justfile_directory()}}/trailer/"*.test.mjs
 

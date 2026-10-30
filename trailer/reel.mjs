@@ -4,7 +4,8 @@
 //
 //   node reel.mjs stills [<dir> [<name>…]]
 //     The brand stills: web/og.png, web/apple-touch-icon.png, assets/promo/banner.jpg,
-//     assets/promo/cover-portrait.jpg and the three video thumbnails
+//     assets/promo/cover-portrait.jpg, its English twin assets/promo/cover-portrait-en.jpg (whose
+//     QR code is read back) and the three video thumbnails
 //     assets/promo/thumbnail-{a,b,c}.jpg (`just social-images`), or with <dir> (under dist/ or
 //     outside the repo) the named stills, or all, into <dir> for review. The PNGs are squeezed with
 //     png_squeeze.mjs; every output's size and byte cap is checked.
@@ -51,6 +52,7 @@ const STILL_OUTPUTS = {
   icon: { path: "web/apple-touch-icon.png", bits: 8, maxBytes: 50_000 },
   banner: { path: "assets/promo/banner.jpg", quality: 88, maxBytes: 700_000 },
   "cover-portrait": { path: "assets/promo/cover-portrait.jpg", quality: 88, maxBytes: 700_000 },
+  "cover-portrait-en": { path: "assets/promo/cover-portrait-en.jpg", quality: 90, maxBytes: 1_500_000 },
   // Video thumbnails may be up to 2 MB; ours stay well under.
   "thumbnail-a": { path: "assets/promo/thumbnail-a.jpg", quality: 88, maxBytes: 400_000 },
   "thumbnail-b": { path: "assets/promo/thumbnail-b.jpg", quality: 88, maxBytes: 400_000 },
@@ -267,6 +269,23 @@ async function stills(dir, names) {
     const format = quality ? { format: "jpeg", quality } : { format: "png" };
     const { data } = await page.send("Page.captureScreenshot", { ...format, clip: { x: 0, y: 0, width, height, scale: 1 } });
     writeFileSync(file, Buffer.from(data, "base64"));
+    // A still with a QR code: Chrome's barcode reader reads the saved image back to its address,
+    // at full size and at a third (as a post in a phone's feed shows it).
+    if (STILLS[name].scan) {
+      const type = quality ? "image/jpeg" : "image/png";
+      for (const scale of [1, 1 / 3]) {
+        const read = await page.evaluate(`(async () => {
+          if (typeof BarcodeDetector === "undefined") return "no BarcodeDetector in this Chrome";
+          const image = await createImageBitmap(await (await fetch("data:${type};base64,${data}")).blob(), {
+            resizeWidth: Math.round(${width * scale}),
+            resizeHeight: Math.round(${height * scale}),
+            resizeQuality: "high",
+          });
+          return (await new BarcodeDetector({ formats: ["qr_code"] }).detect(image)).map((code) => code.rawValue);
+        })()`);
+        assert.deepEqual(read, [STILLS[name].scan], `${name}'s QR code reads back as its address at ${scale === 1 ? "full size" : "a third"}`);
+      }
+    }
     if (bits) execFileSync(process.execPath, [join(repo, "crates/chromatron-web/tests/png_squeeze.mjs"), file, String(bits)], { stdio: "inherit" });
     const bytes = readFileSync(file);
     assert.deepEqual(imageSize(bytes), [width, height], `${name} is ${width} × ${height}`);

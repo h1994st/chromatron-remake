@@ -1,10 +1,11 @@
 // The brand stills, drawn with the trailer's own pieces (trailer/draw.mjs) and lettering
-// (trailer/lettering.mjs): the social preview, the touch icon, the banner, the portrait cover and three
+// (trailer/lettering.mjs): the social preview, the touch icon, the banner, the two portrait covers and three
 // video thumbnails. `just social-images` renders them through stage.html.
 
 import { BLUE, BOARDS, GREEN, RED, WHITE, trace } from "./board.mjs";
 import { boardLayout, drawAppTile, drawBackground, drawBoard, drawBurst, drawCaption, drawFlare, drawMark, drawMarkCore, drawMotes, lightFor, prng, rgba } from "./draw.mjs";
 import { drawBeamPath, drawLettering, drawSparkle, drawWordmark, drawZhLine, layoutLine } from "./lettering.mjs";
+import { encodeQr } from "./qr.mjs";
 
 const hero = trace(BOARDS.hero);
 
@@ -42,6 +43,63 @@ function crossing(lit, cx, cy, arm, t, fromX) {
   plus.lineTo(cx, cy + arm);
   drawBeamPath(lit, plus, t);
   drawSparkle(lit, cx, cy, arm * 1.5, 1);
+}
+
+// The covers' headline, set as one block: CHROMATRON / + AI / REVERSE ENGINEER, each line as wide
+// as the first (`blockWidth`), with the same beam width throughout; `k` scales the gaps, the + AI
+// line and the beam from the 1080-wide cover's. Returns the bottom of the block.
+function coverHeadline(lit, cx, top, blockWidth, k = 1) {
+  const t = 4.2 * k;
+  const gap = 64 * k;
+  const capFor = (text, track) => blockWidth / layoutLine(text, { track }).width;
+  const capTop = capFor("CHROMATRON", 0.36);
+  drawLettering(lit, "CHROMATRON", cx, top, { cap: capTop, track: 0.36, align: "center", stroke: t, target: 3 });
+  const capMid = 170 * k;
+  const midTop = top + capTop + gap;
+  const mid = drawLettering(lit, "+AI", cx, midTop, { cap: capMid, track: 0.42, align: "center", stroke: t * 1.25, skip: [0] });
+  const plus = mid.glyphs[0];
+  crossing(lit, plus.left + plus.width / 2, midTop + capMid / 2, plus.width / 2, t * 1.25, 0);
+  const capLow = capFor("REVERSE ENGINEER", 0.3);
+  const lowTop = midTop + capMid + gap;
+  drawLettering(lit, "REVERSE ENGINEER", cx, lowTop, { cap: capLow, track: 0.3, align: "center", stroke: t });
+  return lowTop + capLow;
+}
+
+// The page's address, which the English cover's QR code opens.
+const PAGE_URL = "https://shengtuo.me/chromatron-remake/";
+
+// A QR code of `text` on a lit panel: dark modules `module` px square (whole pixels, so a scanner
+// sees clean edges) on a pale glass tile with the four-module quiet zone, its finders' eyes in the
+// lasers' red, green and blue, ringed by a white beam. The beam and the panel's glow go into
+// `lit`; call drawQrPanel after the light's composite with the same box for the crisp code.
+function qrBox(text, x, y, module) {
+  const code = encodeQr(text, { level: "Q" });
+  const side = (code.size + 8) * module;
+  return { code, x, y, side, module };
+}
+function drawQrLight(lit, { x, y, side }, t) {
+  drawGlow(lit, x + side / 2, y + side / 2, side * 0.95, [150, 175, 255], 0.35);
+  const ring = new Path2D();
+  const pad = t * 4;
+  ring.roundRect(x - pad, y - pad, side + 2 * pad, side + 2 * pad, side * 0.09 + pad);
+  drawBeamPath(lit, ring, t);
+}
+function drawQrPanel(ctx, { code, x, y, side, module }) {
+  ctx.save();
+  ctx.fillStyle = "#eef2ff";
+  ctx.beginPath();
+  ctx.roundRect(x, y, side, side, side * 0.09);
+  ctx.fill();
+  const eyes = [[3, 3, "#d8102a"], [code.size - 4, 3, "#008f48"], [3, code.size - 4, "#1d4cf0"]];
+  for (let my = 0; my < code.size; my += 1) {
+    for (let mx = 0; mx < code.size; mx += 1) {
+      if (!code.dark(mx, my)) continue;
+      const eye = eyes.find(([ex, ey]) => Math.abs(mx - ex) <= 1 && Math.abs(my - ey) <= 1);
+      ctx.fillStyle = eye ? eye[2] : "#0b0e19";
+      ctx.fillRect(x + (mx + 4) * module, y + (my + 4) * module, module, module);
+    }
+  }
+  ctx.restore();
 }
 
 // The thumbnails' boards, invented for them. A's: red from the top left and green from the top
@@ -174,26 +232,53 @@ export const STILLS = {
       drawMotes(lit, { width, height, size: 2, count: 50, seed: 4, alpha: 0.5 });
       drawBoard(ctx, lit, layout, hero);
       heroAccents(lit, layout);
-      // The headline, set as one block: CHROMATRON / + AI / REVERSE ENGINEER, each line as wide as
-      // the first, with the same beam width throughout.
-      const blockWidth = 900;
+      const headlineBottom = coverHeadline(lit, width / 2, 150, 900);
       const cx = width / 2;
-      const t = 4.2;
-      const capFor = (text, track) => blockWidth / layoutLine(text, { track }).width;
-      const capTop = capFor("CHROMATRON", 0.36);
-      drawLettering(lit, "CHROMATRON", cx, 150, { cap: capTop, track: 0.36, align: "center", stroke: t, target: 3 });
-      const capMid = 170;
-      const mid = drawLettering(lit, "+AI", cx, 150 + capTop + 64, { cap: capMid, track: 0.42, align: "center", stroke: t * 1.25, skip: [0] });
-      const plus = mid.glyphs[0];
-      crossing(lit, plus.left + plus.width / 2, 150 + capTop + 64 + capMid / 2, plus.width / 2, t * 1.25, 0);
-      const capLow = capFor("REVERSE ENGINEER", 0.3);
-      const lowTop = 150 + capTop + 64 + capMid + 64;
-      drawLettering(lit, "REVERSE ENGINEER", cx, lowTop, { cap: capLow, track: 0.3, align: "center", stroke: t });
-      const zhTop = lowTop + capLow + 86;
+      const zhTop = headlineBottom + 86;
       drawZhLine(ctx, lit, "用 AI 逆向工程，重制 20 多年前的经典激光解谜", cx, zhTop, { size: 40, weight: 600, align: "center", color: "#ffffff", glow: 0.18 });
       drawZhLine(ctx, lit, "Chromatron 1–4 · 浏览器免费玩", cx, zhTop + 58, { size: 30, weight: 500, align: "center", color: "rgba(200, 212, 245, 0.92)", glow: 0 });
       light.composite(ctx, { glowRadius: 9, bloomRadius: 70, bloom: 0.75 });
       drawCaption(ctx, "shengtuo.me/chromatron-remake", cx, height - 46, { size: 22, weight: 500, align: "center", color: "rgba(160, 174, 214, 0.9)", letterSpacing: 0.6 });
+    },
+  },
+  // The English cover, 1440 × 2400: the headline, the board, and a QR code to the page with the
+  // address beside it. `scan` is what reel.mjs reads back from the rendered code.
+  "cover-portrait-en": {
+    width: 1440,
+    height: 2400,
+    scan: PAGE_URL,
+    draw(ctx, { width, height }) {
+      const light = lightFor(width, height);
+      const cx = width / 2;
+      const cell = 116;
+      const layout = boardLayout(BOARDS.hero, { cx, cy: 1500, cell });
+      drawBackground(ctx, { width, height, cx, cy: 560, grain: 0.05 });
+      const lit = light.begin();
+      drawMotes(lit, { width, height, size: 2.4, count: 80, seed: 4, alpha: 0.5 });
+      drawBoard(ctx, lit, layout, hero);
+      heroAccents(lit, layout);
+      const headlineBottom = coverHeadline(lit, cx, 230, 1200, 4 / 3);
+      const subTop = headlineBottom + 116;
+      drawZhLine(ctx, lit, "Remaking a 20-year-old laser puzzle classic", cx, subTop, { size: 52, weight: 600, spacing: 0.01, align: "center", color: "#ffffff", glow: 0.18 });
+      drawZhLine(ctx, lit, "Chromatron 1–4 · Free in your browser", cx, subTop + 76, { size: 40, weight: 500, spacing: 0.01, align: "center", color: "rgba(200, 212, 245, 0.92)", glow: 0 });
+      // The footer: SCAN TO PLAY and the address on the left, a beam arrow into the code on the right.
+      const qr = qrBox(PAGE_URL, width - 120 - 41 * 8, 2010, 8);
+      drawQrLight(lit, qr, 3.2);
+      const left = 120;
+      const scan = drawLettering(lit, "SCAN TO PLAY", left, qr.y + 80, { cap: 50, track: 0.3, stroke: 4.6 });
+      const arrowY = qr.y + 80 + 25;
+      const arrowFrom = scan.left + scan.width + 40;
+      const arrowTo = qr.x - 36;
+      const arrow = new Path2D();
+      arrow.moveTo(arrowFrom, arrowY);
+      arrow.lineTo(arrowTo, arrowY);
+      arrow.moveTo(arrowTo - 20, arrowY - 20);
+      arrow.lineTo(arrowTo, arrowY);
+      arrow.lineTo(arrowTo - 20, arrowY + 20);
+      drawBeamPath(lit, arrow, 4.6);
+      light.composite(ctx, { glowRadius: 12, bloomRadius: 90, bloom: 0.75 });
+      drawQrPanel(ctx, qr);
+      drawCaption(ctx, "shengtuo.me/chromatron-remake", left, qr.y + 222, { size: 34, weight: 500, color: "rgba(200, 212, 245, 0.92)", letterSpacing: 0.6 });
     },
   },
   // Three 1280 × 720 video thumbnails, each testing its own idea. The player covers the
